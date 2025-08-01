@@ -464,7 +464,8 @@ fn main() {
         args.num_blocks, input_layout
     );
 
-    use std::hash::{DefaultHasher, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
     let mut s = DefaultHasher::new();
     script.blocks_data.hash(&mut s);
     println!("Script hash: {}", s.finish());

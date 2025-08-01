@@ -57,7 +57,7 @@ struct SimulatorArgs {
 }
 
 fn hash_of<T: Hash>(x: &T) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     x.hash(&mut hasher);
     hasher.finish()
 }
