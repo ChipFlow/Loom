@@ -121,12 +121,13 @@ cargo run -r --features cuda --bin cuda_test -- --help
 ```
 
 ## Map the Design with GEM
-GEM depends on an external hypergraph partitioner binary. We recommend hmetis 2.0. You can download its binary and put it in a proper location.
+~~GEM depends on an external hypergraph partitioner binary. We recommend hmetis 2.0. You can download its binary and put it in a proper location.~~
+GEM no longer depends on an external hypergraph partitioner. We now compile and link to [mt-kahypar-sc](https://github.com/gzz2000/mt-kahypar-sc) automatically. This is experimental and if you encounter partitioning issue you can raise it to us.
 
-Then, run the following command to start the Boolean processor mapping.
+Run the following command to start the Boolean processor mapping.
 
 ``` sh
-cargo run -r --features cuda --bin cut_map_interactive -- path/to/hmetis/Linux-x86_64/hmetis2.0pre1 path/to/gatelevel.gv path/to/result.gemparts
+cargo run -r --features cuda --bin cut_map_interactive -- path/to/gatelevel.gv path/to/result.gemparts
 ```
 
 The mapped result will be stored in a binary file `result.gemparts`.
