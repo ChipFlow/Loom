@@ -175,6 +175,10 @@ impl RCHyperGraph {
     /// Make an edge list.
     ///
     /// (weight, node indices)
+    pub fn num_vertices(&self) -> usize {
+        self.num_vertices
+    }
+
     pub fn to_edges(&self) -> Vec<(usize, Vec<usize>)> {
         self.clusters.par_iter().enumerate().map(|(i, (s, v))| {
             let mut rng = ChaCha20Rng::seed_from_u64(8026727 + i as u64);
@@ -209,6 +213,12 @@ impl RCHyperGraph {
 
     /// Run mt-kahypar to partition this hypergraph.
     pub fn partition(&self, num_parts: usize) -> Vec<usize> {
+        // Handle the special case where num_parts = 1
+        // mt-kahypar requires k >= 2, so we handle k=1 manually
+        if num_parts == 1 {
+            return vec![0; self.num_vertices];
+        }
+        
         let ctx = mt_kahypar::Context::builder()
             .preset(mt_kahypar::Preset::Deterministic)
             .k(num_parts as i32)

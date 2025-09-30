@@ -18,6 +18,17 @@ use rayon::prelude::*;
 /// Call builtin partitioner.
 fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
     clilog::debug!("invoking partitioner (#parts {})", num_parts);
+	// Handle the special case where num_parts = 1
+    // mt-kahypar requires k >= 2, so we handle k=1 manually
+    if num_parts == 1 {
+        let mut parts = vec![vec![]; 1];
+        // Put all vertices in the single partition
+        for i in 0..hg.num_vertices() {
+            parts[0].push(i);
+        }
+        return parts;
+    }
+	
     let parts_ids = hg.partition(num_parts);
     let mut parts = vec![vec![]; num_parts];
     for (i, part_id) in parts_ids.into_iter().enumerate() {
