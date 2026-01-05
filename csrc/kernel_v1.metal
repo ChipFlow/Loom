@@ -5,8 +5,12 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Type aliases to match CUDA code
+#include "event_buffer.h"
+
+// Type aliases to match CUDA code (also defined in event_buffer.h for Metal)
+#ifndef u32
 typedef uint32_t u32;
+#endif
 typedef uint64_t usize;
 
 // Vectorized read structures for efficient memory access
@@ -341,6 +345,7 @@ kernel void simulate_v1_stage(
     device u32* sram_data [[buffer(2)]],
     device u32* states_noninteractive [[buffer(3)]],
     constant SimParams& params [[buffer(4)]],
+    device struct EventBuffer* event_buffer [[buffer(5)]],
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
@@ -372,4 +377,12 @@ kernel void simulate_v1_stage(
         shared_writeouts,
         shared_state
     );
+
+    // TODO: Process simulation control nodes from the script
+    // When the script includes SimControl data, event writing will happen here.
+    // For now, the event_buffer parameter is available but unused.
+    // Example usage when implemented:
+    //   if (simcontrol_condition_met && tid == 0) {
+    //       write_sim_control_event(event_buffer, EVENT_TYPE_STOP, (u32)cycle_i);
+    //   }
 }

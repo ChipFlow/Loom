@@ -9,6 +9,7 @@ use gem::aig::{DriverType, AIG};
 use gem::staging::build_staged_aigs;
 use gem::pe::Partition;
 use gem::flatten::FlattenedScriptV1;
+use gem::event_buffer::{EventBuffer, SimControl, AssertConfig, SimStats, process_events};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use sverilogparse::SVerilogRange;
 use compact_str::CompactString;
@@ -404,6 +405,10 @@ impl MetalSimulator {
         }
     }
 
+    /// Simulate the design for the given number of cycles.
+    ///
+    /// Returns the simulation control status and the number of cycles actually completed.
+    /// If $stop or $finish is encountered, simulation may terminate early.
     fn simulate(
         &self,
         num_blocks: usize,
@@ -414,7 +419,9 @@ impl MetalSimulator {
         num_cycles: usize,
         state_size: usize,
         states: &mut UVec<u32>,
-    ) {
+        assert_config: &AssertConfig,
+        stats: &mut SimStats,
+    ) -> (SimControl, usize) {
         let device = Device::Metal(0);
 
         // Get Metal buffer pointers
@@ -450,9 +457,27 @@ impl MetalSimulator {
             None,
         );
 
+        // Allocate event buffer in shared memory
+        // The buffer is reset at the start of each cycle
+        let event_buffer = Box::new(EventBuffer::new());
+        let event_buffer_ptr = Box::into_raw(event_buffer);
+        let event_buffer_metal = self.device.new_buffer_with_bytes_no_copy(
+            event_buffer_ptr as *const _,
+            std::mem::size_of::<EventBuffer>() as u64,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        );
+
+        let mut cycles_completed = 0;
+        let mut final_control = SimControl::Continue;
+
         // Dispatch kernel for each cycle and stage
         // This replaces CUDA's cooperative groups grid sync
         for cycle_i in 0..num_cycles {
+            // Reset event buffer at start of each cycle
+            // SAFETY: event_buffer_ptr is valid and we own it
+            unsafe { (*event_buffer_ptr).reset(); }
+
             for stage_i in 0..num_major_stages {
                 let params = SimParams {
                     num_blocks: num_blocks as u64,
@@ -478,6 +503,7 @@ impl MetalSimulator {
                 encoder.set_buffer(2, Some(&sram_data_buffer), 0);
                 encoder.set_buffer(3, Some(&states_buffer), 0);
                 encoder.set_buffer(4, Some(&params_buffer), 0);
+                encoder.set_buffer(5, Some(&event_buffer_metal), 0);
 
                 // 256 threads per threadgroup (matching CUDA block size)
                 let threads_per_threadgroup = MTLSize::new(256, 1, 1);
@@ -489,7 +515,42 @@ impl MetalSimulator {
                 command_buffer.commit();
                 command_buffer.wait_until_completed();
             }
+
+            // Process events after all stages of this cycle complete
+            // SAFETY: event_buffer_ptr is valid and GPU has finished
+            let control = unsafe {
+                process_events(
+                    &*event_buffer_ptr,
+                    assert_config,
+                    stats,
+                    |msg_id, cycle, _data| {
+                        // TODO: Implement message formatting when $display is supported
+                        clilog::info!("[cycle {}] $display message id={}", cycle, msg_id);
+                    },
+                )
+            };
+
+            cycles_completed = cycle_i + 1;
+
+            match control {
+                SimControl::Continue => {}
+                SimControl::Pause => {
+                    final_control = SimControl::Pause;
+                    // For now, treat pause as continue (user would need to resume)
+                    // In a real implementation, we might want to return here
+                }
+                SimControl::Terminate => {
+                    final_control = SimControl::Terminate;
+                    break;
+                }
+            }
         }
+
+        // Clean up event buffer
+        // SAFETY: We created this box and are done with it
+        unsafe { drop(Box::from_raw(event_buffer_ptr)); }
+
+        (final_control, cycles_completed)
     }
 }
 
@@ -724,9 +785,13 @@ fn main() {
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage = UVec::new_zeroed(script.sram_storage_size as usize, device);
 
+    // Set up event handling configuration
+    let assert_config = AssertConfig::default();
+    let mut sim_stats = SimStats::default();
+
     // Run Metal simulation
     let timer_sim = clilog::stimer!("simulation");
-    simulator.simulate(
+    let (sim_control, cycles_completed) = simulator.simulate(
         args.num_blocks,
         script.num_major_stages,
         &script.blocks_start,
@@ -735,8 +800,27 @@ fn main() {
         offsets_timestamps.len(),
         script.reg_io_state_size as usize,
         &mut input_states_uvec,
+        &assert_config,
+        &mut sim_stats,
     );
     clilog::finish!(timer_sim);
+
+    // Report simulation result
+    match sim_control {
+        SimControl::Continue => {
+            clilog::info!("Simulation completed {} cycles", cycles_completed);
+        }
+        SimControl::Pause => {
+            clilog::info!("Simulation paused at cycle {} ($stop encountered)", cycles_completed);
+        }
+        SimControl::Terminate => {
+            clilog::info!("Simulation terminated at cycle {} ($finish encountered)", cycles_completed);
+        }
+    }
+
+    if sim_stats.assertion_failures > 0 {
+        clilog::warn!("Total assertion failures: {}", sim_stats.assertion_failures);
+    }
 
     // Sanity check against CPU
     if args.check_with_cpu {

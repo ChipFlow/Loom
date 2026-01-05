@@ -273,6 +273,11 @@ impl FlatteningPart {
                             dff.en_iv << 1 | (dff.d_iv & 1),
                             None);
                 },
+                EndpointGroup::SimControl(ctrl) => {
+                    // SimControl condition is always active (no clock enable)
+                    comb_outputs_activations.entry(ctrl.condition_iv >> 1)
+                        .or_default().insert(2 | (ctrl.condition_iv & 1), None);
+                },
             }
         }
         self.num_duplicate_writeouts = ((
@@ -455,6 +460,16 @@ impl FlatteningPart {
                     ) as u32;
                     output_map.insert(dff.d_iv, pos);
                     input_map.insert(dff.q, pos);
+                },
+                EndpointGroup::SimControl(ctrl) => {
+                    // SimControl condition is like a primary output - always active
+                    if ctrl.condition_iv == 0 {
+                        continue
+                    }
+                    let pos = self.state_start * 32 + self.get_or_place_output_with_activation(
+                        ctrl.condition_iv, 1
+                    ) as u32;
+                    output_map.insert(ctrl.condition_iv, pos);
                 },
             }
         }

@@ -19,6 +19,28 @@ pub struct DFF {
     pub q: usize,
 }
 
+/// Simulation control type for $stop and $finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimControlType {
+    /// $stop - pause simulation
+    Stop,
+    /// $finish - terminate simulation
+    Finish,
+}
+
+/// A simulation control node for $stop/$finish system tasks.
+/// These are triggered when their condition input is true.
+#[derive(Debug, Default, Clone)]
+pub struct SimControlNode {
+    /// The control type (Stop or Finish)
+    pub control_type: Option<SimControlType>,
+    /// The condition input pin with invert (last bit)
+    /// When this evaluates to 1, the control action fires.
+    pub condition_iv: usize,
+    /// Optional message ID for display purposes
+    pub message_id: u32,
+}
+
 /// A ram block resembling the interface of `$__RAMGEM_SYNC_`.
 #[derive(Debug, Default, Clone)]
 pub struct RAMBlock {
@@ -37,12 +59,13 @@ pub struct RAMBlock {
 }
 
 /// A type of endpoint group. can be a primary output-related pin,
-/// a D flip-flop, or a ram block.
+/// a D flip-flop, a ram block, or a simulation control node.
 ///
 /// A group means a task for the partition to complete.
 /// For primary output pins, the task is just to store.
 /// For DFFs, the task is to store only when the clock is enable.
 /// For RAMBlocks, the task is to simulate a sync SRAM.
+/// For SimControl, the task is to check the condition and fire an event.
 /// A StagedIOPin indicates a temporary live pin between different
 /// major stages but reside in the same simulated cycle.
 #[derive(Debug, Copy, Clone)]
@@ -50,6 +73,7 @@ pub enum EndpointGroup<'i> {
     PrimaryOutput(usize),
     DFF(&'i DFF),
     RAMBlock(&'i RAMBlock),
+    SimControl(&'i SimControlNode),
     StagedIOPin(usize),
 }
 
@@ -77,6 +101,9 @@ impl EndpointGroup<'_> {
                     f(ram.port_w_wr_en_iv[i] >> 1);
                     f(ram.port_w_wr_data_iv[i] >> 1);
                 }
+            },
+            Self::SimControl(ctrl) => {
+                f(ctrl.condition_iv >> 1);
             },
             Self::StagedIOPin(idx) => f(idx),
         }
@@ -140,6 +167,8 @@ pub struct AIG {
     pub dffs: IndexMap<usize, DFF>,
     /// The SRAMs, indexed by cell id
     pub srams: IndexMap<usize, RAMBlock>,
+    /// The simulation control nodes ($stop/$finish), indexed by cell id
+    pub simcontrols: IndexMap<usize, SimControlNode>,
     /// The fanout CSR start array.
     pub fanouts_start: Vec<usize>,
     /// The fanout CSR array.
@@ -638,18 +667,25 @@ impl AIG {
     }
 
     pub fn num_endpoint_groups(&self) -> usize {
-        self.primary_outputs.len() + self.dffs.len() + self.srams.len()
+        self.primary_outputs.len() + self.dffs.len() + self.srams.len() + self.simcontrols.len()
     }
 
     pub fn get_endpoint_group(&self, endpt_id: usize) -> EndpointGroup {
-        if endpt_id < self.primary_outputs.len() {
+        let po_len = self.primary_outputs.len();
+        let dff_len = self.dffs.len();
+        let sram_len = self.srams.len();
+
+        if endpt_id < po_len {
             EndpointGroup::PrimaryOutput(*self.primary_outputs.get_index(endpt_id).unwrap())
         }
-        else if endpt_id < self.primary_outputs.len() + self.dffs.len() {
-            EndpointGroup::DFF(&self.dffs[endpt_id - self.primary_outputs.len()])
+        else if endpt_id < po_len + dff_len {
+            EndpointGroup::DFF(&self.dffs[endpt_id - po_len])
+        }
+        else if endpt_id < po_len + dff_len + sram_len {
+            EndpointGroup::RAMBlock(&self.srams[endpt_id - po_len - dff_len])
         }
         else {
-            EndpointGroup::RAMBlock(&self.srams[endpt_id - self.primary_outputs.len() - self.dffs.len()])
+            EndpointGroup::SimControl(&self.simcontrols[endpt_id - po_len - dff_len - sram_len])
         }
     }
 }

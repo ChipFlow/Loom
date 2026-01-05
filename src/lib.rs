@@ -11,3 +11,5 @@ pub mod repcut;
 pub mod pe;
 
 pub mod flatten;
+
+pub mod event_buffer;

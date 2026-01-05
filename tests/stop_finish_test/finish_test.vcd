@@ -1,0 +1,75 @@
+$date
+	Mon Jan  5 15:35:51 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module finish_test_tb $end
+$var wire 1 ! done $end
+$var wire 4 " count [3:0] $end
+$var reg 1 # clk $end
+$var reg 1 $ rst $end
+$scope module dut $end
+$var wire 1 # clk $end
+$var wire 1 $ rst $end
+$var reg 4 % count [3:0] $end
+$var reg 1 ! done $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+b0 %
+1$
+0#
+b0 "
+0!
+$end
+#5000
+1#
+#10000
+0#
+#15000
+1#
+#20000
+0#
+0$
+#25000
+b1 "
+b1 %
+1#
+#30000
+0#
+#35000
+b10 "
+b10 %
+1#
+#40000
+0#
+#45000
+b11 "
+b11 %
+1#
+#50000
+0#
+#55000
+b100 "
+b100 %
+1#
+#60000
+0#
+#65000
+b101 "
+b101 %
+1#
+#70000
+0#
+#75000
+1!
+1#
