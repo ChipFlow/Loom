@@ -766,6 +766,7 @@ fn main() {
                             continue
                         }
                         if let Some((pe, ne)) = aig.clock_pin2aigpins.get(&pin).copied() {
+                            // This is a clock pin - handle edge detection
                             if pe != usize::MAX && old_value == 0 {
                                 last_vcd_time_active = true;
                                 let p = *script.input_map.get(&pe).unwrap();
@@ -776,8 +777,12 @@ fn main() {
                                 let p = *script.input_map.get(&ne).unwrap();
                                 state[p as usize >> 5] |= 1 << (p & 31);
                             }
+                            // Delay clock signal changes for proper edge detection
+                            delayed_bit_changes.insert(pos);
+                        } else {
+                            // Non-clock input: apply immediately so simulation sees current values
+                            state[(pos >> 5) as usize] ^= 1u32 << (pos & 31);
                         }
-                        delayed_bit_changes.insert(pos);
                     }
                 }
             }

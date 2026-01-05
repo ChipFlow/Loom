@@ -1,0 +1,14 @@
+$timescale 1 ps $end
+$scope module gem_top_module $end
+$var wire 1 ! q $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+#0
+0!
+#10000
+#40000
+1!
+#70000
+#100000
+0!
