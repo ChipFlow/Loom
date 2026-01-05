@@ -53,3 +53,10 @@ required-features = ["cuda"]
 [[bin]]
 name = "metal_test"
 required-features = ["metal"]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "event_buffer"
+harness = false
