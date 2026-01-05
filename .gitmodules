@@ -1,3 +1,6 @@
 [submodule "eda-infra-rs"]
 	path = eda-infra-rs
 	url = https://github.com/gzz2000/eda-infra-rs.git
+[submodule "benchmarks/dataset"]
+	path = benchmarks/dataset
+	url = https://github.com/ChipFlow/GEM-dataset.git
