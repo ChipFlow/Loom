@@ -5,11 +5,11 @@
 
 use std::path::PathBuf;
 use gem::aigpdk::{AIGPDKLeafPins, AIGPDK_SRAM_SIZE};
-use gem::aig::{DriverType, AIG};
+use gem::aig::{DriverType, AIG, SimControlType};
 use gem::staging::build_staged_aigs;
 use gem::pe::Partition;
 use gem::flatten::FlattenedScriptV1;
-use gem::event_buffer::{EventBuffer, SimControl, AssertConfig, SimStats, process_events};
+use gem::event_buffer::{EventBuffer, EventType, SimControl, AssertConfig, SimStats, process_events, MAX_EVENTS};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use sverilogparse::SVerilogRange;
 use compact_str::CompactString;
@@ -421,6 +421,7 @@ impl MetalSimulator {
         states: &mut UVec<u32>,
         assert_config: &AssertConfig,
         stats: &mut SimStats,
+        assertion_positions: &[(usize, u32, u32, Option<SimControlType>)],
     ) -> (SimControl, usize) {
         let device = Device::Metal(0);
 
@@ -514,6 +515,56 @@ impl MetalSimulator {
 
                 command_buffer.commit();
                 command_buffer.wait_until_completed();
+            }
+
+            // Check assertions after GPU finishes
+            // The assertion conditions are stored in the state buffer
+            // SAFETY: states_ptr points to valid shared memory, GPU has finished
+            if !assertion_positions.is_empty() {
+                let states_slice = unsafe {
+                    std::slice::from_raw_parts(states_ptr, states.len())
+                };
+
+                // The output state for cycle_i is at offset (cycle_i + 1) * state_size
+                let cycle_output_offset = (cycle_i + 1) * state_size;
+
+                for &(cell_id, pos, message_id, control_type) in assertion_positions {
+                    // pos is the bit position in the state buffer
+                    let word_idx = (pos >> 5) as usize;
+                    let bit_idx = pos & 31;
+
+                    let abs_word_idx = cycle_output_offset + word_idx;
+                    if abs_word_idx < states_slice.len() {
+                        // The condition_iv was computed as: fire = clk_enable && EN && !A
+                        // So when the bit is 1, the assertion should fire (fail)
+                        let condition = (states_slice[abs_word_idx] >> bit_idx) & 1;
+
+
+                        if condition == 1 {
+                            // Write event to buffer
+                            let event_type = match control_type {
+                                None => EventType::AssertFail,
+                                Some(SimControlType::Stop) => EventType::Stop,
+                                Some(SimControlType::Finish) => EventType::Finish,
+                            };
+
+                            unsafe {
+                                let count = (*event_buffer_ptr).count.fetch_add(1, std::sync::atomic::Ordering::AcqRel) as usize;
+                                if count < MAX_EVENTS {
+                                    let event = &mut (*event_buffer_ptr).events[count];
+                                    event.event_type = event_type as u32;
+                                    event.message_id = message_id;
+                                    event.cycle = cycle_i as u32;
+                                }
+                            }
+
+                            clilog::debug!(
+                                "[cycle {}] Assertion condition fired: cell={}, pos={}, type={:?}",
+                                cycle_i, cell_id, pos, control_type
+                            );
+                        }
+                    }
+                }
             }
 
             // Process events after all stages of this cycle complete
@@ -802,6 +853,7 @@ fn main() {
         &mut input_states_uvec,
         &assert_config,
         &mut sim_stats,
+        &script.assertion_positions,
     );
     clilog::finish!(timer_sim);
 

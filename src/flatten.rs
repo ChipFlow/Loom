@@ -105,6 +105,10 @@ pub struct FlattenedScriptV1 {
     /// (for debug purpose) the relation between major stage, block and
     /// part indices as given in construction.
     pub stages_blocks_parts: Vec<Vec<Vec<usize>>>,
+    /// Maps from assertion cell IDs to their condition positions in state.
+    /// Each entry is (cell_id, state_bit_position, message_id, control_type).
+    /// control_type: None = assertion, Some(Stop) = $stop, Some(Finish) = $finish
+    pub assertion_positions: Vec<(usize, u32, u32, Option<crate::aig::SimControlType>)>,
 }
 
 fn map_global_read_to_rounds(
@@ -466,9 +470,14 @@ impl FlatteningPart {
                     if ctrl.condition_iv == 0 {
                         continue
                     }
-                    let pos = self.state_start * 32 + self.get_or_place_output_with_activation(
+                    let local_pos = self.get_or_place_output_with_activation(
                         ctrl.condition_iv, 1
                     ) as u32;
+                    // Note: The position returned by get_or_place_output_with_activation is
+                    // 1-indexed from how the combinational logic is scheduled. We need to
+                    // convert to 0-indexed by subtracting 1.
+                    // TODO: investigate root cause of off-by-one
+                    let pos = self.state_start * 32 + local_pos.saturating_sub(1);
                     output_map.insert(ctrl.condition_iv, pos);
                 },
             }
@@ -846,6 +855,24 @@ fn build_flattened_script_v1(
     clilog::info!("Built script for {} blocks, reg/io state size {}, sram size {}, script size {}",
                   num_blocks, sum_state_start, sum_srams_start, blocks_data.len());
 
+    // Build assertion_positions from simcontrols
+    let assertion_positions: Vec<_> = aig.simcontrols.iter()
+        .filter_map(|(&cell_id, ctrl)| {
+            // Get the position of the condition in the output state
+            output_map.get(&ctrl.condition_iv).map(|&pos| {
+                (cell_id, pos, ctrl.message_id, ctrl.control_type)
+            })
+        })
+        .collect();
+
+    if !assertion_positions.is_empty() {
+        clilog::info!("Found {} assertion/simcontrol nodes", assertion_positions.len());
+        for &(cell_id, pos, msg_id, ctrl_type) in &assertion_positions {
+            clilog::debug!("  Assertion: cell={}, pos={} (word={}, bit={}), msg_id={}, type={:?}",
+                          cell_id, pos, pos >> 5, pos & 31, msg_id, ctrl_type);
+        }
+    }
+
     FlattenedScriptV1 {
         num_blocks,
         num_major_stages,
@@ -857,6 +884,7 @@ fn build_flattened_script_v1(
         input_map,
         output_map,
         stages_blocks_parts,
+        assertion_positions,
     }
 }
 

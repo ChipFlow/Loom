@@ -421,6 +421,19 @@ impl AIG {
             }
             // do not define pin2aigpin_iv[pinid] which is CKLNQD/Q and unused in logic.
         }
+        else if celltype == "GEM_ASSERT" || celltype == "GEM_DISPLAY" {
+            // These are side-effect only cells with no outputs
+            // Visit all input pins to build their AIG representations
+            for input_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                if netlistdb.pindirect[input_pinid] == Direction::I {
+                    self.dfs_netlistdb_build_aig(
+                        netlistdb, topo_vis, topo_instack,
+                        input_pinid
+                    );
+                }
+            }
+            // No output pin to define
+        }
         else {
             let mut prev_a = usize::MAX;
             let mut prev_b = usize::MAX;
@@ -593,6 +606,47 @@ impl AIG {
                     sram.port_w_wr_en_iv[i] = or_en;
                 }
                 *aig.srams.get_mut(&cellid).unwrap() = sram;
+            }
+            else if netlistdb.celltypes[cellid].as_str() == "GEM_ASSERT" {
+                // Parse GEM_ASSERT cells for assertion checking
+                // GEM_ASSERT has: CLK (trigger), EN (enable), A (condition)
+                // Assertion fails when EN is high and A is low
+                let mut ap_en_iv = 1;  // Default: always enabled
+                let mut ap_a_iv = 1;   // Default: always passing
+                let mut ap_clken_iv = 1; // Default: always triggered
+
+                for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                    let pin_iv = aig.pin2aigpin_iv[pinid];
+                    match netlistdb.pinnames[pinid].1.as_str() {
+                        "EN" => ap_en_iv = pin_iv,
+                        "A" => ap_a_iv = pin_iv,
+                        "CLK" => {
+                            // Try to trace clock, but if it's tied to 1, use constant
+                            if let Ok(clken) = aig.trace_clock_pin(
+                                netlistdb, pinid, false, false
+                            ) {
+                                ap_clken_iv = clken;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // The condition for firing an assertion event:
+                // fire = clk_enable && EN && !A
+                // We store the "fire" condition (inverted A ANDed with EN and clock)
+                let fire_condition = aig.add_and_gate(ap_en_iv, ap_a_iv ^ 1);
+                let fire_condition = aig.add_and_gate(fire_condition, ap_clken_iv);
+
+                let simcontrol = aig.simcontrols.entry(cellid).or_default();
+                simcontrol.condition_iv = fire_condition;
+                simcontrol.control_type = None; // Assertion, not $stop/$finish
+                simcontrol.message_id = cellid as u32; // Use cell ID as message ID for now
+
+                clilog::debug!(
+                    "Found GEM_ASSERT cell {} (condition_iv={}, en_iv={}, a_iv={}, clken_iv={})",
+                    cellid, fire_condition, ap_en_iv, ap_a_iv, ap_clken_iv
+                );
             }
         }
 
