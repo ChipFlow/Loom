@@ -766,6 +766,77 @@ fn main() {
         }
     }
 
+    // Process assertion ($assert) conditions
+    if !script.assertion_positions.is_empty() {
+        clilog::info!("Processing {} assertion nodes", script.assertion_positions.len());
+
+        // Configure assertion behavior (default: log and continue)
+        let assert_config = AssertConfig::default();
+        let mut sim_stats = SimStats::default();
+
+        // Check assertion conditions for each cycle
+        let states_slice = &input_states[(script.reg_io_state_size as usize)..];
+        for cycle_i in 0..offsets_timestamps.len() {
+            let cycle_offset = cycle_i * script.reg_io_state_size as usize;
+
+            for &(cell_id, pos, message_id, control_type) in &script.assertion_positions {
+                let word_idx = (pos >> 5) as usize;
+                let bit_idx = pos & 31;
+                let abs_word_idx = cycle_offset + word_idx;
+
+                if abs_word_idx < states_slice.len() {
+                    // The condition_iv was computed as: fire = clk_enable && EN && !A
+                    // So when the bit is 1, the assertion should fire (fail)
+                    let condition = (states_slice[abs_word_idx] >> bit_idx) & 1;
+
+                    if condition == 1 {
+                        let event_type = match control_type {
+                            None => EventType::AssertFail,
+                            Some(SimControlType::Stop) => EventType::Stop,
+                            Some(SimControlType::Finish) => EventType::Finish,
+                        };
+
+                        clilog::warn!(
+                            "[cycle {}] Assertion condition fired: cell={}, pos={}, type={:?}",
+                            cycle_i, cell_id, pos, control_type
+                        );
+
+                        // Handle assertion failure based on config
+                        match (event_type, assert_config.on_failure) {
+                            (EventType::AssertFail, gem::event_buffer::AssertAction::Log) => {
+                                sim_stats.assertion_failures += 1;
+                            }
+                            (EventType::AssertFail, gem::event_buffer::AssertAction::Pause) => {
+                                clilog::error!("Assertion failed - pausing simulation");
+                                sim_stats.assertion_failures += 1;
+                                break;
+                            }
+                            (EventType::AssertFail, gem::event_buffer::AssertAction::Terminate) => {
+                                clilog::error!("Assertion failed - terminating simulation");
+                                sim_stats.assertion_failures += 1;
+                                std::process::exit(1);
+                            }
+                            (EventType::Stop, _) => {
+                                clilog::info!("$stop encountered at cycle {}", cycle_i);
+                                sim_stats.stop_count += 1;
+                                break;
+                            }
+                            (EventType::Finish, _) => {
+                                clilog::info!("$finish encountered at cycle {}", cycle_i);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if sim_stats.assertion_failures > 0 {
+            clilog::warn!("Simulation completed with {} assertion failures", sim_stats.assertion_failures);
+        }
+    }
+
     // sanity check.
     if args.check_with_cpu {
         let mut sram_storage_sanity = vec![0; script.sram_storage_size as usize * AIGPDK_SRAM_SIZE];
