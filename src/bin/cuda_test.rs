@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::path::PathBuf;
 use gem::aigpdk::{AIGPDKLeafPins, AIGPDK_SRAM_SIZE};
-use gem::aig::{DriverType, AIG};
+use gem::aig::{DriverType, AIG, SimControlType};
 use gem::staging::build_staged_aigs;
 use gem::pe::Partition;
 use gem::flatten::FlattenedScriptV1;
+use gem::event_buffer::{EventBuffer, EventType, SimControl, AssertConfig, SimStats, process_events, MAX_EVENTS};
+use gem::display::{extract_display_info_from_json, format_display_message};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use sverilogparse::SVerilogRange;
 use compact_str::CompactString;
@@ -59,6 +61,10 @@ struct SimulatorArgs {
     /// Limit the number of simulated cycles to no more than this.
     #[clap(long)]
     max_cycles: Option<usize>,
+    /// JSON file path for extracting display format strings.
+    /// If not provided, defaults to netlist_verilog path with .json extension.
+    #[clap(long)]
+    json_path: Option<PathBuf>,
 }
 
 /// Hierarchical name representation in VCD.
@@ -692,6 +698,73 @@ fn main() {
     );
     device.synchronize();
     clilog::finish!(timer_sim);
+
+    // Process display ($display/$write) outputs
+    if !script.display_positions.is_empty() {
+        clilog::info!("Processing {} display nodes", script.display_positions.len());
+
+        // Extract format strings from JSON if available
+        let json_path = args.json_path.clone().unwrap_or_else(|| {
+            let mut p = args.netlist_verilog.clone();
+            p.set_extension("json");
+            p
+        });
+
+        let display_info = if json_path.exists() {
+            match extract_display_info_from_json(&json_path) {
+                Ok(info) => info,
+                Err(e) => {
+                    clilog::warn!("Failed to extract display info from JSON: {}", e);
+                    Default::default()
+                }
+            }
+        } else {
+            clilog::warn!("JSON file not found at {:?}, display format strings may be incomplete", json_path);
+            Default::default()
+        };
+
+        // Check display conditions for each cycle
+        let states_slice = &input_states[(script.reg_io_state_size as usize)..];
+        for cycle_i in 0..offsets_timestamps.len() {
+            let cycle_offset = cycle_i * script.reg_io_state_size as usize;
+
+            for (cell_id, enable_pos, format, arg_positions, arg_widths) in &script.display_positions {
+                let word_idx = (*enable_pos >> 5) as usize;
+                let bit_idx = *enable_pos & 31;
+                let abs_word_idx = cycle_offset + word_idx;
+
+                if abs_word_idx < states_slice.len() {
+                    let enable = (states_slice[abs_word_idx] >> bit_idx) & 1;
+
+                    if enable == 1 {
+                        // Extract argument values from state buffer
+                        // For now, treat each arg_position as a multi-bit value
+                        // TODO: properly extract multi-bit arguments based on arg_widths
+                        let mut args: Vec<u64> = Vec::new();
+                        for &arg_pos in arg_positions {
+                            let arg_word_idx = (arg_pos >> 5) as usize;
+                            let arg_bit_idx = arg_pos & 31;
+                            let abs_arg_idx = cycle_offset + arg_word_idx;
+                            if abs_arg_idx < states_slice.len() {
+                                // Extract single bit for now
+                                let val = ((states_slice[abs_arg_idx] >> arg_bit_idx) & 1) as u64;
+                                args.push(val);
+                            }
+                        }
+
+                        // Format and print the display message
+                        let message = format_display_message(format, &args, arg_widths);
+                        print!("{}", message);
+
+                        clilog::debug!(
+                            "[cycle {}] Display fired: cell={}, format='{}'",
+                            cycle_i, cell_id, format
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // sanity check.
     if args.check_with_cpu {
