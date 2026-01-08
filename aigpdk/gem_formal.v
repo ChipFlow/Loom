@@ -29,7 +29,8 @@ module _techmap_check (TRG, EN, A, ARGS);
     generate
         if (FLAVOR == "assert" || FLAVOR == "assume") begin
             // For triggered assertions, use the trigger as clock
-            if (TRG_ENABLE && TRG_WIDTH == 1) begin
+            // TRG[0] is the clock signal (if TRG_WIDTH >= 1)
+            if (TRG_ENABLE && TRG_WIDTH >= 1) begin
                 GEM_ASSERT _TECHMAP_REPLACE_ (
                     .CLK(TRG[0]),
                     .EN(EN),
@@ -106,14 +107,17 @@ module _techmap_print (TRG, EN, ARGS);
     wire [31:0] msg_id;
 
     generate
-        if (TRG_ENABLE && TRG_WIDTH == 1) begin
+        if (TRG_ENABLE && TRG_WIDTH >= 1) begin
             if (ARGS_WIDTH >= 32) begin
                 assign msg_id = ARGS[31:0];
-            end else begin
+            end else if (ARGS_WIDTH > 0) begin
                 assign msg_id = {{(32-ARGS_WIDTH){1'b0}}, ARGS};
+            end else begin
+                assign msg_id = 32'h0;
             end
 
             // Create GEM_DISPLAY with FORMAT preserved as attribute
+            // For multi-bit triggers (e.g., {rst, clk}), use TRG[0] as the clock
             (* gem_format = FORMAT *)
             (* gem_args_width = ARGS_WIDTH *)
             GEM_DISPLAY _TECHMAP_REPLACE_ (

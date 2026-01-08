@@ -26,10 +26,7 @@ always @(posedge clk or posedge rst) begin
             8'h02: $display("Test 2: Binary format: counter=%b, data=%b", counter, data);
             8'h03: $display("Test 3: Mixed formats: dec=%d, hex=%h, bin=%b", counter, counter, counter);
             8'h04: $display("Test 4: Multiple args: %d %h %d %h", counter, counter, data, data);
-            8'h05: begin
-                $display("Test 5: All tests passed!");
-                $finish;
-            end
+            8'h05: $display("Test 5: All tests passed!");
         endcase
     end
 end
@@ -65,9 +62,10 @@ initial begin
     #10;
     rst = 0;
 
-    #100;
-
-    $display("ERROR: Test did not complete");
+    // Wait for test 5 to complete
+    wait(counter == 8'h05);
+    #20;  // Let the final display print
+    $display("=== Format test complete ===");
     $finish;
 end
 

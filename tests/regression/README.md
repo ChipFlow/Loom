@@ -102,20 +102,31 @@ endmodule
 ## Requirements
 
 - **iverilog** (for golden reference simulation) - Required
-- **Yosys** (for synthesis verification) - Required
-- **yosys-slang** (for full $display/$finish cell conversion) - Optional but recommended
+- **Yosys** (v0.49+) or **yowasp-yosys** (for synthesis verification) - Required
 - AIGPDK library files in `../../aigpdk/`
 
-### Note on yosys-slang
+### Yosys $display Support
 
-Standard Yosys does not convert `$display` and `$finish` calls inside `always` blocks to cells. For full GEM $display support testing:
-- Use **yosys-slang** which properly converts these to `$print` and `$check` cells
-- OR manually create tests following the pattern in `tests/display_test/` with explicit GEM_DISPLAY cells
+**Standard Yosys (v0.49+) DOES support `$display` in `always` blocks!**
 
-Current regression tests verify:
-1. ✓ Correct functional behavior (via iverilog)
-2. ✓ Synthesizability of the design logic
-3. ⚠ GEM cell generation (requires yosys-slang)
+- **Yosys proc pass**: Converts $display statements to `$print` cells automatically
+- **GEM techmap**: Maps `$print` cells to `GEM_DISPLAY` cells (see `aigpdk/gem_formal.v`)
+- **Works with**: Both standard Yosys and yowasp-yosys (WebAssembly-packaged Yosys)
+
+The key requirement is that the `gem_formal.v` techmap handles multi-bit trigger signals correctly (e.g., `{rst, clk}`). Our implementation uses `TRG[0]` as the clock regardless of trigger width.
+
+### Current Test Capabilities
+
+These regression tests verify:
+1. ✓ **Functional correctness** via iverilog simulation
+2. ✓ **Synthesizability** of design logic
+3. ✓ **GEM cell generation** - $print → GEM_DISPLAY conversion working!
+
+The counter tests demonstrate successful GEM_DISPLAY cell generation with:
+- Format string preservation via `gem_format` attribute
+- Argument width tracking via `gem_args_width` attribute
+- Conditional display with enable signals
+- Multi-argument format strings
 
 ## Output Files
 

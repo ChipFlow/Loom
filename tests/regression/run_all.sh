@@ -44,15 +44,15 @@ for test_file in $TEST_FILES; do
 
     if ./run_test.sh "$test_file"; then
         echo -e "${GREEN}✓ $test_name PASSED${NC}"
-        ((PASS_COUNT++))
+        PASS_COUNT=$((PASS_COUNT + 1))
     else
         exit_code=$?
         if [ $exit_code -eq 2 ]; then
             echo -e "${YELLOW}⚠ $test_name STATUS UNKNOWN${NC}"
-            ((SKIP_COUNT++))
+            SKIP_COUNT=$((SKIP_COUNT + 1))
         else
             echo -e "${RED}✗ $test_name FAILED${NC}"
-            ((FAIL_COUNT++))
+            FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
     fi
     echo ""

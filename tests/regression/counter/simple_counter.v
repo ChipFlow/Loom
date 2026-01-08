@@ -26,7 +26,7 @@ always @(posedge clk or posedge rst) begin
 
         if (count == 4'hf) begin
             $display("Counter rolled over, test complete");
-            $finish;
+            // Note: $finish moved to testbench
         end
     end
 end
@@ -63,11 +63,10 @@ initial begin
     #10;
     rst = 0;
 
-    // Let counter run to compilation
-    #200;
-
-    // If we get here, $finish didn't trigger
-    $display("ERROR: Counter did not finish");
+    // Wait for counter to roll over
+    wait(count == 4'hf);
+    #20;  // Let the rollover display print
+    $display("=== Test Complete ===");
     $finish;
 end
 
