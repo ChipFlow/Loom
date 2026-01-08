@@ -21,16 +21,16 @@ module \display_simple
   attribute \src "display_simple.v:23.13-23.28"
   wire $eq$display_simple.v:23$3_Y
   attribute \src "display_simple.v:28.13-28.92"
-  wire $display$0x6000023f30d8:28$6_EN
+  wire $display$0x60000016fc78:28$6_EN
   attribute \src "display_simple.v:24.13-24.66"
-  wire $display$0x6000023f30d8:24$4_EN
+  wire $display$0x60000016fc78:24$4_EN
   attribute \src "display_simple.v:19.20-19.34"
   wire width 4 $add$display_simple.v:19$2_Y
   attribute \src "display_simple.v:15.9-15.12|display_simple.v:15.5-30.8"
   attribute \full_case 1
   cell $mux $procmux$21
     parameter \WIDTH 1
-    connect \Y $display$0x6000023f30d8:24$4_EN
+    connect \Y $display$0x60000016fc78:24$4_EN
     connect \S \rst
     connect \B 1'0
     connect \A $procmux$18_Y
@@ -47,7 +47,7 @@ module \display_simple
   attribute \full_case 1
   cell $mux $procmux$16
     parameter \WIDTH 1
-    connect \Y $display$0x6000023f30d8:28$6_EN
+    connect \Y $display$0x60000016fc78:28$6_EN
     connect \S \rst
     connect \B 1'0
     connect \A $procmux$13_Y
@@ -83,7 +83,7 @@ module \display_simple
     connect \A \counter
   end
   attribute \src "display_simple.v:28.13-28.92"
-  cell $print $display$0x6000023f30d8:28$6
+  cell $print $display$0x60000016fc78:28$6
     parameter \TRG_WIDTH 1
     parameter \TRG_POLARITY 1'1
     parameter \TRG_ENABLE 1
@@ -91,11 +91,11 @@ module \display_simple
     parameter \FORMAT "Counter reached 10, data_in = {8:>02h-u}, data_out = {8:>02h-u}\n"
     parameter \ARGS_WIDTH 16
     connect \TRG \clk
-    connect \EN $display$0x6000023f30d8:28$6_EN
+    connect \EN $display$0x60000016fc78:28$6_EN
     connect \ARGS { \data_out \data_in }
   end
   attribute \src "display_simple.v:24.13-24.66"
-  cell $print $display$0x6000023f30d8:24$4
+  cell $print $display$0x60000016fc78:24$4
     parameter \TRG_WIDTH 1
     parameter \TRG_POLARITY 1'1
     parameter \TRG_ENABLE 1
@@ -103,7 +103,7 @@ module \display_simple
     parameter \FORMAT "Counter reached 5, data_in = {8:>02h-u}\n"
     parameter \ARGS_WIDTH 8
     connect \TRG \clk
-    connect \EN $display$0x6000023f30d8:24$4_EN
+    connect \EN $display$0x60000016fc78:24$4_EN
     connect \ARGS \data_in
   end
   attribute \src "display_simple.v:14.1-31.4"

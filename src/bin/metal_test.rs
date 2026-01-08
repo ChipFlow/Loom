@@ -10,6 +10,7 @@ use gem::staging::build_staged_aigs;
 use gem::pe::Partition;
 use gem::flatten::FlattenedScriptV1;
 use gem::event_buffer::{EventBuffer, EventType, SimControl, AssertConfig, SimStats, process_events, MAX_EVENTS};
+use gem::display::{extract_display_info_from_json, format_display_message};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use sverilogparse::SVerilogRange;
 use compact_str::CompactString;
@@ -53,6 +54,10 @@ struct SimulatorArgs {
     /// Limit the number of simulated cycles to no more than this.
     #[clap(long)]
     max_cycles: Option<usize>,
+    /// JSON file path for extracting display format strings.
+    /// If not provided, defaults to netlist_verilog path with .json extension.
+    #[clap(long)]
+    json_path: Option<PathBuf>,
 }
 
 /// Hierarchical name representation in VCD.
@@ -422,6 +427,7 @@ impl MetalSimulator {
         assert_config: &AssertConfig,
         stats: &mut SimStats,
         assertion_positions: &[(usize, u32, u32, Option<SimControlType>)],
+        display_positions: &[(usize, u32, String, Vec<u32>, Vec<u32>)],
     ) -> (SimControl, usize) {
         let device = Device::Metal(0);
 
@@ -567,6 +573,61 @@ impl MetalSimulator {
                 }
             }
 
+            // Check display conditions after GPU finishes
+            if !display_positions.is_empty() {
+                let states_slice = unsafe {
+                    std::slice::from_raw_parts(states_ptr, states.len())
+                };
+
+                let cycle_output_offset = (cycle_i + 1) * state_size;
+
+                for (cell_id, enable_pos, format, arg_positions, arg_widths) in display_positions {
+                    let word_idx = (*enable_pos >> 5) as usize;
+                    let bit_idx = *enable_pos & 31;
+
+                    let abs_word_idx = cycle_output_offset + word_idx;
+                    if abs_word_idx < states_slice.len() {
+                        let enable = (states_slice[abs_word_idx] >> bit_idx) & 1;
+
+                        if enable == 1 {
+                            // Extract argument values from state buffer
+                            let mut args: Vec<u64> = Vec::new();
+                            for &arg_pos in arg_positions {
+                                let arg_word_idx = (arg_pos >> 5) as usize;
+                                let arg_bit_idx = arg_pos & 31;
+                                let abs_arg_idx = cycle_output_offset + arg_word_idx;
+                                if abs_arg_idx < states_slice.len() {
+                                    // For now, just get the single bit value
+                                    // Full implementation would accumulate bits based on width
+                                    let val = ((states_slice[abs_arg_idx] >> arg_bit_idx) & 1) as u64;
+                                    args.push(val);
+                                }
+                            }
+
+                            // Format and print the display message
+                            let message = format_display_message(format, &args, arg_widths);
+                            print!("{}", message);
+
+                            // Write display event to buffer
+                            unsafe {
+                                let count = (*event_buffer_ptr).count.fetch_add(1, std::sync::atomic::Ordering::AcqRel) as usize;
+                                if count < MAX_EVENTS {
+                                    let event = &mut (*event_buffer_ptr).events[count];
+                                    event.event_type = EventType::Display as u32;
+                                    event.message_id = *cell_id as u32;
+                                    event.cycle = cycle_i as u32;
+                                }
+                            }
+
+                            clilog::debug!(
+                                "[cycle {}] Display fired: cell={}, format='{}'",
+                                cycle_i, cell_id, format
+                            );
+                        }
+                    }
+                }
+            }
+
             // Process events after all stages of this cycle complete
             // SAFETY: event_buffer_ptr is valid and GPU has finished
             let control = unsafe {
@@ -575,8 +636,8 @@ impl MetalSimulator {
                     assert_config,
                     stats,
                     |msg_id, cycle, _data| {
-                        // TODO: Implement message formatting when $display is supported
-                        clilog::info!("[cycle {}] $display message id={}", cycle, msg_id);
+                        // Display messages are already printed above
+                        clilog::debug!("[cycle {}] Event processed: message id={}", cycle, msg_id);
                     },
                 )
             };
@@ -619,7 +680,26 @@ fn main() {
         &AIGPDKLeafPins()
     ).expect("cannot build netlist");
 
-    let aig = AIG::from_netlistdb(&netlistdb);
+    let mut aig = AIG::from_netlistdb(&netlistdb);
+
+    // Load display format info from JSON if available
+    let json_path = args.json_path.clone().unwrap_or_else(|| {
+        args.netlist_verilog.with_extension("json")
+    });
+    if json_path.exists() {
+        match extract_display_info_from_json(&json_path) {
+            Ok(display_info) => {
+                if !display_info.is_empty() {
+                    clilog::info!("Loaded {} display format strings from {:?}", display_info.len(), json_path);
+                    aig.populate_display_info(&display_info);
+                }
+            }
+            Err(e) => {
+                clilog::warn!("Could not load display info from JSON: {}", e);
+            }
+        }
+    }
+
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
     let f = std::fs::File::open(&args.gemparts).unwrap();
@@ -854,6 +934,7 @@ fn main() {
         &assert_config,
         &mut sim_stats,
         &script.assertion_positions,
+        &script.display_positions,
     );
     clilog::finish!(timer_sim);
 

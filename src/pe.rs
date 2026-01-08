@@ -535,6 +535,15 @@ impl Partition {
                     // Treat like a primary output - the condition is always active
                     comb_outputs_activations.entry(ctrl.condition_iv >> 1).or_default().insert(2 | (ctrl.condition_iv & 1));
                 },
+                EndpointGroup::Display(disp) => {
+                    // Display nodes have an enable condition and args to evaluate
+                    comb_outputs_activations.entry(disp.enable_iv >> 1).or_default().insert(2 | (disp.enable_iv & 1));
+                    for &arg_iv in &disp.args_iv {
+                        if arg_iv > 1 {
+                            comb_outputs_activations.entry(arg_iv >> 1).or_default().insert(2 | (arg_iv & 1));
+                        }
+                    }
+                },
                 EndpointGroup::StagedIOPin(pin) => {
                     comb_outputs_activations.entry(pin).or_default().insert(2);
                 },

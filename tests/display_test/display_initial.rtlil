@@ -23,11 +23,11 @@ module \display_simple
   attribute \src "display_simple.v:23.13-23.28"
   wire $eq$display_simple.v:23$3_Y
   attribute \src "display_simple.v:24.13-24.66"
-  wire $display$0x6000023f30d8:24$4_EN
+  wire $display$0x60000016fc78:24$4_EN
   attribute \src "display_simple.v:27.13-27.29"
   wire $eq$display_simple.v:27$5_Y
   attribute \src "display_simple.v:28.13-28.92"
-  wire $display$0x6000023f30d8:28$6_EN
+  wire $display$0x60000016fc78:28$6_EN
   attribute \src "display_simple.v:19.20-19.34"
   cell $add $add$display_simple.v:19$2
     parameter \A_SIGNED 0
@@ -51,7 +51,7 @@ module \display_simple
     connect \Y $eq$display_simple.v:23$3_Y
   end
   attribute \src "display_simple.v:24.13-24.66"
-  cell $print $display$0x6000023f30d8:24$4
+  cell $print $display$0x60000016fc78:24$4
     parameter \TRG_WIDTH 1
     parameter \TRG_ENABLE 1
     parameter \TRG_POLARITY 1'1
@@ -59,7 +59,7 @@ module \display_simple
     parameter \FORMAT "Counter reached 5, data_in = {8:>02h-u}\n"
     parameter \ARGS_WIDTH 8
     connect \TRG \clk
-    connect \EN $display$0x6000023f30d8:24$4_EN
+    connect \EN $display$0x60000016fc78:24$4_EN
     connect \ARGS \data_in
   end
   attribute \src "display_simple.v:27.13-27.29"
@@ -74,7 +74,7 @@ module \display_simple
     connect \Y $eq$display_simple.v:27$5_Y
   end
   attribute \src "display_simple.v:28.13-28.92"
-  cell $print $display$0x6000023f30d8:28$6
+  cell $print $display$0x60000016fc78:28$6
     parameter \TRG_WIDTH 1
     parameter \TRG_ENABLE 1
     parameter \TRG_POLARITY 1'1
@@ -82,15 +82,15 @@ module \display_simple
     parameter \FORMAT "Counter reached 10, data_in = {8:>02h-u}, data_out = {8:>02h-u}\n"
     parameter \ARGS_WIDTH 16
     connect \TRG \clk
-    connect \EN $display$0x6000023f30d8:28$6_EN
+    connect \EN $display$0x60000016fc78:28$6_EN
     connect \ARGS { \data_out \data_in }
   end
   attribute \src "display_simple.v:14.1-31.4"
   process $proc$display_simple.v:14$1
     assign $0\data_out[7:0] \data_out
     assign $0\counter[3:0] \counter
-    assign $display$0x6000023f30d8:24$4_EN 1'0
-    assign $display$0x6000023f30d8:28$6_EN 1'0
+    assign $display$0x60000016fc78:24$4_EN 1'0
+    assign $display$0x60000016fc78:28$6_EN 1'0
     attribute \src "display_simple.v:15.5-30.8"
     switch \rst
     attribute \src "display_simple.v:15.9-15.12"
@@ -105,14 +105,14 @@ module \display_simple
         switch $eq$display_simple.v:23$3_Y
         attribute \src "display_simple.v:23.13-23.28"
           case 1'1
-            assign $display$0x6000023f30d8:24$4_EN 1'1
+            assign $display$0x60000016fc78:24$4_EN 1'1
           case 
         end
         attribute \src "display_simple.v:27.9-29.12"
         switch $eq$display_simple.v:27$5_Y
         attribute \src "display_simple.v:27.13-27.29"
           case 1'1
-            assign $display$0x6000023f30d8:28$6_EN 1'1
+            assign $display$0x60000016fc78:28$6_EN 1'1
           case 
         end
     end

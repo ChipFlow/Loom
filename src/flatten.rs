@@ -109,6 +109,9 @@ pub struct FlattenedScriptV1 {
     /// Each entry is (cell_id, state_bit_position, message_id, control_type).
     /// control_type: None = assertion, Some(Stop) = $stop, Some(Finish) = $finish
     pub assertion_positions: Vec<(usize, u32, u32, Option<crate::aig::SimControlType>)>,
+    /// Maps from display cell IDs to their enable positions and format info.
+    /// Each entry is (cell_id, enable_pos, format_string, arg_positions, arg_widths).
+    pub display_positions: Vec<(usize, u32, String, Vec<u32>, Vec<u32>)>,
 }
 
 fn map_global_read_to_rounds(
@@ -281,6 +284,18 @@ impl FlatteningPart {
                     // SimControl condition is always active (no clock enable)
                     comb_outputs_activations.entry(ctrl.condition_iv >> 1)
                         .or_default().insert(2 | (ctrl.condition_iv & 1), None);
+                },
+                EndpointGroup::Display(disp) => {
+                    // Display enable is always active (no clock enable for now)
+                    comb_outputs_activations.entry(disp.enable_iv >> 1)
+                        .or_default().insert(2 | (disp.enable_iv & 1), None);
+                    // Also track argument signals
+                    for &arg_iv in &disp.args_iv {
+                        if arg_iv > 1 {
+                            comb_outputs_activations.entry(arg_iv >> 1)
+                                .or_default().insert(2 | (arg_iv & 1), None);
+                        }
+                    }
                 },
             }
         }
@@ -479,6 +494,28 @@ impl FlatteningPart {
                     // TODO: investigate root cause of off-by-one
                     let pos = self.state_start * 32 + local_pos.saturating_sub(1);
                     output_map.insert(ctrl.condition_iv, pos);
+                },
+                EndpointGroup::Display(disp) => {
+                    // Display enable condition
+                    if disp.enable_iv == 0 {
+                        continue
+                    }
+                    let local_pos = self.get_or_place_output_with_activation(
+                        disp.enable_iv, 1
+                    ) as u32;
+                    let pos = self.state_start * 32 + local_pos.saturating_sub(1);
+                    output_map.insert(disp.enable_iv, pos);
+
+                    // Also place argument signals
+                    for &arg_iv in &disp.args_iv {
+                        if arg_iv > 1 {
+                            let local_pos = self.get_or_place_output_with_activation(
+                                arg_iv, 1
+                            ) as u32;
+                            let pos = self.state_start * 32 + local_pos.saturating_sub(1);
+                            output_map.insert(arg_iv, pos);
+                        }
+                    }
                 },
             }
         }
@@ -873,6 +910,27 @@ fn build_flattened_script_v1(
         }
     }
 
+    // Build display_positions from displays
+    let display_positions: Vec<_> = aig.displays.iter()
+        .filter_map(|(&cell_id, disp)| {
+            output_map.get(&disp.enable_iv).map(|&enable_pos| {
+                // Get positions for all argument signals
+                let arg_positions: Vec<u32> = disp.args_iv.iter()
+                    .filter_map(|&arg_iv| output_map.get(&arg_iv).copied())
+                    .collect();
+                (cell_id, enable_pos, disp.format.clone(), arg_positions, disp.arg_widths.clone())
+            })
+        })
+        .collect();
+
+    if !display_positions.is_empty() {
+        clilog::info!("Found {} display nodes", display_positions.len());
+        for (cell_id, pos, format, arg_pos, _) in &display_positions {
+            clilog::debug!("  Display: cell={}, enable_pos={} (word={}, bit={}), format='{}', args={:?}",
+                          cell_id, pos, pos >> 5, pos & 31, format, arg_pos);
+        }
+    }
+
     FlattenedScriptV1 {
         num_blocks,
         num_major_stages,
@@ -885,6 +943,7 @@ fn build_flattened_script_v1(
         output_map,
         stages_blocks_parts,
         assertion_positions,
+        display_positions,
     }
 }
 

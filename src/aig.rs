@@ -41,6 +41,25 @@ pub struct SimControlNode {
     pub message_id: u32,
 }
 
+/// A display node for $display/$write system tasks.
+/// These output formatted messages when triggered.
+#[derive(Debug, Default, Clone)]
+pub struct DisplayNode {
+    /// The enable condition input pin with invert (last bit)
+    /// When this evaluates to 1, the display fires.
+    pub enable_iv: usize,
+    /// The clock enable signal (posedge trigger)
+    pub clken_iv: usize,
+    /// The format string for this display
+    pub format: String,
+    /// The argument signals (each entry is aigpin_iv)
+    pub args_iv: Vec<usize>,
+    /// The bit widths of each argument
+    pub arg_widths: Vec<u32>,
+    /// The cell name (for matching with JSON attributes)
+    pub cell_name: String,
+}
+
 /// A ram block resembling the interface of `$__RAMGEM_SYNC_`.
 #[derive(Debug, Default, Clone)]
 pub struct RAMBlock {
@@ -74,6 +93,7 @@ pub enum EndpointGroup<'i> {
     DFF(&'i DFF),
     RAMBlock(&'i RAMBlock),
     SimControl(&'i SimControlNode),
+    Display(&'i DisplayNode),
     StagedIOPin(usize),
 }
 
@@ -104,6 +124,12 @@ impl EndpointGroup<'_> {
             },
             Self::SimControl(ctrl) => {
                 f(ctrl.condition_iv >> 1);
+            },
+            Self::Display(disp) => {
+                f(disp.enable_iv >> 1);
+                for &arg_iv in &disp.args_iv {
+                    f(arg_iv >> 1);
+                }
             },
             Self::StagedIOPin(idx) => f(idx),
         }
@@ -169,6 +195,8 @@ pub struct AIG {
     pub srams: IndexMap<usize, RAMBlock>,
     /// The simulation control nodes ($stop/$finish), indexed by cell id
     pub simcontrols: IndexMap<usize, SimControlNode>,
+    /// The display nodes ($display/$write), indexed by cell id
+    pub displays: IndexMap<usize, DisplayNode>,
     /// The fanout CSR start array.
     pub fanouts_start: Vec<usize>,
     /// The fanout CSR array.
@@ -648,6 +676,57 @@ impl AIG {
                     cellid, fire_condition, ap_en_iv, ap_a_iv, ap_clken_iv
                 );
             }
+            else if netlistdb.celltypes[cellid].as_str() == "GEM_DISPLAY" {
+                // Parse GEM_DISPLAY cells for $display/$write support
+                // GEM_DISPLAY has: CLK (trigger), EN (enable), MSG_ID[31:0] (argument values)
+                // Plus attributes: gem_format (format string), gem_args_width (arg width)
+                let mut dp_en_iv = 1;      // Default: always enabled
+                let mut dp_clken_iv = 1;   // Default: always triggered
+                let mut dp_args_iv = Vec::new();
+
+                for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                    let pin_iv = aig.pin2aigpin_iv[pinid];
+                    match netlistdb.pinnames[pinid].1.as_str() {
+                        "EN" => dp_en_iv = pin_iv,
+                        "CLK" => {
+                            // Try to trace clock for edge detection
+                            if let Ok(clken) = aig.trace_clock_pin(
+                                netlistdb, pinid, false, false
+                            ) {
+                                dp_clken_iv = clken;
+                            }
+                        }
+                        "MSG_ID" => {
+                            // MSG_ID is a 32-bit bus, collect all bit pins
+                            dp_args_iv.push(pin_iv);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // The condition for firing a display event:
+                // fire = clk_enable && EN
+                let fire_condition = aig.add_and_gate(dp_en_iv, dp_clken_iv);
+
+                // Get cell name for matching with JSON attributes later
+                use netlistdb::GeneralHierName;
+                let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+
+                // Create DisplayNode
+                let display = aig.displays.entry(cellid).or_default();
+                display.enable_iv = fire_condition;
+                display.clken_iv = dp_clken_iv;
+                // Format string will be populated from JSON attributes later
+                display.format = format!("$display at cell {}", cellid);
+                display.args_iv = dp_args_iv;
+                display.arg_widths = vec![32]; // Default: 32-bit argument
+                display.cell_name = cell_name.to_string();
+
+                clilog::debug!(
+                    "Found GEM_DISPLAY cell {} '{}' (enable_iv={}, clken_iv={}, args={})",
+                    cellid, display.cell_name, fire_condition, dp_clken_iv, display.args_iv.len()
+                );
+            }
         }
 
         aig.fanouts_start = vec![0; aig.num_aigpins + 2];
@@ -721,13 +800,15 @@ impl AIG {
     }
 
     pub fn num_endpoint_groups(&self) -> usize {
-        self.primary_outputs.len() + self.dffs.len() + self.srams.len() + self.simcontrols.len()
+        self.primary_outputs.len() + self.dffs.len() + self.srams.len() +
+        self.simcontrols.len() + self.displays.len()
     }
 
     pub fn get_endpoint_group(&self, endpt_id: usize) -> EndpointGroup {
         let po_len = self.primary_outputs.len();
         let dff_len = self.dffs.len();
         let sram_len = self.srams.len();
+        let simctrl_len = self.simcontrols.len();
 
         if endpt_id < po_len {
             EndpointGroup::PrimaryOutput(*self.primary_outputs.get_index(endpt_id).unwrap())
@@ -738,8 +819,26 @@ impl AIG {
         else if endpt_id < po_len + dff_len + sram_len {
             EndpointGroup::RAMBlock(&self.srams[endpt_id - po_len - dff_len])
         }
-        else {
+        else if endpt_id < po_len + dff_len + sram_len + simctrl_len {
             EndpointGroup::SimControl(&self.simcontrols[endpt_id - po_len - dff_len - sram_len])
+        }
+        else {
+            EndpointGroup::Display(&self.displays[endpt_id - po_len - dff_len - sram_len - simctrl_len])
+        }
+    }
+
+    /// Populate display format information from JSON attributes.
+    /// This should be called after from_netlistdb() with display info extracted from the JSON.
+    pub fn populate_display_info(&mut self, display_info: &IndexMap<String, crate::display::DisplayCellInfo>) {
+        for (_cell_id, display) in self.displays.iter_mut() {
+            if let Some(info) = display_info.get(&display.cell_name) {
+                display.format = info.format.clone();
+                display.arg_widths = vec![info.args_width];
+                clilog::debug!(
+                    "Populated display info for '{}': format='{}', args_width={}",
+                    display.cell_name, info.format, info.args_width
+                );
+            }
         }
     }
 }

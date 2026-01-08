@@ -36,6 +36,7 @@ opt_clean -purge
 
 # Write output
 write_verilog display_synth.gv
+write_json display_synth.json
 
 # Print statistics
 stat
