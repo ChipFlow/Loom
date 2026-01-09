@@ -4,7 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use gem::event_buffer::{
-    AssertAction, AssertConfig, Event, EventBuffer, EventType, SimStats, process_events,
+    process_events, AssertAction, AssertConfig, Event, EventBuffer, EventType, SimStats,
 };
 use std::sync::atomic::Ordering;
 
@@ -62,8 +62,7 @@ fn bench_process_events(c: &mut Criterion) {
 
                 b.iter(|| {
                     let mut stats = SimStats::default();
-                    let result =
-                        process_events(black_box(&buf), &config, &mut stats, |_, _, _| {});
+                    let result = process_events(black_box(&buf), &config, &mut stats, |_, _, _| {});
                     black_box((result, stats.assertion_failures))
                 });
             },
@@ -76,9 +75,7 @@ fn bench_process_events(c: &mut Criterion) {
 fn bench_buffer_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("buffer_ops");
 
-    group.bench_function("create_new", |b| {
-        b.iter(|| black_box(EventBuffer::new()))
-    });
+    group.bench_function("create_new", |b| b.iter(|| black_box(EventBuffer::new())));
 
     group.bench_function("reset", |b| {
         let buf = EventBuffer::new();
