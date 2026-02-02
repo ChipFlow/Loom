@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Partition scheduler and flattener
 
-use crate::aig::{AIG, EndpointGroup, DriverType};
+use crate::aig::{DriverType, EndpointGroup, AIG};
 use crate::aigpdk::AIGPDK_SRAM_ADDR_WIDTH;
+use crate::liberty_parser::TimingLibrary;
 use crate::pe::{Partition, BOOMERANG_NUM_STAGES};
 use crate::staging::StagedAIG;
 use indexmap::IndexMap;
@@ -11,6 +12,78 @@ use std::collections::BTreeMap;
 use ulib::UVec;
 
 pub const NUM_THREADS_V1: usize = 1 << (BOOMERANG_NUM_STAGES - 5);
+
+// === Timing Data Structures for GPU ===
+
+/// Packed delay representation for GPU consumption.
+/// Uses 16-bit fixed-point values in picoseconds.
+/// Range: 0-65535 ps (0-65.5 ns), resolution: 1 ps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct PackedDelay {
+    /// Cell rise delay in picoseconds
+    pub rise_ps: u16,
+    /// Cell fall delay in picoseconds
+    pub fall_ps: u16,
+}
+
+impl PackedDelay {
+    /// Create a new PackedDelay from rise/fall times.
+    pub fn new(rise_ps: u16, fall_ps: u16) -> Self {
+        Self { rise_ps, fall_ps }
+    }
+
+    /// Create a PackedDelay from u64 picosecond values, saturating at u16::MAX.
+    pub fn from_u64(rise_ps: u64, fall_ps: u64) -> Self {
+        Self {
+            rise_ps: rise_ps.min(u16::MAX as u64) as u16,
+            fall_ps: fall_ps.min(u16::MAX as u64) as u16,
+        }
+    }
+
+    /// Get the maximum delay (for critical path analysis).
+    pub fn max_delay(&self) -> u16 {
+        self.rise_ps.max(self.fall_ps)
+    }
+
+    /// Pack into a single u32 for GPU transfer.
+    /// Format: [rise_ps:16][fall_ps:16]
+    pub fn to_u32(&self) -> u32 {
+        ((self.rise_ps as u32) << 16) | (self.fall_ps as u32)
+    }
+
+    /// Unpack from a u32.
+    pub fn from_u32(packed: u32) -> Self {
+        Self {
+            rise_ps: (packed >> 16) as u16,
+            fall_ps: (packed & 0xFFFF) as u16,
+        }
+    }
+}
+
+/// DFF timing constraints for GPU checking.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct DFFConstraint {
+    /// Setup time in picoseconds
+    pub setup_ps: u16,
+    /// Hold time in picoseconds
+    pub hold_ps: u16,
+    /// Position of D input data arrival in state
+    pub data_state_pos: u32,
+    /// DFF cell ID (for error reporting)
+    pub cell_id: u32,
+}
+
+impl DFFConstraint {
+    /// Pack into two u32s for GPU transfer.
+    /// Returns (timing_word, position_word).
+    pub fn to_u32_pair(&self) -> (u32, u32) {
+        let timing = ((self.setup_ps as u32) << 16) | (self.hold_ps as u32);
+        let position = self.data_state_pos;
+        (timing, position)
+    }
+}
 
 /// A flattened script, for partition executor version 1.
 /// See [FlattenedScriptV1::blocks_data] for the format details.
@@ -112,21 +185,37 @@ pub struct FlattenedScriptV1 {
     /// Maps from display cell IDs to their enable positions and format info.
     /// Each entry is (cell_id, enable_pos, format_string, arg_positions, arg_widths).
     pub display_positions: Vec<(usize, u32, String, Vec<u32>, Vec<u32>)>,
+
+    // === Timing Analysis Fields ===
+
+    /// Per-AIG-pin delays loaded from Liberty library.
+    /// Index 0 is unused (Tie0). Indexed by aigpin.
+    /// Empty if timing not loaded.
+    pub gate_delays: Vec<PackedDelay>,
+
+    /// DFF timing constraints for setup/hold checking.
+    /// One entry per DFF in the design.
+    pub dff_constraints: Vec<DFFConstraint>,
+
+    /// Clock period in picoseconds for timing checks.
+    pub clock_period_ps: u64,
+
+    /// Whether timing data has been loaded.
+    pub timing_enabled: bool,
 }
 
-fn map_global_read_to_rounds(
-    inputs_taken: &BTreeMap<u32, u32>
-) -> Vec<Vec<(u32, u32)>> {
-    let inputs_taken = inputs_taken.iter()
-        .map(|(&a, &b)| (a, b)).collect::<Vec<_>>();
+fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
+    let inputs_taken = inputs_taken
+        .iter()
+        .map(|(&a, &b)| (a, b))
+        .collect::<Vec<_>>();
     // the larger the sorting chunk size, the better the successful chance,
     // but the less efficient due to worse cache coherency.
     let mut chunk_size = inputs_taken.len();
     while chunk_size >= 1 {
         let mut slices = inputs_taken.chunks(chunk_size).collect::<Vec<_>>();
         slices.sort_by_cached_key(|&slice| {
-            u32::MAX - slice.iter()
-                .map(|(_, mask)| mask.count_ones()).sum::<u32>()
+            u32::MAX - slice.iter().map(|(_, mask)| mask.count_ones()).sum::<u32>()
         });
         let mut rounds_idx_masks: Vec<Vec<(u32, u32)>> = vec![vec![]; NUM_THREADS_V1];
         let mut round_map_j = 0;
@@ -134,7 +223,13 @@ fn map_global_read_to_rounds(
         for slice in slices {
             for &(offset, mask) in slice {
                 let wrap_fail_j = round_map_j;
-                while rounds_idx_masks[round_map_j].iter().map(|(_, mask)| mask.count_ones()).sum::<u32>() + mask.count_ones() > 32 {
+                while rounds_idx_masks[round_map_j]
+                    .iter()
+                    .map(|(_, mask)| mask.count_ones())
+                    .sum::<u32>()
+                    + mask.count_ones()
+                    > 32
+                {
                     round_map_j += 1;
                     if round_map_j == NUM_THREADS_V1 {
                         round_map_j = 0;
@@ -142,22 +237,26 @@ fn map_global_read_to_rounds(
                     if round_map_j == wrap_fail_j {
                         // panic!("failed to map at part {} mem offset {}", i, offset);
                         fail = true;
-                        break
+                        break;
                     }
                 }
-                if fail { break }
+                if fail {
+                    break;
+                }
                 rounds_idx_masks[round_map_j].push((offset, mask));
                 round_map_j += 1;
                 if round_map_j == NUM_THREADS_V1 {
                     round_map_j = 0;
                 }
             }
-            if fail { break }
+            if fail {
+                break;
+            }
         }
         if !fail {
             // let max_rounds = rounds_idx_masks.iter().map(|v| v.len()).max().unwrap();
             // println!("max_rounds: {}, round_map_j: {}, inputs_taken len {}", max_rounds, round_map_j, inputs_taken.len());
-            return rounds_idx_masks
+            return rounds_idx_masks;
         }
         chunk_size /= 2;
     }
@@ -226,91 +325,120 @@ struct FlatteningPart {
 fn set_bit_in_u32(v: &mut u32, pos: u32, bit: u8) {
     if bit != 0 {
         *v |= 1 << pos;
-    }
-    else {
+    } else {
         *v &= !(1 << pos);
     }
 }
 
 impl FlatteningPart {
-    fn init_afters_writeouts(
-        &mut self, aig: &AIG, staged: &StagedAIG, part: &Partition
-    ) {
-        let afters = part.stages.iter().map(|s| {
-            let mut after = Vec::with_capacity(1 << BOOMERANG_NUM_STAGES);
-            after.push(usize::MAX);
-            for i in (1..=BOOMERANG_NUM_STAGES).rev() {
-                after.extend(s.hier[i].iter().copied());
-            }
-            after
-        }).collect::<Vec<_>>();
-        let wos = part.stages.iter().zip(afters.iter()).map(|(s, after)| {
-            s.write_outs.iter().map(|&woi| {
-                after[woi * 32..(woi + 1) * 32].iter().copied()
-            }).flatten()
-        }).flatten().collect::<Vec<_>>();
+    fn init_afters_writeouts(&mut self, aig: &AIG, staged: &StagedAIG, part: &Partition) {
+        let afters = part
+            .stages
+            .iter()
+            .map(|s| {
+                let mut after = Vec::with_capacity(1 << BOOMERANG_NUM_STAGES);
+                after.push(usize::MAX);
+                for i in (1..=BOOMERANG_NUM_STAGES).rev() {
+                    after.extend(s.hier[i].iter().copied());
+                }
+                after
+            })
+            .collect::<Vec<_>>();
+        let wos = part
+            .stages
+            .iter()
+            .zip(afters.iter())
+            .map(|(s, after)| {
+                s.write_outs
+                    .iter()
+                    .map(|&woi| after[woi * 32..(woi + 1) * 32].iter().copied())
+                    .flatten()
+            })
+            .flatten()
+            .collect::<Vec<_>>();
 
         // println!("test wos: {:?}", wos);
 
         self.afters = afters;
         self.parts_after_writeouts = wos;
-        self.num_normal_writeouts = part.stages.iter()
-            .map(|s| s.write_outs.len()).sum::<usize>() as u32;
+        self.num_normal_writeouts = part
+            .stages
+            .iter()
+            .map(|s| s.write_outs.len())
+            .sum::<usize>() as u32;
         self.num_srams = 0;
 
         // map: output aig pin id -> ((clken, data iv) -> pos)
-        let mut comb_outputs_activations =
-            IndexMap::<usize, IndexMap<usize, Option<u16>>>::new();
+        let mut comb_outputs_activations = IndexMap::<usize, IndexMap<usize, Option<u16>>>::new();
         for &endpt_i in &part.endpoints {
             match staged.get_endpoint_group(aig, endpt_i) {
                 EndpointGroup::RAMBlock(_) => {
                     self.num_srams += 1;
-                },
+                }
                 EndpointGroup::PrimaryOutput(idx) => {
-                    comb_outputs_activations.entry(idx >> 1)
-                        .or_default().insert(2 | (idx & 1), None);
-                },
+                    comb_outputs_activations
+                        .entry(idx >> 1)
+                        .or_default()
+                        .insert(2 | (idx & 1), None);
+                }
                 EndpointGroup::StagedIOPin(idx) => {
-                    comb_outputs_activations.entry(idx)
-                        .or_default().insert(2, None);
-                },
+                    comb_outputs_activations
+                        .entry(idx)
+                        .or_default()
+                        .insert(2, None);
+                }
                 EndpointGroup::DFF(dff) => {
-                    comb_outputs_activations.entry(dff.d_iv >> 1)
-                        .or_default().insert(
-                            dff.en_iv << 1 | (dff.d_iv & 1),
-                            None);
-                },
+                    comb_outputs_activations
+                        .entry(dff.d_iv >> 1)
+                        .or_default()
+                        .insert(dff.en_iv << 1 | (dff.d_iv & 1), None);
+                }
                 EndpointGroup::SimControl(ctrl) => {
                     // SimControl condition is always active (no clock enable)
-                    comb_outputs_activations.entry(ctrl.condition_iv >> 1)
-                        .or_default().insert(2 | (ctrl.condition_iv & 1), None);
-                },
+                    comb_outputs_activations
+                        .entry(ctrl.condition_iv >> 1)
+                        .or_default()
+                        .insert(2 | (ctrl.condition_iv & 1), None);
+                }
                 EndpointGroup::Display(disp) => {
                     // Display enable is always active (no clock enable for now)
-                    comb_outputs_activations.entry(disp.enable_iv >> 1)
-                        .or_default().insert(2 | (disp.enable_iv & 1), None);
+                    comb_outputs_activations
+                        .entry(disp.enable_iv >> 1)
+                        .or_default()
+                        .insert(2 | (disp.enable_iv & 1), None);
                     // Also track argument signals
                     for &arg_iv in &disp.args_iv {
                         if arg_iv > 1 {
-                            comb_outputs_activations.entry(arg_iv >> 1)
-                                .or_default().insert(2 | (arg_iv & 1), None);
+                            comb_outputs_activations
+                                .entry(arg_iv >> 1)
+                                .or_default()
+                                .insert(2 | (arg_iv & 1), None);
                         }
                     }
-                },
+                }
             }
         }
-        self.num_duplicate_writeouts = ((
-            comb_outputs_activations.values()
-                .map(|v| v.len() - 1).sum::<usize>()
-                + 31) / 32) as u32;
+        self.num_duplicate_writeouts = ((comb_outputs_activations
+            .values()
+            .map(|v| v.len() - 1)
+            .sum::<usize>()
+            + 31)
+            / 32) as u32;
         self.comb_outputs_activations = comb_outputs_activations;
 
-        self.num_writeouts = self.num_normal_writeouts + self.num_srams + self.num_duplicate_writeouts;
+        self.num_writeouts =
+            self.num_normal_writeouts + self.num_srams + self.num_duplicate_writeouts;
 
-        self.after_writeout_pin2pos = self.parts_after_writeouts.iter().enumerate()
+        self.after_writeout_pin2pos = self
+            .parts_after_writeouts
+            .iter()
+            .enumerate()
             .filter_map(|(i, &pin)| {
-                if pin == usize::MAX { None }
-                else { Some((pin, i as u16)) }
+                if pin == usize::MAX {
+                    None
+                } else {
+                    Some((pin, i as u16))
+                }
             })
             .collect::<IndexMap<_, _>>();
     }
@@ -318,7 +446,7 @@ impl FlatteningPart {
     /// returns permutation id, invert bit, and setzero bit
     fn query_permute_with_pin_iv(&self, pin_iv: usize) -> (u16, u8, u8) {
         if pin_iv <= 1 {
-            return (0, pin_iv as u8, 1)
+            return (0, pin_iv as u8, 1);
         }
         let pos = self.after_writeout_pin2pos.get(&(pin_iv >> 1)).unwrap();
         (*pos, (pin_iv & 1) as u8, 0)
@@ -327,24 +455,39 @@ impl FlatteningPart {
     /// places a sram_duplicate bit.
     fn place_sram_duplicate(&mut self, pos: usize, (perm, inv, set0): (u16, u8, u8)) {
         self.sram_duplicate_permute[pos] = perm;
-        set_bit_in_u32(&mut self.sram_duplicate_inv[pos >> 5],
-                       (pos & 31) as u32, inv);
-        set_bit_in_u32(&mut self.sram_duplicate_set0[pos >> 5],
-                       (pos & 31) as u32, set0);
+        set_bit_in_u32(
+            &mut self.sram_duplicate_inv[pos >> 5],
+            (pos & 31) as u32,
+            inv,
+        );
+        set_bit_in_u32(
+            &mut self.sram_duplicate_set0[pos >> 5],
+            (pos & 31) as u32,
+            set0,
+        );
     }
 
     /// places a writeout bit's clock enable and data invert.
     fn place_clken_datainv(
-        &mut self, pos: usize,
-        clken_iv_perm: u16, clken_iv_inv: u8, clken_iv_set0: u8, data_inv: u8
+        &mut self,
+        pos: usize,
+        clken_iv_perm: u16,
+        clken_iv_inv: u8,
+        clken_iv_set0: u8,
+        data_inv: u8,
     ) {
         self.clken_permute[pos] = clken_iv_perm;
-        set_bit_in_u32(&mut self.clken_inv[pos >> 5],
-                       (pos & 31) as u32, clken_iv_inv);
-        set_bit_in_u32(&mut self.clken_set0[pos >> 5],
-                       (pos & 31) as u32, clken_iv_set0);
-        set_bit_in_u32(&mut self.data_inv[pos >> 5],
-                       (pos & 31) as u32, data_inv);
+        set_bit_in_u32(
+            &mut self.clken_inv[pos >> 5],
+            (pos & 31) as u32,
+            clken_iv_inv,
+        );
+        set_bit_in_u32(
+            &mut self.clken_set0[pos >> 5],
+            (pos & 31) as u32,
+            clken_iv_set0,
+        );
+        set_bit_in_u32(&mut self.data_inv[pos >> 5], (pos & 31) as u32, data_inv);
     }
 
     /// returns a final local position for a data output bit with given pin_iv and clken_iv.
@@ -352,11 +495,14 @@ impl FlatteningPart {
     /// if is not already placed, we will place it as well as place
     /// the clock enable bit, duplication bit, and bitflags for clock and data.
     fn get_or_place_output_with_activation(&mut self, pin_iv: usize, clken_iv: usize) -> u16 {
-        let (activ_idx, _, pos) = self.comb_outputs_activations
-            .get(&(pin_iv >> 1)).unwrap()
-            .get_full(&(clken_iv << 1 | (pin_iv & 1))).unwrap();
+        let (activ_idx, _, pos) = self
+            .comb_outputs_activations
+            .get(&(pin_iv >> 1))
+            .unwrap()
+            .get_full(&(clken_iv << 1 | (pin_iv & 1)))
+            .unwrap();
         if let Some(pos) = *pos {
-            return pos
+            return pos;
         }
         let (clken_iv_perm, clken_iv_inv, clken_iv_set0) = self.query_permute_with_pin_iv(clken_iv);
         let origpos = match self.after_writeout_pin2pos.get(&(pin_iv >> 1)) {
@@ -367,28 +513,39 @@ impl FlatteningPart {
         } as usize;
         let r_pos = if activ_idx == 0 {
             self.place_clken_datainv(
-                origpos, clken_iv_perm, clken_iv_inv, clken_iv_set0, (pin_iv & 1) as u8
+                origpos,
+                clken_iv_perm,
+                clken_iv_inv,
+                clken_iv_set0,
+                (pin_iv & 1) as u8,
             );
             origpos as u16
-        }
-        else {
+        } else {
             self.cnt_placed_duplicate_permute += 1;
-            let dup_pos = ((self.num_writeouts - self.num_srams) * 32 - self.cnt_placed_duplicate_permute) as usize;
-            let dup_perm_pos = ((self.num_srams * 4 + self.num_duplicate_writeouts) * 32 - self.cnt_placed_duplicate_permute) as usize;
+            let dup_pos = ((self.num_writeouts - self.num_srams) * 32
+                - self.cnt_placed_duplicate_permute) as usize;
+            let dup_perm_pos = ((self.num_srams * 4 + self.num_duplicate_writeouts) * 32
+                - self.cnt_placed_duplicate_permute) as usize;
             if dup_perm_pos >= 8192 {
                 panic!("sram duplicate bit larger than expected..")
                 // dup_perm_pos = 8191;
             }
-            self.place_sram_duplicate(
-                dup_perm_pos, (origpos as u16, 0, 0)
-            );
+            self.place_sram_duplicate(dup_perm_pos, (origpos as u16, 0, 0));
             self.place_clken_datainv(
-                dup_pos, clken_iv_perm, clken_iv_inv, clken_iv_set0, (pin_iv & 1) as u8
+                dup_pos,
+                clken_iv_perm,
+                clken_iv_inv,
+                clken_iv_set0,
+                (pin_iv & 1) as u8,
             );
             dup_pos as u16
         };
-        *self.comb_outputs_activations.get_mut(&(pin_iv >> 1)).unwrap()
-            .get_mut(&(clken_iv << 1 | (pin_iv & 1))).unwrap() = Some(r_pos);
+        *self
+            .comb_outputs_activations
+            .get_mut(&(pin_iv >> 1))
+            .unwrap()
+            .get_mut(&(clken_iv << 1 | (pin_iv & 1)))
+            .unwrap() = Some(r_pos);
         r_pos
     }
 
@@ -414,119 +571,130 @@ impl FlatteningPart {
         for &endpt_i in &part.endpoints {
             match staged.get_endpoint_group(aig, endpt_i) {
                 EndpointGroup::RAMBlock(ram) => {
-                    let sram_rd_data_local_offset = self.num_writeouts as usize - self.num_srams as usize + cur_sram_id as usize;
-                    let sram_rd_data_global_start = self.state_start + self.num_writeouts - self.num_srams + cur_sram_id;
-                    let (perm_r_en_iv, perm_r_en_iv_inv, perm_r_en_iv_set0) = self.query_permute_with_pin_iv(ram.port_r_en_iv);
+                    let sram_rd_data_local_offset = self.num_writeouts as usize
+                        - self.num_srams as usize
+                        + cur_sram_id as usize;
+                    let sram_rd_data_global_start =
+                        self.state_start + self.num_writeouts - self.num_srams + cur_sram_id;
+                    let (perm_r_en_iv, perm_r_en_iv_inv, perm_r_en_iv_set0) =
+                        self.query_permute_with_pin_iv(ram.port_r_en_iv);
                     for k in 0..32 {
                         let d = ram.port_r_rd_data[k];
-                        if d == usize::MAX { continue }
+                        if d == usize::MAX {
+                            continue;
+                        }
                         input_map.insert(d, sram_rd_data_global_start * 32 + k as u32);
                         output_map.insert(d << 1, sram_rd_data_global_start * 32 + k as u32);
                         self.place_clken_datainv(
                             sram_rd_data_local_offset * 32 + k,
-                            perm_r_en_iv, perm_r_en_iv_inv, perm_r_en_iv_set0, 0
+                            perm_r_en_iv,
+                            perm_r_en_iv_inv,
+                            perm_r_en_iv_set0,
+                            0,
                         );
                     }
                     let sram_input_perm_st = (cur_sram_id * 32 * 4) as usize;
                     for k in 0..13 {
                         self.place_sram_duplicate(
                             sram_input_perm_st + k,
-                            self.query_permute_with_pin_iv(ram.port_r_addr_iv[k])
+                            self.query_permute_with_pin_iv(ram.port_r_addr_iv[k]),
                         );
                         self.place_sram_duplicate(
                             sram_input_perm_st + 16 + k,
-                            self.query_permute_with_pin_iv(ram.port_w_addr_iv[k])
+                            self.query_permute_with_pin_iv(ram.port_w_addr_iv[k]),
                         );
                     }
                     for k in 0..32 {
                         self.place_sram_duplicate(
                             sram_input_perm_st + 32 + k,
-                            self.query_permute_with_pin_iv(ram.port_w_wr_en_iv[k])
+                            self.query_permute_with_pin_iv(ram.port_w_wr_en_iv[k]),
                         );
                         self.place_sram_duplicate(
                             sram_input_perm_st + 64 + k,
-                            self.query_permute_with_pin_iv(ram.port_w_wr_data_iv[k])
+                            self.query_permute_with_pin_iv(ram.port_w_wr_data_iv[k]),
                         );
                     }
                     cur_sram_id += 1;
-                },
+                }
                 EndpointGroup::PrimaryOutput(idx_iv) => {
                     if idx_iv == 0 {
                         panic!("primary output has zero..??")
                     }
-                    let pos = self.state_start * 32 + self.get_or_place_output_with_activation(
-                        idx_iv, 1
-                    ) as u32;
+                    let pos = self.state_start * 32
+                        + self.get_or_place_output_with_activation(idx_iv, 1) as u32;
                     output_map.insert(idx_iv, pos);
-                },
+                }
                 EndpointGroup::StagedIOPin(idx) => {
                     if idx == 0 {
                         panic!("staged IO pin has zero..??")
                     }
-                    let pos = self.state_start * 32 + self.get_or_place_output_with_activation(
-                        idx << 1, 1
-                    ) as u32;
+                    let pos = self.state_start * 32
+                        + self.get_or_place_output_with_activation(idx << 1, 1) as u32;
                     staged_io_map.insert(idx, pos);
-                },
+                }
                 EndpointGroup::DFF(dff) => {
                     if dff.d_iv == 0 {
-                        clilog::warn!(DFF_CONST_ERR, "dff d_iv has zero, not fully optimized netlist. ignoring the error..");
+                        clilog::warn!(
+                            DFF_CONST_ERR,
+                            "dff d_iv has zero, not fully optimized netlist. ignoring the error.."
+                        );
                         input_map.insert(dff.q, 0);
-                        continue
+                        continue;
                     }
-                    let pos = self.state_start * 32 + self.get_or_place_output_with_activation(
-                        dff.d_iv, dff.en_iv
-                    ) as u32;
+                    let pos = self.state_start * 32
+                        + self.get_or_place_output_with_activation(dff.d_iv, dff.en_iv) as u32;
                     output_map.insert(dff.d_iv, pos);
                     input_map.insert(dff.q, pos);
-                },
+                }
                 EndpointGroup::SimControl(ctrl) => {
                     // SimControl condition is like a primary output - always active
                     if ctrl.condition_iv == 0 {
-                        continue
+                        continue;
                     }
-                    let local_pos = self.get_or_place_output_with_activation(
-                        ctrl.condition_iv, 1
-                    ) as u32;
+                    let local_pos =
+                        self.get_or_place_output_with_activation(ctrl.condition_iv, 1) as u32;
                     // Note: The position returned by get_or_place_output_with_activation is
                     // 1-indexed from how the combinational logic is scheduled. We need to
                     // convert to 0-indexed by subtracting 1.
                     // TODO: investigate root cause of off-by-one
                     let pos = self.state_start * 32 + local_pos.saturating_sub(1);
                     output_map.insert(ctrl.condition_iv, pos);
-                },
+                }
                 EndpointGroup::Display(disp) => {
                     // Display enable condition
                     if disp.enable_iv == 0 {
-                        continue
+                        continue;
                     }
-                    let local_pos = self.get_or_place_output_with_activation(
-                        disp.enable_iv, 1
-                    ) as u32;
+                    let local_pos =
+                        self.get_or_place_output_with_activation(disp.enable_iv, 1) as u32;
                     let pos = self.state_start * 32 + local_pos.saturating_sub(1);
                     output_map.insert(disp.enable_iv, pos);
 
                     // Also place argument signals
                     for &arg_iv in &disp.args_iv {
                         if arg_iv > 1 {
-                            let local_pos = self.get_or_place_output_with_activation(
-                                arg_iv, 1
-                            ) as u32;
+                            let local_pos =
+                                self.get_or_place_output_with_activation(arg_iv, 1) as u32;
                             let pos = self.state_start * 32 + local_pos.saturating_sub(1);
                             output_map.insert(arg_iv, pos);
                         }
                     }
-                },
+                }
             }
         }
         assert_eq!(cur_sram_id, self.num_srams);
-        assert_eq!((self.cnt_placed_duplicate_permute + 31) / 32, self.num_duplicate_writeouts);
+        assert_eq!(
+            (self.cnt_placed_duplicate_permute + 31) / 32,
+            self.num_duplicate_writeouts
+        );
 
         // println!("test clken_permute: {:?}, wos (w/o sram or dup): {:?}", self.clken_permute, self.parts_after_writeouts);
     }
 
     fn build_script(
-        &self, aig: &AIG, part: &Partition,
+        &self,
+        aig: &AIG,
+        part: &Partition,
         input_map: &IndexMap<usize, u32>,
         staged_io_map: &IndexMap<usize, u32>,
     ) -> Vec<u32> {
@@ -539,7 +707,7 @@ impl FlatteningPart {
         script.push(self.state_start);
         script.push(self.num_srams);
         script.push(self.sram_start);
-        script.push(0);   // [6]=num global read rounds, assigned later
+        script.push(0); // [6]=num global read rounds, assigned later
         script.push(self.num_duplicate_writeouts);
         // padding
         while script.len() < 128 {
@@ -553,8 +721,7 @@ impl FlatteningPart {
                 let cur_wo = (j as u32) << 8 | (wo as u32);
                 if last_wo == u32::MAX {
                     last_wo = cur_wo;
-                }
-                else {
+                } else {
                     script.push(last_wo | (cur_wo << 16));
                     last_wo = u32::MAX;
                 }
@@ -569,23 +736,22 @@ impl FlatteningPart {
         // read global (256x32)
         let mut inputs_taken = BTreeMap::<u32, u32>::new();
         for &inp in &part.stages[0].hier[0] {
-            if inp == usize::MAX { continue }
+            if inp == usize::MAX {
+                continue;
+            }
             match input_map.get(&inp) {
                 Some(&pos) => {
-                    *inputs_taken.entry(pos >> 5).or_default() |=
-                        1 << (pos & 31);
+                    *inputs_taken.entry(pos >> 5).or_default() |= 1 << (pos & 31);
                 }
-                None => {
-                    match staged_io_map.get(&inp) {
-                        Some(&pos) => {
-                            *inputs_taken.entry((pos >> 5) | (1u32 << 31))
-                                .or_default() |= 1 << (pos & 31);
-                        }
-                        None => {
-                            panic!("cannot find input pin {}, driver: {:?}, in either primary inputs or staged IOs", inp, aig.drivers[inp]);
-                        }
+                None => match staged_io_map.get(&inp) {
+                    Some(&pos) => {
+                        *inputs_taken.entry((pos >> 5) | (1u32 << 31)).or_default() |=
+                            1 << (pos & 31);
                     }
-                }
+                    None => {
+                        panic!("cannot find input pin {}, driver: {:?}, in either primary inputs or staged IOs", inp, aig.drivers[inp]);
+                    }
+                },
             }
         }
         // clilog::debug!(
@@ -593,11 +759,8 @@ impl FlatteningPart {
         //     inputs_taken.len(),
         //     inputs_taken.iter().map(|(id, val)| format!("{}[{}]", id, val.count_ones())).collect::<Vec<_>>()
         // );
-        let rounds_idx_masks = map_global_read_to_rounds(
-            &inputs_taken
-        );
-        let num_global_stages = rounds_idx_masks.iter()
-            .map(|v| v.len()).max().unwrap() as u32;
+        let rounds_idx_masks = map_global_read_to_rounds(&inputs_taken);
+        let num_global_stages = rounds_idx_masks.iter().map(|v| v.len()).max().unwrap() as u32;
         script[6] = num_global_stages;
         assert_eq!(script.len(), NUM_THREADS_V1);
         let global_perm_start = script.len();
@@ -611,39 +774,55 @@ impl FlatteningPart {
             }
         }
 
-        let outputpos2localpos = rounds_idx_masks.iter().enumerate().map(|(local_i, v)| {
-            let mut local_op2lp = Vec::with_capacity(32);
-            let mut bit_id = 0;
-            for &(idx, mask) in v.iter().rev() {
-                let is_staged_io = (idx >> 31) != 0;
-                for k in (0..32).rev() {
-                    if (mask >> k & 1) != 0 {
-                        local_op2lp.push(((is_staged_io, idx << 5 | k), (local_i * 32 + bit_id) as u16));
-                        bit_id += 1;
+        let outputpos2localpos = rounds_idx_masks
+            .iter()
+            .enumerate()
+            .map(|(local_i, v)| {
+                let mut local_op2lp = Vec::with_capacity(32);
+                let mut bit_id = 0;
+                for &(idx, mask) in v.iter().rev() {
+                    let is_staged_io = (idx >> 31) != 0;
+                    for k in (0..32).rev() {
+                        if (mask >> k & 1) != 0 {
+                            local_op2lp.push((
+                                (is_staged_io, idx << 5 | k),
+                                (local_i * 32 + bit_id) as u16,
+                            ));
+                            bit_id += 1;
+                        }
                     }
                 }
-            }
-            assert!(bit_id <= 32);
-            local_op2lp.into_iter()
-        }).flatten().collect::<IndexMap<_, _>>();
+                assert!(bit_id <= 32);
+                local_op2lp.into_iter()
+            })
+            .flatten()
+            .collect::<IndexMap<_, _>>();
         // println!("output2localpos: {:?}", outputpos2localpos);
 
         let mut last_pin2localpos = IndexMap::new();
         for &inp in &part.stages[0].hier[0] {
-            if inp == usize::MAX { continue }
+            if inp == usize::MAX {
+                continue;
+            }
             let pos = match input_map.get(&inp) {
                 Some(&pos) => (false, pos),
-                None => (true, *staged_io_map.get(&inp).unwrap())
+                None => (true, *staged_io_map.get(&inp).unwrap()),
             };
             last_pin2localpos.insert(inp, *outputpos2localpos.get(&pos).unwrap());
         }
 
         // boomerang sections start
         for (bs_i, bs) in part.stages.iter().enumerate() {
-            let bs_perm = bs.hier[0].iter().map(|&pin| {
-                if pin == usize::MAX { 0 }
-                else { *last_pin2localpos.get(&pin).unwrap() }
-            }).collect::<Vec<_>>();
+            let bs_perm = bs.hier[0]
+                .iter()
+                .map(|&pin| {
+                    if pin == usize::MAX {
+                        0
+                    } else {
+                        *last_pin2localpos.get(&pin).unwrap()
+                    }
+                })
+                .collect::<Vec<_>>();
 
             let mut bs_xora = vec![0u32; NUM_THREADS_V1];
             let mut bs_xorb = vec![0u32; NUM_THREADS_V1];
@@ -655,15 +834,15 @@ impl FlatteningPart {
                     let a = bs.hier[hi - 1][j];
                     let b = bs.hier[hi - 1][j + hi_len];
                     if out == usize::MAX {
-                        continue
+                        continue;
                     }
                     if out == a {
                         bs_orb[(hi_len + j) >> 5] |= 1 << ((hi_len + j) & 31);
-                        continue
+                        continue;
                     }
                     let (a_iv, b_iv) = match aig.drivers[out] {
                         DriverType::AndGate(a_iv, b_iv) => (a_iv, b_iv),
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     };
                     assert_eq!(a_iv >> 1, a);
                     assert_eq!(b_iv >> 1, b);
@@ -678,14 +857,10 @@ impl FlatteningPart {
 
             for k in 0..4 {
                 for i in ((k * 8)..bs_perm.len()).step_by(32) {
-                    script.push(((bs_perm[i] as u32)) |
-                                (bs_perm[i + 1] as u32) << 16);
-                    script.push(((bs_perm[i + 2] as u32)) |
-                                (bs_perm[i + 3] as u32) << 16);
-                    script.push(((bs_perm[i + 4] as u32)) |
-                                (bs_perm[i + 5] as u32) << 16);
-                    script.push(((bs_perm[i + 6] as u32)) |
-                                (bs_perm[i + 7] as u32) << 16);
+                    script.push((bs_perm[i] as u32) | (bs_perm[i + 1] as u32) << 16);
+                    script.push((bs_perm[i + 2] as u32) | (bs_perm[i + 3] as u32) << 16);
+                    script.push((bs_perm[i + 4] as u32) | (bs_perm[i + 5] as u32) << 16);
+                    script.push((bs_perm[i + 6] as u32) | (bs_perm[i + 7] as u32) << 16);
                 }
             }
             for i in 0..NUM_THREADS_V1 {
@@ -695,23 +870,38 @@ impl FlatteningPart {
                 script.push(0);
             }
 
-            last_pin2localpos = self.afters[bs_i].iter().enumerate().filter_map(|(i, &pin)| {
-                if pin == usize::MAX { None }
-                else { Some((pin, i as u16)) }
-            }).collect::<IndexMap<_, _>>();
+            last_pin2localpos = self.afters[bs_i]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &pin)| {
+                    if pin == usize::MAX {
+                        None
+                    } else {
+                        Some((pin, i as u16))
+                    }
+                })
+                .collect::<IndexMap<_, _>>();
         }
 
         // sram worker
         for k in 0..4 {
             for i in ((k * 8)..self.sram_duplicate_permute.len()).step_by(32) {
-                script.push(((self.sram_duplicate_permute[i] as u32)) |
-                            (self.sram_duplicate_permute[i + 1] as u32) << 16);
-                script.push(((self.sram_duplicate_permute[i + 2] as u32)) |
-                            (self.sram_duplicate_permute[i + 3] as u32) << 16);
-                script.push(((self.sram_duplicate_permute[i + 4] as u32)) |
-                            (self.sram_duplicate_permute[i + 5] as u32) << 16);
-                script.push(((self.sram_duplicate_permute[i + 6] as u32)) |
-                            (self.sram_duplicate_permute[i + 7] as u32) << 16);
+                script.push(
+                    (self.sram_duplicate_permute[i] as u32)
+                        | (self.sram_duplicate_permute[i + 1] as u32) << 16,
+                );
+                script.push(
+                    (self.sram_duplicate_permute[i + 2] as u32)
+                        | (self.sram_duplicate_permute[i + 3] as u32) << 16,
+                );
+                script.push(
+                    (self.sram_duplicate_permute[i + 4] as u32)
+                        | (self.sram_duplicate_permute[i + 5] as u32) << 16,
+                );
+                script.push(
+                    (self.sram_duplicate_permute[i + 6] as u32)
+                        | (self.sram_duplicate_permute[i + 7] as u32) << 16,
+                );
             }
         }
         for i in 0..NUM_THREADS_V1 {
@@ -723,14 +913,18 @@ impl FlatteningPart {
         // clock enable signal
         for k in 0..4 {
             for i in ((k * 8)..self.clken_permute.len()).step_by(32) {
-                script.push(((self.clken_permute[i] as u32)) |
-                            (self.clken_permute[i + 1] as u32) << 16);
-                script.push(((self.clken_permute[i + 2] as u32)) |
-                            (self.clken_permute[i + 3] as u32) << 16);
-                script.push(((self.clken_permute[i + 4] as u32)) |
-                            (self.clken_permute[i + 5] as u32) << 16);
-                script.push(((self.clken_permute[i + 6] as u32)) |
-                            (self.clken_permute[i + 7] as u32) << 16);
+                script.push(
+                    (self.clken_permute[i] as u32) | (self.clken_permute[i + 1] as u32) << 16,
+                );
+                script.push(
+                    (self.clken_permute[i + 2] as u32) | (self.clken_permute[i + 3] as u32) << 16,
+                );
+                script.push(
+                    (self.clken_permute[i + 4] as u32) | (self.clken_permute[i + 5] as u32) << 16,
+                );
+                script.push(
+                    (self.clken_permute[i + 6] as u32) | (self.clken_permute[i + 7] as u32) << 16,
+                );
             }
         }
         for i in 0..NUM_THREADS_V1 {
@@ -745,10 +939,11 @@ impl FlatteningPart {
 }
 
 fn build_flattened_script_v1(
-    aig: &AIG, stageds: &[&StagedAIG],
+    aig: &AIG,
+    stageds: &[&StagedAIG],
     parts_in_stages: &[&[Partition]],
     num_blocks: usize,
-    input_layout: Vec<usize>
+    input_layout: Vec<usize>,
 ) -> FlattenedScriptV1 {
     // determine the output position.
     // this is the prerequisite for generating the read
@@ -763,7 +958,9 @@ fn build_flattened_script_v1(
     let mut output_map = IndexMap::new();
     let mut staged_io_map = IndexMap::new();
     for (i, &input) in input_layout.iter().enumerate() {
-        if input == usize::MAX { continue }
+        if input == usize::MAX {
+            continue;
+        }
         input_map.insert(input, i as u32);
     }
 
@@ -790,9 +987,12 @@ fn build_flattened_script_v1(
     let mut stages_blocks_parts = Vec::new();
     let mut stages_flattening_parts = Vec::new();
 
-    for (i, (init_parts, &staged)) in parts_in_stages.into_iter().copied().zip(
-        stageds.into_iter()
-    ).enumerate() {
+    for (i, (init_parts, &staged)) in parts_in_stages
+        .into_iter()
+        .copied()
+        .zip(stageds.into_iter())
+        .enumerate()
+    {
         // first arrange parts onto blocks.
         let mut blocks_parts = vec![vec![]; num_blocks];
         let mut tot_nstages_blocks = vec![0; num_blocks];
@@ -805,24 +1005,28 @@ fn build_flattened_script_v1(
             tot_nstages_blocks[i] = init_parts[i].stages.len() + executor_fixed_cost;
         }
         for i in num_blocks..init_parts.len() {
-            let put = tot_nstages_blocks.iter().enumerate()
+            let put = tot_nstages_blocks
+                .iter()
+                .enumerate()
                 .min_by(|(_, a), (_, b)| a.cmp(b))
-                .unwrap().0;
+                .unwrap()
+                .0;
             blocks_parts[put].push(i);
             tot_nstages_blocks[put] += init_parts[i].stages.len() + executor_fixed_cost;
         }
         // clilog::debug!("blocks_parts: {:?}", blocks_parts);
-        clilog::debug!("major stage {}: max total boomerang depth (w/ cost) {}",
-                       i, tot_nstages_blocks.iter().copied().max().unwrap());
+        clilog::debug!(
+            "major stage {}: max total boomerang depth (w/ cost) {}",
+            i,
+            tot_nstages_blocks.iter().copied().max().unwrap()
+        );
 
         // the intermediates for parts being flattened
-        let mut flattening_parts: Vec<FlatteningPart> =
-            vec![Default::default(); init_parts.len()];
+        let mut flattening_parts: Vec<FlatteningPart> = vec![Default::default(); init_parts.len()];
 
         // basic index preprocessing for stages
         for i in 0..init_parts.len() {
-            flattening_parts[i].init_afters_writeouts(
-                aig, staged, &init_parts[i]);
+            flattening_parts[i].init_afters_writeouts(aig, staged, &init_parts[i]);
         }
 
         // allocate output state positions for all srams,
@@ -832,7 +1036,8 @@ fn build_flattened_script_v1(
                 flattening_parts[part_id].state_start = sum_state_start;
                 sum_state_start += flattening_parts[part_id].num_writeouts;
                 flattening_parts[part_id].sram_start = sum_srams_start;
-                sum_srams_start += flattening_parts[part_id].num_srams * (1 << AIGPDK_SRAM_ADDR_WIDTH);
+                sum_srams_start +=
+                    flattening_parts[part_id].num_srams * (1 << AIGPDK_SRAM_ADDR_WIDTH);
             }
         }
 
@@ -843,25 +1048,32 @@ fn build_flattened_script_v1(
         for part_id in 0..init_parts.len() {
             // clilog::debug!("initializing output for part {}", part_id);
             flattening_parts[part_id].make_inputs_outputs(
-                aig, staged, &init_parts[part_id],
-                &mut input_map, &mut staged_io_map, &mut output_map
+                aig,
+                staged,
+                &init_parts[part_id],
+                &mut input_map,
+                &mut staged_io_map,
+                &mut output_map,
             );
         }
         stages_blocks_parts.push(blocks_parts);
         stages_flattening_parts.push(flattening_parts);
     }
 
-    for ((blocks_parts, flattening_parts), init_parts) in stages_blocks_parts.iter().zip(
-        stages_flattening_parts.iter_mut()
-    ).zip(
-        parts_in_stages.into_iter().copied()
-    ) {
+    for ((blocks_parts, flattening_parts), init_parts) in stages_blocks_parts
+        .iter()
+        .zip(stages_flattening_parts.iter_mut())
+        .zip(parts_in_stages.into_iter().copied())
+    {
         // build script per part. we will later assemble them to blocks.
         let mut parts_data_split = vec![vec![]; init_parts.len()];
         for part_id in 0..init_parts.len() {
             // clilog::debug!("building script for part {}", part_id);
             parts_data_split[part_id] = flattening_parts[part_id].build_script(
-                aig, &init_parts[part_id], &input_map, &staged_io_map
+                aig,
+                &init_parts[part_id],
+                &input_map,
+                &staged_io_map,
             );
         }
 
@@ -871,8 +1083,7 @@ fn build_flattened_script_v1(
                 let mut dummy = vec![0; NUM_THREADS_V1];
                 dummy[1] = 1;
                 blocks_data.extend(dummy.into_iter());
-            }
-            else {
+            } else {
                 let num_parts = blocks_parts[block_id].len();
                 let mut last_part_st = usize::MAX;
                 for (i, &part_id) in blocks_parts[block_id].iter().enumerate() {
@@ -889,36 +1100,63 @@ fn build_flattened_script_v1(
     blocks_start.push(blocks_data.len());
     blocks_data.extend((0..NUM_THREADS_V1 * 8).map(|_| 0)); // padding
 
-    clilog::info!("Built script for {} blocks, reg/io state size {}, sram size {}, script size {}",
-                  num_blocks, sum_state_start, sum_srams_start, blocks_data.len());
+    clilog::info!(
+        "Built script for {} blocks, reg/io state size {}, sram size {}, script size {}",
+        num_blocks,
+        sum_state_start,
+        sum_srams_start,
+        blocks_data.len()
+    );
 
     // Build assertion_positions from simcontrols
-    let assertion_positions: Vec<_> = aig.simcontrols.iter()
+    let assertion_positions: Vec<_> = aig
+        .simcontrols
+        .iter()
         .filter_map(|(&cell_id, ctrl)| {
             // Get the position of the condition in the output state
-            output_map.get(&ctrl.condition_iv).map(|&pos| {
-                (cell_id, pos, ctrl.message_id, ctrl.control_type)
-            })
+            output_map
+                .get(&ctrl.condition_iv)
+                .map(|&pos| (cell_id, pos, ctrl.message_id, ctrl.control_type))
         })
         .collect();
 
     if !assertion_positions.is_empty() {
-        clilog::info!("Found {} assertion/simcontrol nodes", assertion_positions.len());
+        clilog::info!(
+            "Found {} assertion/simcontrol nodes",
+            assertion_positions.len()
+        );
         for &(cell_id, pos, msg_id, ctrl_type) in &assertion_positions {
-            clilog::debug!("  Assertion: cell={}, pos={} (word={}, bit={}), msg_id={}, type={:?}",
-                          cell_id, pos, pos >> 5, pos & 31, msg_id, ctrl_type);
+            clilog::debug!(
+                "  Assertion: cell={}, pos={} (word={}, bit={}), msg_id={}, type={:?}",
+                cell_id,
+                pos,
+                pos >> 5,
+                pos & 31,
+                msg_id,
+                ctrl_type
+            );
         }
     }
 
     // Build display_positions from displays
-    let display_positions: Vec<_> = aig.displays.iter()
+    let display_positions: Vec<_> = aig
+        .displays
+        .iter()
         .filter_map(|(&cell_id, disp)| {
             output_map.get(&disp.enable_iv).map(|&enable_pos| {
                 // Get positions for all argument signals
-                let arg_positions: Vec<u32> = disp.args_iv.iter()
+                let arg_positions: Vec<u32> = disp
+                    .args_iv
+                    .iter()
                     .filter_map(|&arg_iv| output_map.get(&arg_iv).copied())
                     .collect();
-                (cell_id, enable_pos, disp.format.clone(), arg_positions, disp.arg_widths.clone())
+                (
+                    cell_id,
+                    enable_pos,
+                    disp.format.clone(),
+                    arg_positions,
+                    disp.arg_widths.clone(),
+                )
             })
         })
         .collect();
@@ -926,8 +1164,15 @@ fn build_flattened_script_v1(
     if !display_positions.is_empty() {
         clilog::info!("Found {} display nodes", display_positions.len());
         for (cell_id, pos, format, arg_pos, _) in &display_positions {
-            clilog::debug!("  Display: cell={}, enable_pos={} (word={}, bit={}), format='{}', args={:?}",
-                          cell_id, pos, pos >> 5, pos & 31, format, arg_pos);
+            clilog::debug!(
+                "  Display: cell={}, enable_pos={} (word={}, bit={}), format='{}', args={:?}",
+                cell_id,
+                pos,
+                pos >> 5,
+                pos & 31,
+                format,
+                arg_pos
+            );
         }
     }
 
@@ -944,6 +1189,11 @@ fn build_flattened_script_v1(
         stages_blocks_parts,
         assertion_positions,
         display_positions,
+        // Timing fields - initialized empty, populated by load_timing()
+        gate_delays: Vec::new(),
+        dff_constraints: Vec::new(),
+        clock_period_ps: 1000, // Default 1ns
+        timing_enabled: false,
     }
 }
 
@@ -962,12 +1212,97 @@ impl FlattenedScriptV1 {
     /// memory layout, each one is an AIG bit index.
     /// padding bits should be set to usize::MAX.
     pub fn from(
-        aig: &AIG, stageds: &[&StagedAIG],
+        aig: &AIG,
+        stageds: &[&StagedAIG],
         parts_in_stages: &[&[Partition]],
         num_blocks: usize,
-        input_layout: Vec<usize>
+        input_layout: Vec<usize>,
     ) -> FlattenedScriptV1 {
-        build_flattened_script_v1(
-            aig, stageds, parts_in_stages, num_blocks, input_layout)
+        build_flattened_script_v1(aig, stageds, parts_in_stages, num_blocks, input_layout)
+    }
+
+    /// Load timing data from a Liberty library and AIG.
+    ///
+    /// This populates gate_delays and dff_constraints for timing-aware simulation.
+    /// Must be called after building the script if timing analysis is needed.
+    pub fn load_timing(&mut self, aig: &AIG, lib: &TimingLibrary, clock_period_ps: u64) {
+        // Get default delays from library
+        let and_delay = lib.and_gate_delay("AND2_00_0").unwrap_or((1, 1));
+        let dff_timing = lib.dff_timing();
+        let sram_timing = lib.sram_timing();
+
+        // Initialize gate delays for all AIG pins
+        self.gate_delays = vec![PackedDelay::default(); aig.num_aigpins + 1];
+
+        for i in 1..=aig.num_aigpins {
+            let delay = match &aig.drivers[i] {
+                DriverType::AndGate(_, _) => {
+                    PackedDelay::from_u64(and_delay.0, and_delay.1)
+                }
+                DriverType::InputPort(_) | DriverType::InputClockFlag(_, _) | DriverType::Tie0 => {
+                    PackedDelay::default() // Zero delay for inputs
+                }
+                DriverType::DFF(_) => {
+                    // Clock-to-Q delay
+                    dff_timing
+                        .as_ref()
+                        .map(|t| PackedDelay::from_u64(t.clk_to_q_rise_ps, t.clk_to_q_fall_ps))
+                        .unwrap_or_default()
+                }
+                DriverType::SRAM(_) => {
+                    // SRAM read delay
+                    sram_timing
+                        .as_ref()
+                        .map(|t| PackedDelay::from_u64(t.read_clk_to_data_rise_ps, t.read_clk_to_data_fall_ps))
+                        .unwrap_or(PackedDelay::new(1, 1))
+                }
+            };
+            self.gate_delays[i] = delay;
+        }
+
+        // Build DFF constraints
+        self.dff_constraints = Vec::with_capacity(aig.dffs.len());
+        let setup_time = dff_timing.as_ref().map(|t| t.max_setup()).unwrap_or(0) as u16;
+        let hold_time = dff_timing.as_ref().map(|t| t.max_hold()).unwrap_or(0) as u16;
+
+        for (&cell_id, dff) in &aig.dffs {
+            // Find the state position for the D input
+            let data_state_pos = self
+                .output_map
+                .get(&dff.d_iv)
+                .copied()
+                .unwrap_or(u32::MAX);
+
+            self.dff_constraints.push(DFFConstraint {
+                setup_ps: setup_time,
+                hold_ps: hold_time,
+                data_state_pos,
+                cell_id: cell_id as u32,
+            });
+        }
+
+        self.clock_period_ps = clock_period_ps;
+        self.timing_enabled = true;
+
+        clilog::info!(
+            "Loaded timing: {} gate delays, {} DFF constraints, clock={}ps",
+            self.gate_delays.len(),
+            self.dff_constraints.len(),
+            clock_period_ps
+        );
+    }
+
+    /// Get the packed delay for an AIG pin (by index).
+    pub fn get_delay(&self, aigpin: usize) -> PackedDelay {
+        if aigpin < self.gate_delays.len() {
+            self.gate_delays[aigpin]
+        } else {
+            PackedDelay::default()
+        }
+    }
+
+    /// Check if timing data is available.
+    pub fn has_timing(&self) -> bool {
+        self.timing_enabled
     }
 }
