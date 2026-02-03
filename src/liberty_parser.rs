@@ -575,7 +575,13 @@ impl<'a> LibertyParser<'a> {
         }
 
         self.expect_char('(')?;
-        lib.name = self.read_identifier();
+        // Library name can be quoted (SKY130) or unquoted (AIGPDK)
+        self.skip_whitespace();
+        if self.peek_char() == Some('"') {
+            lib.name = self.read_string()?;
+        } else {
+            lib.name = self.read_identifier();
+        }
         self.expect_char(')')?;
         self.expect_char('{')?;
 
@@ -644,14 +650,20 @@ impl<'a> LibertyParser<'a> {
         let mut cell = CellTiming::default();
 
         self.expect_char('(')?;
-        cell.name = self.read_identifier();
-        // Handle cell names with special characters like $__RAMGEM_SYNC_
-        if self.peek_char() == Some('_') {
-            while self.peek_char() == Some('_') {
-                self.expect_char('_')?;
-                cell.name.push('_');
-                let extra = self.read_identifier();
-                cell.name.push_str(&extra);
+        // Cell name can be quoted (SKY130) or unquoted (AIGPDK)
+        self.skip_whitespace();
+        if self.peek_char() == Some('"') {
+            cell.name = self.read_string()?;
+        } else {
+            cell.name = self.read_identifier();
+            // Handle cell names with special characters like $__RAMGEM_SYNC_
+            if self.peek_char() == Some('_') {
+                while self.peek_char() == Some('_') {
+                    self.expect_char('_')?;
+                    cell.name.push('_');
+                    let extra = self.read_identifier();
+                    cell.name.push_str(&extra);
+                }
             }
         }
         self.expect_char(')')?;
@@ -703,7 +715,13 @@ impl<'a> LibertyParser<'a> {
         let mut pin = PinTiming::default();
 
         self.expect_char('(')?;
-        pin.name = self.read_identifier();
+        // Pin name can be quoted (SKY130) or unquoted (AIGPDK)
+        self.skip_whitespace();
+        if self.peek_char() == Some('"') {
+            pin.name = self.read_string()?;
+        } else {
+            pin.name = self.read_identifier();
+        }
         self.expect_char(')')?;
         self.expect_char('{')?;
 
@@ -755,7 +773,13 @@ impl<'a> LibertyParser<'a> {
         let mut pin = PinTiming::default();
 
         self.expect_char('(')?;
-        pin.name = self.read_identifier();
+        // Bus name can be quoted (SKY130) or unquoted (AIGPDK)
+        self.skip_whitespace();
+        if self.peek_char() == Some('"') {
+            pin.name = self.read_string()?;
+        } else {
+            pin.name = self.read_identifier();
+        }
         self.expect_char(')')?;
         self.expect_char('{')?;
 
