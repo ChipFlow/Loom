@@ -50,6 +50,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install LLVM (for OpenMP support)
+        run: |
+          brew install llvm
+          echo "CC=/opt/homebrew/opt/llvm/bin/clang" >> $GITHUB_ENV
+          echo "CXX=/opt/homebrew/opt/llvm/bin/clang++" >> $GITHUB_ENV
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
