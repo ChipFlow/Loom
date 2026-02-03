@@ -2,11 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //! And-inverter graph format
 //!
-//! An AIG is derived from netlistdb synthesized in AIGPDK.
+//! An AIG is derived from netlistdb synthesized in AIGPDK or SKY130.
 
 use crate::aigpdk::AIGPDK_SRAM_ADDR_WIDTH;
+use crate::sky130::{extract_cell_type, is_sky130_cell};
+use crate::sky130_decomp::{decompose_sky130_cell, is_multi_output_cell, is_sequential_cell, is_tie_cell, CellInputs};
 use indexmap::{IndexMap, IndexSet};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
+use smallvec::SmallVec;
+
+/// Work item for iterative DFS traversal.
+/// Using two-phase approach: Visit pushes dependencies, Process computes outputs.
+#[derive(Clone, Copy)]
+enum WorkItem {
+    /// First phase: check if visited, mark in-stack, push Process then dependencies
+    Visit(usize),
+    /// Second phase: all dependencies ready, compute output, clear in-stack
+    Process(usize),
+}
 
 /// A DFF.
 #[derive(Debug, Default, Clone)]
@@ -296,93 +309,224 @@ impl AIG {
     fn trace_clock_pin(
         &mut self,
         netlistdb: &NetlistDB,
-        pinid: usize,
-        is_negedge: bool,
+        start_pinid: usize,
+        start_is_negedge: bool,
         // should we ignore cklnqd in this tracing.
         // if set to true, we will treat cklnqd as a simple buffer.
         // otherwise, we assert that cklnqd/en is already built in
         // our aig mapping (pin2aigpin_iv).
         ignore_cklnqd: bool,
     ) -> Result<usize, usize> {
-        if netlistdb.pindirect[pinid] == Direction::I {
-            let netid = netlistdb.pin2net[pinid];
-            if Some(netid) == netlistdb.net_zero || Some(netid) == netlistdb.net_one {
-                return Ok(0);
+        // Iterative implementation using explicit stack
+        // Each entry: (pinid, is_negedge, is_processing_cklnqd, cklnqd_cp_result)
+        // For CKLNQD, we need to first trace CP, then combine with EN
+        let mut current_pinid = start_pinid;
+        let mut current_is_negedge = start_is_negedge;
+
+        // Stack for CKLNQD cells that need post-processing
+        // (pinid of EN pin, is_negedge at that point)
+        let mut cklnqd_stack: Vec<(usize, bool)> = Vec::new();
+
+        let mut iteration = 0;
+        let mut visited_pins: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut path: Vec<(usize, String)> = Vec::new();
+        loop {
+            iteration += 1;
+            {
+                use netlistdb::GeneralHierName;
+                let pin_name = netlistdb.pinnames[current_pinid].dbg_fmt_pin();
+                let dir = if netlistdb.pindirect[current_pinid] == Direction::I { "I" } else { "O" };
+                path.push((current_pinid, format!("{}:{}", pin_name, dir)));
             }
-            let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
-            return self.trace_clock_pin(netlistdb, root, is_negedge, ignore_cklnqd);
-        }
-        let cellid = netlistdb.pin2cell[pinid];
-        if cellid == 0 {
-            let clkentry = self
-                .clock_pin2aigpins
-                .entry(pinid)
-                .or_insert((usize::MAX, usize::MAX));
-            let clksignal = match is_negedge {
-                false => clkentry.0,
-                true => clkentry.1,
-            };
-            if clksignal != usize::MAX {
-                return Ok(clksignal << 1);
+            if visited_pins.contains(&current_pinid) {
+                panic!(
+                    "trace_clock_pin cycle detected!\nstart={}, iteration={}\npath:\n{}",
+                    start_pinid, iteration,
+                    path.iter().enumerate().map(|(i, (pid, name))| format!("  {:3}: pin {} - {}", i, pid, name)).collect::<Vec<_>>().join("\n")
+                );
             }
-            let aigpin = self.add_aigpin(DriverType::InputClockFlag(pinid, is_negedge as u8));
-            let clkentry = self.clock_pin2aigpins.get_mut(&pinid).unwrap();
-            let clksignal = match is_negedge {
-                false => &mut clkentry.0,
-                true => &mut clkentry.1,
-            };
-            *clksignal = aigpin;
-            return Ok(aigpin << 1);
-        }
-        let mut pin_a = usize::MAX;
-        let mut pin_cp = usize::MAX;
-        let mut pin_en = usize::MAX;
-        let celltype = netlistdb.celltypes[cellid].as_str();
-        if !matches!(celltype, "INV" | "BUF" | "CKLNQD") {
-            clilog::error!(
-                "cell type {} supported on clock path. expecting only INV, BUF, or CKLNQD",
-                celltype
-            );
-            return Err(pinid);
-        }
-        for ipin in netlistdb.cell2pin.iter_set(cellid) {
-            if netlistdb.pindirect[ipin] == Direction::I {
-                match netlistdb.pinnames[ipin].1.as_str() {
-                    "A" => pin_a = ipin,
-                    "CP" => pin_cp = ipin,
-                    "E" => pin_en = ipin,
-                    i @ _ => {
-                        clilog::error!("input pin {} unexpected for ck element {}", i, celltype);
-                        return Err(ipin);
+            visited_pins.insert(current_pinid);
+
+            if iteration > 100000 {
+                panic!(
+                    "trace_clock_pin infinite loop detected: pinid={}, start={}, iteration={}",
+                    current_pinid, start_pinid, iteration
+                );
+            }
+            let pinid = current_pinid;
+            let is_negedge = current_is_negedge;
+
+            if netlistdb.pindirect[pinid] == Direction::I {
+                let netid = netlistdb.pin2net[pinid];
+                if Some(netid) == netlistdb.net_zero || Some(netid) == netlistdb.net_one {
+                    // Reached a constant - process any pending CKLNQD
+                    let mut result = 0usize;
+                    while let Some((en_pin, _)) = cklnqd_stack.pop() {
+                        if ignore_cklnqd {
+                            // Just return the traced clock, ignore enable
+                        } else {
+                            let en_iv = self.pin2aigpin_iv[en_pin];
+                            assert_ne!(en_iv, usize::MAX, "clken not built");
+                            result = self.add_and_gate(result, en_iv);
+                        }
+                    }
+                    return Ok(result);
+                }
+                // Follow net to driving pin - find the output pin (driver) on the net
+                let net_pins_start = netlistdb.net2pin.start[netid];
+                let net_pins_end = if netid + 1 < netlistdb.net2pin.start.len() {
+                    netlistdb.net2pin.start[netid + 1]
+                } else {
+                    netlistdb.net2pin.items.len()
+                };
+                let mut driver_pin = None;
+                for &np in &netlistdb.net2pin.items[net_pins_start..net_pins_end] {
+                    // Check if this pin is an output (driver)
+                    if netlistdb.pindirect[np] == Direction::O {
+                        driver_pin = Some(np);
+                        break;
+                    }
+                    // Also check for primary input (cell 0)
+                    if netlistdb.pin2cell[np] == 0 {
+                        driver_pin = Some(np);
+                        break;
+                    }
+                }
+                if let Some(dp) = driver_pin {
+                    current_pinid = dp;
+                    continue;
+                }
+                // Net has no driver - treat this input pin as a primary input (clock source)
+                // This handles floating nets / undriven primary inputs
+                // Create a clock signal for this undriven net
+                let clkentry = self
+                    .clock_pin2aigpins
+                    .entry(pinid)
+                    .or_insert((usize::MAX, usize::MAX));
+                let clksignal = match is_negedge {
+                    false => clkentry.0,
+                    true => clkentry.1,
+                };
+                let mut result = if clksignal != usize::MAX {
+                    clksignal << 1
+                } else {
+                    let aigpin = self.add_aigpin(DriverType::InputClockFlag(pinid, is_negedge as u8));
+                    let clkentry = self.clock_pin2aigpins.get_mut(&pinid).unwrap();
+                    let clksignal = match is_negedge {
+                        false => &mut clkentry.0,
+                        true => &mut clkentry.1,
+                    };
+                    *clksignal = aigpin;
+                    aigpin << 1
+                };
+
+                // Process any pending CKLNQD
+                while let Some((en_pin, _)) = cklnqd_stack.pop() {
+                    if !ignore_cklnqd {
+                        let en_iv = self.pin2aigpin_iv[en_pin];
+                        assert_ne!(en_iv, usize::MAX, "clken not built");
+                        result = self.add_and_gate(result, en_iv);
+                    }
+                }
+                return Ok(result);
+            }
+
+            let cellid = netlistdb.pin2cell[pinid];
+            if cellid == 0 {
+                // Reached primary input - this is the clock source
+                let clkentry = self
+                    .clock_pin2aigpins
+                    .entry(pinid)
+                    .or_insert((usize::MAX, usize::MAX));
+                let clksignal = match is_negedge {
+                    false => clkentry.0,
+                    true => clkentry.1,
+                };
+                let mut result = if clksignal != usize::MAX {
+                    clksignal << 1
+                } else {
+                    let aigpin = self.add_aigpin(DriverType::InputClockFlag(pinid, is_negedge as u8));
+                    let clkentry = self.clock_pin2aigpins.get_mut(&pinid).unwrap();
+                    let clksignal = match is_negedge {
+                        false => &mut clkentry.0,
+                        true => &mut clkentry.1,
+                    };
+                    *clksignal = aigpin;
+                    aigpin << 1
+                };
+
+                // Process any pending CKLNQD
+                while let Some((en_pin, _)) = cklnqd_stack.pop() {
+                    if !ignore_cklnqd {
+                        let en_iv = self.pin2aigpin_iv[en_pin];
+                        assert_ne!(en_iv, usize::MAX, "clken not built");
+                        result = self.add_and_gate(result, en_iv);
+                    }
+                }
+                return Ok(result);
+            }
+
+            let mut pin_a = usize::MAX;
+            let mut pin_cp = usize::MAX;
+            let mut pin_en = usize::MAX;
+            let celltype = netlistdb.celltypes[cellid].as_str();
+
+            // Determine if this is a clock buffer/inverter (AIGPDK or SKY130)
+            let is_inv = celltype == "INV"
+                || (is_sky130_cell(celltype) && {
+                    let ct = extract_cell_type(celltype);
+                    ct.starts_with("inv") || ct.starts_with("clkinv")
+                });
+            let is_buf = celltype == "BUF"
+                || (is_sky130_cell(celltype) && {
+                    let ct = extract_cell_type(celltype);
+                    ct.starts_with("buf") || ct.starts_with("clkbuf") || ct.starts_with("clkdlybuf")
+                });
+
+            if !is_inv && !is_buf && celltype != "CKLNQD" {
+                clilog::error!(
+                    "cell type {} not supported on clock path. expecting only INV, BUF, or CKLNQD (or SKY130 equivalents)",
+                    celltype
+                );
+                return Err(pinid);
+            }
+
+            for ipin in netlistdb.cell2pin.iter_set(cellid) {
+                if netlistdb.pindirect[ipin] == Direction::I {
+                    match netlistdb.pinnames[ipin].1.as_str() {
+                        "A" => pin_a = ipin,
+                        "CP" => pin_cp = ipin,
+                        "E" => pin_en = ipin,
+                        i @ _ => {
+                            clilog::error!("input pin {} unexpected for ck element {}", i, celltype);
+                            return Err(ipin);
+                        }
                     }
                 }
             }
-        }
-        match celltype {
-            "INV" => {
+
+            if is_inv {
                 assert_ne!(pin_a, usize::MAX);
-                self.trace_clock_pin(netlistdb, pin_a, !is_negedge, ignore_cklnqd)
-            }
-            "BUF" => {
+                current_pinid = pin_a;
+                current_is_negedge = !is_negedge;
+            } else if is_buf {
                 assert_ne!(pin_a, usize::MAX);
-                self.trace_clock_pin(netlistdb, pin_a, is_negedge, ignore_cklnqd)
-            }
-            "CKLNQD" => {
+                current_pinid = pin_a;
+                // is_negedge stays the same
+            } else if celltype == "CKLNQD" {
                 assert_ne!(pin_cp, usize::MAX);
                 assert_ne!(pin_en, usize::MAX);
-                let ck_iv = self.trace_clock_pin(netlistdb, pin_cp, is_negedge, ignore_cklnqd)?;
-                if ignore_cklnqd {
-                    return Ok(ck_iv);
-                }
-                let en_iv = self.pin2aigpin_iv[pin_en];
-                assert_ne!(en_iv, usize::MAX, "clken not built");
-                Ok(self.add_and_gate(ck_iv, en_iv))
+                // Push CKLNQD for post-processing, continue with CP
+                cklnqd_stack.push((pin_en, is_negedge));
+                current_pinid = pin_cp;
+                // is_negedge stays the same
+            } else {
+                unreachable!()
             }
-            _ => unreachable!(),
         }
     }
 
-    /// recursively add aig pins for netlistdb pins
+    /// Iteratively add AIG pins for netlistdb pins using explicit stack.
     ///
     /// for sequential logics like DFF and RAM,
     /// 1. their netlist pin inputs are not patched,
@@ -395,141 +539,665 @@ impl AIG {
         netlistdb: &NetlistDB,
         topo_vis: &mut Vec<bool>,
         topo_instack: &mut Vec<bool>,
-        pinid: usize,
+        start_pinid: usize,
     ) {
-        if topo_instack[pinid] {
-            panic!(
-                "circuit has a loop around pin {}",
-                netlistdb.pinnames[pinid].dbg_fmt_pin()
-            );
-        }
-        if topo_vis[pinid] {
-            return;
-        }
-        topo_vis[pinid] = true;
-        topo_instack[pinid] = true;
-        let netid = netlistdb.pin2net[pinid];
-        let cellid = netlistdb.pin2cell[pinid];
-        let celltype = netlistdb.celltypes[cellid].as_str();
-        if netlistdb.pindirect[pinid] == Direction::I {
-            if Some(netid) == netlistdb.net_zero {
-                self.pin2aigpin_iv[pinid] = 0;
-            } else if Some(netid) == netlistdb.net_one {
-                self.pin2aigpin_iv[pinid] = 1;
-            } else {
-                let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
-                self.dfs_netlistdb_build_aig(netlistdb, topo_vis, topo_instack, root);
-                self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[root];
-                if cellid == 0 {
-                    self.primary_outputs.insert(self.pin2aigpin_iv[pinid]);
+        let mut work_stack: Vec<WorkItem> = vec![WorkItem::Visit(start_pinid)];
+
+        while let Some(item) = work_stack.pop() {
+            match item {
+                WorkItem::Visit(pinid) => {
+                    if topo_vis[pinid] {
+                        continue;
+                    }
+                    if topo_instack[pinid] {
+                        panic!(
+                            "circuit has a loop around pin {}",
+                            netlistdb.pinnames[pinid].dbg_fmt_pin()
+                        );
+                    }
+
+                    topo_vis[pinid] = true;
+                    topo_instack[pinid] = true;
+
+                    let netid = netlistdb.pin2net[pinid];
+                    let cellid = netlistdb.pin2cell[pinid];
+                    let celltype = netlistdb.celltypes[cellid].as_str();
+
+                    // Handle input pins
+                    if netlistdb.pindirect[pinid] == Direction::I {
+                        if Some(netid) == netlistdb.net_zero {
+                            self.pin2aigpin_iv[pinid] = 0;
+                            topo_instack[pinid] = false;
+                        } else if Some(netid) == netlistdb.net_one {
+                            self.pin2aigpin_iv[pinid] = 1;
+                            topo_instack[pinid] = false;
+                        } else {
+                            // Find the actual driver pin on the net
+                            let net_pins_start = netlistdb.net2pin.start[netid];
+                            let net_pins_end = if netid + 1 < netlistdb.net2pin.start.len() {
+                                netlistdb.net2pin.start[netid + 1]
+                            } else {
+                                netlistdb.net2pin.items.len()
+                            };
+                            let mut driver_pin = None;
+                            for &np in &netlistdb.net2pin.items[net_pins_start..net_pins_end] {
+                                // Check if this pin is an output (driver)
+                                if netlistdb.pindirect[np] == Direction::O {
+                                    driver_pin = Some(np);
+                                    break;
+                                }
+                                // Also check for primary input (cell 0)
+                                if netlistdb.pin2cell[np] == 0 {
+                                    driver_pin = Some(np);
+                                    break;
+                                }
+                            }
+                            if let Some(root) = driver_pin {
+                                // Push process, then dependency
+                                work_stack.push(WorkItem::Process(pinid));
+                                work_stack.push(WorkItem::Visit(root));
+                            } else {
+                                // Net has no driver - tie to 0
+                                // This handles floating nets / undriven signals in post-P&R netlists
+                                self.pin2aigpin_iv[pinid] = 0;
+                                topo_instack[pinid] = false;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle primary input ports (cellid == 0, output direction)
+                    if cellid == 0 {
+                        let aigpin = self.add_aigpin(DriverType::InputPort(pinid));
+                        self.pin2aigpin_iv[pinid] = aigpin << 1;
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Handle AIGPDK DFF/DFFSR
+                    if matches!(celltype, "DFF" | "DFFSR") {
+                        // Pre-create DFF Q output
+                        let q = self.add_aigpin(DriverType::DFF(cellid));
+                        let dff = self.dffs.entry(cellid).or_default();
+                        dff.q = q;
+
+                        // Push process then S/R dependencies
+                        work_stack.push(WorkItem::Process(pinid));
+                        for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                            if matches!(netlistdb.pinnames[dep_pinid].1.as_str(), "S" | "R") {
+                                work_stack.push(WorkItem::Visit(dep_pinid));
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle LATCH
+                    if celltype == "LATCH" {
+                        panic!(
+                            "latches are intentionally UNSUPPORTED by GEM, \
+                                except in identified gated clocks. \n\
+                                you can link a FF&MUX-based LATCH module, \
+                                but most likely that is NOT the right solution. \n\
+                                check all your assignments inside always@(*) block \
+                                to make sure they cover all scenarios."
+                        );
+                    }
+
+                    // Handle SRAM
+                    if celltype == "$__RAMGEM_SYNC_" {
+                        let o = self.add_aigpin(DriverType::SRAM(cellid));
+                        self.pin2aigpin_iv[pinid] = o << 1;
+                        assert_eq!(netlistdb.pinnames[pinid].1.as_str(), "PORT_R_RD_DATA");
+                        let sram = self.srams.entry(cellid).or_default();
+                        sram.port_r_rd_data[netlistdb.pinnames[pinid].2.unwrap() as usize] = o;
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Handle CKLNQD
+                    if celltype == "CKLNQD" {
+                        let mut prev_cp = usize::MAX;
+                        let mut prev_en = usize::MAX;
+                        for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                            match netlistdb.pinnames[dep_pinid].1.as_str() {
+                                "CP" => prev_cp = dep_pinid,
+                                "E" => prev_en = dep_pinid,
+                                _ => {}
+                            }
+                        }
+                        assert_ne!(prev_cp, usize::MAX);
+                        assert_ne!(prev_en, usize::MAX);
+                        // Push process then dependencies
+                        work_stack.push(WorkItem::Process(pinid));
+                        work_stack.push(WorkItem::Visit(prev_cp));
+                        work_stack.push(WorkItem::Visit(prev_en));
+                        continue;
+                    }
+
+                    // Handle GEM_ASSERT / GEM_DISPLAY
+                    if celltype == "GEM_ASSERT" || celltype == "GEM_DISPLAY" {
+                        // Push process then all input pin dependencies
+                        work_stack.push(WorkItem::Process(pinid));
+                        for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                            if netlistdb.pindirect[dep_pinid] == Direction::I {
+                                work_stack.push(WorkItem::Visit(dep_pinid));
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle SKY130 cells
+                    if is_sky130_cell(celltype) {
+                        // Get dependencies based on cell type
+                        let deps = self.get_sky130_dependencies(netlistdb, pinid, cellid, celltype);
+                        // Do any pre-processing
+                        self.sky130_preprocess(netlistdb, pinid, cellid, celltype);
+                        // Push process then dependencies
+                        work_stack.push(WorkItem::Process(pinid));
+                        for dep in deps {
+                            work_stack.push(WorkItem::Visit(dep));
+                        }
+                        continue;
+                    }
+
+                    // Handle AIGPDK combinational cells (AND2, INV, BUF)
+                    let mut prev_a = usize::MAX;
+                    let mut prev_b = usize::MAX;
+                    for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                        match netlistdb.pinnames[dep_pinid].1.as_str() {
+                            "A" => prev_a = dep_pinid,
+                            "B" => prev_b = dep_pinid,
+                            _ => {}
+                        }
+                    }
+                    // Push process then dependencies
+                    work_stack.push(WorkItem::Process(pinid));
+                    if prev_b != usize::MAX {
+                        work_stack.push(WorkItem::Visit(prev_b));
+                    }
+                    if prev_a != usize::MAX {
+                        work_stack.push(WorkItem::Visit(prev_a));
+                    }
+                }
+
+                WorkItem::Process(pinid) => {
+                    let netid = netlistdb.pin2net[pinid];
+                    let cellid = netlistdb.pin2cell[pinid];
+                    let celltype = netlistdb.celltypes[cellid].as_str();
+
+                    // Process input pins (copy from driver)
+                    if netlistdb.pindirect[pinid] == Direction::I {
+                        let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
+                        self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[root];
+                        if cellid == 0 {
+                            self.primary_outputs.insert(self.pin2aigpin_iv[pinid]);
+                        }
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Process AIGPDK DFF/DFFSR
+                    if matches!(celltype, "DFF" | "DFFSR") {
+                        let dff = self.dffs.get(&cellid).unwrap();
+                        let q = dff.q;
+                        let mut ap_s_iv = 1;
+                        let mut ap_r_iv = 1;
+                        let mut q_out = q << 1;
+
+                        for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                            let prev = self.pin2aigpin_iv[dep_pinid];
+                            match netlistdb.pinnames[dep_pinid].1.as_str() {
+                                "S" => ap_s_iv = prev,
+                                "R" => ap_r_iv = prev,
+                                _ => {}
+                            }
+                        }
+                        q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
+                        q_out = self.add_and_gate(q_out, ap_r_iv);
+                        self.pin2aigpin_iv[pinid] = q_out;
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Process CKLNQD (no output pin defined)
+                    if celltype == "CKLNQD" {
+                        // do not define pin2aigpin_iv[pinid] which is CKLNQD/Q and unused in logic.
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Process GEM_ASSERT / GEM_DISPLAY (no output pin defined)
+                    if celltype == "GEM_ASSERT" || celltype == "GEM_DISPLAY" {
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Process SKY130 cells
+                    if is_sky130_cell(celltype) {
+                        self.sky130_postprocess(netlistdb, pinid, cellid, celltype);
+                        topo_instack[pinid] = false;
+                        continue;
+                    }
+
+                    // Process AIGPDK combinational cells
+                    let mut prev_a = usize::MAX;
+                    let mut prev_b = usize::MAX;
+                    for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                        match netlistdb.pinnames[dep_pinid].1.as_str() {
+                            "A" => prev_a = dep_pinid,
+                            "B" => prev_b = dep_pinid,
+                            _ => {}
+                        }
+                    }
+
+                    match celltype {
+                        "AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" | "AND2_11_1" => {
+                            assert_ne!(prev_a, usize::MAX);
+                            assert_ne!(prev_b, usize::MAX);
+                            let name = netlistdb.celltypes[cellid].as_bytes();
+                            let iv_a = name[5] - b'0';
+                            let iv_b = name[6] - b'0';
+                            let iv_y = name[8] - b'0';
+                            let apid = self.add_and_gate(
+                                self.pin2aigpin_iv[prev_a] ^ (iv_a as usize),
+                                self.pin2aigpin_iv[prev_b] ^ (iv_b as usize),
+                            ) ^ (iv_y as usize);
+                            self.pin2aigpin_iv[pinid] = apid;
+                        }
+                        "INV" => {
+                            assert_ne!(prev_a, usize::MAX);
+                            self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[prev_a] ^ 1;
+                        }
+                        "BUF" => {
+                            assert_ne!(prev_a, usize::MAX);
+                            self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[prev_a];
+                        }
+                        _ => panic!("Unknown AIGPDK cell type: {}", celltype),
+                    }
+                    topo_instack[pinid] = false;
                 }
             }
-        } else if cellid == 0 {
-            let aigpin = self.add_aigpin(DriverType::InputPort(pinid));
-            self.pin2aigpin_iv[pinid] = aigpin << 1;
-        } else if matches!(celltype, "DFF" | "DFFSR") {
+        }
+    }
+
+    /// Get dependencies for a SKY130 cell that need to be visited before processing.
+    /// Uses SmallVec to avoid heap allocation for most cells (≤6 inputs).
+    fn get_sky130_dependencies(
+        &self,
+        netlistdb: &NetlistDB,
+        pinid: usize,
+        cellid: usize,
+        celltype: &str,
+    ) -> SmallVec<[usize; 6]> {
+        let cell_type = extract_cell_type(celltype);
+        let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
+
+        // Tie cells have no dependencies
+        if is_tie_cell(cell_type) {
+            return SmallVec::new();
+        }
+
+        // SRAM has no dependencies for output creation
+        if celltype.starts_with("CF_SRAM_") {
+            return SmallVec::new();
+        }
+
+        // Sequential cells: depend on SET_B/RESET_B pins
+        if is_sequential_cell(cell_type) {
+            let mut deps = SmallVec::new();
+            for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
+                if matches!(pin_name, "SET_B" | "RESET_B") {
+                    deps.push(dep_pinid);
+                }
+            }
+            return deps;
+        }
+
+        // Multi-output cells (ha, fa, dfbbp)
+        if is_multi_output_cell(cell_type) {
+            // dfbbp Q_N depends on Q being built first
+            if cell_type == "dfbbp" && output_pin_name == "Q_N" {
+                // Find Q pin
+                for opin in netlistdb.cell2pin.iter_set(cellid) {
+                    if netlistdb.pinnames[opin].1.as_str() == "Q" {
+                        if self.pin2aigpin_iv[opin] == usize::MAX {
+                            let mut deps = SmallVec::new();
+                            deps.push(opin);
+                            return deps;
+                        }
+                        return SmallVec::new();
+                    }
+                }
+            }
+            // For other multi-output cells, depend on all input pins
+            let mut deps = SmallVec::new();
+            for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                if netlistdb.pindirect[dep_pinid] == Direction::I {
+                    deps.push(dep_pinid);
+                }
+            }
+            return deps;
+        }
+
+        // Combinational cells: depend on all input pins
+        let mut deps = SmallVec::new();
+        for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+            if netlistdb.pindirect[dep_pinid] == Direction::I {
+                deps.push(dep_pinid);
+            }
+        }
+        deps
+    }
+
+    /// Pre-process for SKY130 cells (create output AIG pins before dependencies are visited).
+    fn sky130_preprocess(
+        &mut self,
+        netlistdb: &NetlistDB,
+        pinid: usize,
+        cellid: usize,
+        celltype: &str,
+    ) {
+        let cell_type = extract_cell_type(celltype);
+        let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
+
+        // Tie cells - set output immediately
+        if is_tie_cell(cell_type) {
+            match output_pin_name {
+                "HI" => self.pin2aigpin_iv[pinid] = 1,
+                "LO" => self.pin2aigpin_iv[pinid] = 0,
+                _ => panic!("Unknown tie cell output: {}", output_pin_name),
+            }
+            return;
+        }
+
+        // SRAM output creation
+        if celltype.starts_with("CF_SRAM_") {
+            let o = self.add_aigpin(DriverType::SRAM(cellid));
+            self.pin2aigpin_iv[pinid] = o << 1;
+            assert_eq!(output_pin_name, "DO", "Expected DO output pin for CF_SRAM");
+            let sram = self.srams.entry(cellid).or_default();
+            let bit_idx = netlistdb.pinnames[pinid].2.expect("DO pin must have bit index") as usize;
+            sram.port_r_rd_data[bit_idx] = o;
+            return;
+        }
+
+        // Sequential cells: pre-create DFF Q output
+        if is_sequential_cell(cell_type) {
             let q = self.add_aigpin(DriverType::DFF(cellid));
             let dff = self.dffs.entry(cellid).or_default();
             dff.q = q;
+            return;
+        }
+
+        // dfbbp with Q_N output: no pre-processing needed
+        // Other multi-output and combinational cells: no pre-processing needed
+    }
+
+    /// Post-process for SKY130 cells (compute output after dependencies are visited).
+    fn sky130_postprocess(
+        &mut self,
+        netlistdb: &NetlistDB,
+        pinid: usize,
+        cellid: usize,
+        celltype: &str,
+    ) {
+        let cell_type = extract_cell_type(celltype);
+        let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
+
+        // Tie cells and SRAM were already handled in preprocess
+        if is_tie_cell(cell_type) || celltype.starts_with("CF_SRAM_") {
+            return;
+        }
+
+        // Sequential cells: apply reset/set logic to Q
+        if is_sequential_cell(cell_type) {
+            let dff = self.dffs.get(&cellid).unwrap();
+            let q = dff.q;
             let mut ap_s_iv = 1;
             let mut ap_r_iv = 1;
             let mut q_out = q << 1;
-            for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if !matches!(netlistdb.pinnames[pinid].1.as_str(), "S" | "R") {
-                    continue;
-                }
-                self.dfs_netlistdb_build_aig(netlistdb, topo_vis, topo_instack, pinid);
-                let prev = self.pin2aigpin_iv[pinid];
-                match netlistdb.pinnames[pinid].1.as_str() {
-                    "S" => ap_s_iv = prev,
-                    "R" => ap_r_iv = prev,
-                    _ => unreachable!(),
+
+            for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
+                let prev = self.pin2aigpin_iv[dep_pinid];
+                match pin_name {
+                    "SET_B" => ap_s_iv = prev ^ 1,
+                    "RESET_B" => ap_r_iv = prev ^ 1,
+                    _ => {}
                 }
             }
             q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
             q_out = self.add_and_gate(q_out, ap_r_iv);
             self.pin2aigpin_iv[pinid] = q_out;
-        } else if celltype == "LATCH" {
-            panic!(
-                "latches are intentionally UNSUPPORTED by GEM, \
-                    except in identified gated clocks. \n\
-                    you can link a FF&MUX-based LATCH module, \
-                    but most likely that is NOT the right solution. \n\
-                    check all your assignments inside always@(*) block \
-                    to make sure they cover all scenarios."
-            );
-        } else if celltype == "$__RAMGEM_SYNC_" {
-            let o = self.add_aigpin(DriverType::SRAM(cellid));
-            self.pin2aigpin_iv[pinid] = o << 1;
-            assert_eq!(netlistdb.pinnames[pinid].1.as_str(), "PORT_R_RD_DATA");
-            let sram = self.srams.entry(cellid).or_default();
-            sram.port_r_rd_data[netlistdb.pinnames[pinid].2.unwrap() as usize] = o;
-        } else if celltype == "CKLNQD" {
-            let mut prev_cp = usize::MAX;
-            let mut prev_en = usize::MAX;
-            for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                match netlistdb.pinnames[pinid].1.as_str() {
-                    "CP" => prev_cp = pinid,
-                    "E" => prev_en = pinid,
-                    _ => {}
+            return;
+        }
+
+        // Multi-output cells (ha, fa, dfbbp)
+        if is_multi_output_cell(cell_type) {
+            self.build_sky130_multi_output_postprocess(netlistdb, pinid, cellid, cell_type);
+            return;
+        }
+
+        // Combinational cells: decompose and build
+        // Use CellInputs struct instead of HashMap to avoid allocation
+        let mut inputs = CellInputs::new();
+        let mut input_count = 0;
+        for ipin in netlistdb.cell2pin.iter_set(cellid) {
+            // Include both explicit inputs (Direction::I) and unknown direction pins (Direction::U)
+            // Unknown direction pins are treated as inputs for decomposition
+            // Only skip explicit outputs (Direction::O)
+            if netlistdb.pindirect[ipin] != Direction::O {
+                let pin_name = netlistdb.pinnames[ipin].1.as_str();
+                // Skip output pins by name (Y, X, Q, etc.)
+                if !matches!(pin_name, "Y" | "X" | "Q" | "Q_N" | "SUM" | "COUT") {
+                    inputs.set_pin(pin_name, self.pin2aigpin_iv[ipin]);
+                    input_count += 1;
                 }
-            }
-            assert_ne!(prev_cp, usize::MAX);
-            assert_ne!(prev_en, usize::MAX);
-            for prev in [prev_cp, prev_en] {
-                self.dfs_netlistdb_build_aig(netlistdb, topo_vis, topo_instack, prev);
-            }
-            // do not define pin2aigpin_iv[pinid] which is CKLNQD/Q and unused in logic.
-        } else if celltype == "GEM_ASSERT" || celltype == "GEM_DISPLAY" {
-            // These are side-effect only cells with no outputs
-            // Visit all input pins to build their AIG representations
-            for input_pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if netlistdb.pindirect[input_pinid] == Direction::I {
-                    self.dfs_netlistdb_build_aig(netlistdb, topo_vis, topo_instack, input_pinid);
-                }
-            }
-            // No output pin to define
-        } else {
-            let mut prev_a = usize::MAX;
-            let mut prev_b = usize::MAX;
-            for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                match netlistdb.pinnames[pinid].1.as_str() {
-                    "A" => prev_a = pinid,
-                    "B" => prev_b = pinid,
-                    _ => {}
-                }
-            }
-            for prev in [prev_a, prev_b] {
-                if prev != usize::MAX {
-                    self.dfs_netlistdb_build_aig(netlistdb, topo_vis, topo_instack, prev);
-                }
-            }
-            match celltype {
-                "AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" | "AND2_11_1" => {
-                    assert_ne!(prev_a, usize::MAX);
-                    assert_ne!(prev_b, usize::MAX);
-                    let name = netlistdb.celltypes[cellid].as_bytes();
-                    let iv_a = name[5] - b'0';
-                    let iv_b = name[6] - b'0';
-                    let iv_y = name[8] - b'0';
-                    let apid = self.add_and_gate(
-                        self.pin2aigpin_iv[prev_a] ^ (iv_a as usize),
-                        self.pin2aigpin_iv[prev_b] ^ (iv_b as usize),
-                    ) ^ (iv_y as usize);
-                    self.pin2aigpin_iv[pinid] = apid;
-                }
-                "INV" => {
-                    assert_ne!(prev_a, usize::MAX);
-                    self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[prev_a] ^ 1;
-                }
-                "BUF" => {
-                    assert_ne!(prev_a, usize::MAX);
-                    self.pin2aigpin_iv[pinid] = self.pin2aigpin_iv[prev_a];
-                }
-                _ => unreachable!(),
             }
         }
-        topo_instack[pinid] = false;
+
+        // Debug: check if we got enough inputs
+        if cell_type == "nand2" && inputs.a == usize::MAX {
+            use netlistdb::GeneralHierName;
+            let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+            let mut pins_info: Vec<String> = Vec::new();
+            for ipin in netlistdb.cell2pin.iter_set(cellid) {
+                let pin_name = netlistdb.pinnames[ipin].1.as_str();
+                let dir = format!("{:?}", netlistdb.pindirect[ipin]);
+                pins_info.push(format!("{}:{}:{}", pin_name, dir, ipin));
+            }
+            clilog::warn!(
+                "nand2 cell {} missing A input. Pins: {:?}",
+                cell_name, pins_info
+            );
+        }
+        if input_count == 0 {
+            use netlistdb::GeneralHierName;
+            let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+            let mut pins_info: Vec<String> = Vec::new();
+            for ipin in netlistdb.cell2pin.iter_set(cellid) {
+                let pin_name = netlistdb.pinnames[ipin].1.as_str();
+                let dir = format!("{:?}", netlistdb.pindirect[ipin]);
+                pins_info.push(format!("{}:{}", pin_name, dir));
+            }
+            panic!(
+                "No input pins found for cell {} ({}), type='{}'. Pins: {:?}",
+                cellid, cell_name, cell_type, pins_info
+            );
+        }
+
+        let decomp = decompose_sky130_cell(cell_type, &inputs);
+
+        // Use SmallVec for gate outputs - most cells have ≤5 gates
+        let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
+        for (i, (a_ref, b_ref)) in decomp.and_gates.iter().enumerate() {
+            let a_iv = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.resolve_decomp_ref(*a_ref, &gate_outputs))) {
+                Ok(v) => v,
+                Err(_) => {
+                    use netlistdb::GeneralHierName;
+                    let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+                    panic!(
+                        "Failed resolve_decomp_ref for cell_type='{}', cell={}, gate {}, a_ref={}, gates_so_far={}, inputs={:?}",
+                        cell_type, cell_name, i, a_ref, gate_outputs.len(), inputs
+                    )
+                }
+            };
+            let b_iv = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.resolve_decomp_ref(*b_ref, &gate_outputs))) {
+                Ok(v) => v,
+                Err(_) => {
+                    use netlistdb::GeneralHierName;
+                    let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+                    panic!(
+                        "Failed resolve_decomp_ref for cell_type='{}', cell={}, gate {}, b_ref={}, gates_so_far={}, inputs={:?}",
+                        cell_type, cell_name, i, b_ref, gate_outputs.len(), inputs
+                    )
+                }
+            };
+            let gate_out = self.add_and_gate(a_iv, b_iv);
+            gate_outputs.push(gate_out >> 1);
+        }
+
+        let output_iv = if decomp.output_idx < 0 {
+            let gate_idx = (-decomp.output_idx - 1) as usize;
+            gate_outputs[gate_idx] << 1
+        } else {
+            decomp.output_idx as usize
+        };
+
+        let final_iv = if decomp.output_inverted {
+            output_iv ^ 1
+        } else {
+            output_iv
+        };
+
+        self.pin2aigpin_iv[pinid] = final_iv;
+    }
+
+    /// Post-process for SKY130 multi-output cells (ha, fa, dfbbp).
+    fn build_sky130_multi_output_postprocess(
+        &mut self,
+        netlistdb: &NetlistDB,
+        output_pinid: usize,
+        cellid: usize,
+        cell_type: &str,
+    ) {
+        let output_pin_name = netlistdb.pinnames[output_pinid].1.as_str();
+
+        let mut a_iv = 0usize;
+        let mut b_iv = 0usize;
+        let mut cin_iv = 0usize;
+
+        for ipin in netlistdb.cell2pin.iter_set(cellid) {
+            if netlistdb.pindirect[ipin] == Direction::I {
+                let pin_name = netlistdb.pinnames[ipin].1.as_str();
+                match pin_name {
+                    "A" => a_iv = self.pin2aigpin_iv[ipin],
+                    "B" => b_iv = self.pin2aigpin_iv[ipin],
+                    "CIN" => cin_iv = self.pin2aigpin_iv[ipin],
+                    _ => {}
+                }
+            }
+        }
+
+        match cell_type {
+            "ha" => {
+                match output_pin_name {
+                    "SUM" => {
+                        let t1 = self.add_and_gate(a_iv, b_iv ^ 1);
+                        let t2 = self.add_and_gate(a_iv ^ 1, b_iv);
+                        let sum = self.add_and_gate(t1 ^ 1, t2 ^ 1) ^ 1;
+                        self.pin2aigpin_iv[output_pinid] = sum;
+                    }
+                    "COUT" => {
+                        let cout = self.add_and_gate(a_iv, b_iv);
+                        self.pin2aigpin_iv[output_pinid] = cout;
+                    }
+                    _ => panic!("Unknown ha output pin: {}", output_pin_name),
+                }
+            }
+            "fa" => {
+                match output_pin_name {
+                    "SUM" => {
+                        let ab1 = self.add_and_gate(a_iv, b_iv ^ 1);
+                        let ab2 = self.add_and_gate(a_iv ^ 1, b_iv);
+                        let a_xor_b = self.add_and_gate(ab1 ^ 1, ab2 ^ 1) ^ 1;
+                        let sc1 = self.add_and_gate(a_xor_b, cin_iv ^ 1);
+                        let sc2 = self.add_and_gate(a_xor_b ^ 1, cin_iv);
+                        let sum = self.add_and_gate(sc1 ^ 1, sc2 ^ 1) ^ 1;
+                        self.pin2aigpin_iv[output_pinid] = sum;
+                    }
+                    "COUT" => {
+                        let ab = self.add_and_gate(a_iv, b_iv);
+                        let ac = self.add_and_gate(a_iv, cin_iv);
+                        let bc = self.add_and_gate(b_iv, cin_iv);
+                        let t1 = self.add_and_gate(ab ^ 1, ac ^ 1);
+                        let cout = self.add_and_gate(t1, bc ^ 1) ^ 1;
+                        self.pin2aigpin_iv[output_pinid] = cout;
+                    }
+                    _ => panic!("Unknown fa output pin: {}", output_pin_name),
+                }
+            }
+            "dfbbp" => {
+                if output_pin_name == "Q_N" {
+                    // Q_N is inverted Q
+                    for opin in netlistdb.cell2pin.iter_set(cellid) {
+                        if netlistdb.pinnames[opin].1.as_str() == "Q" {
+                            self.pin2aigpin_iv[output_pinid] = self.pin2aigpin_iv[opin] ^ 1;
+                            return;
+                        }
+                    }
+                    panic!("dfbbp missing Q pin");
+                } else {
+                    // Q output - build DFF logic
+                    let dff = self.dffs.get(&cellid).unwrap();
+                    let q = dff.q;
+                    let mut ap_s_iv = 1;
+                    let mut ap_r_iv = 1;
+                    let mut q_out = q << 1;
+
+                    for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                        let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
+                        let prev = self.pin2aigpin_iv[dep_pinid];
+                        match pin_name {
+                            "SET_B" => ap_s_iv = prev ^ 1,
+                            "RESET_B" => ap_r_iv = prev ^ 1,
+                            _ => {}
+                        }
+                    }
+                    q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
+                    q_out = self.add_and_gate(q_out, ap_r_iv);
+                    self.pin2aigpin_iv[output_pinid] = q_out;
+                }
+            }
+            _ => panic!("Unknown multi-output cell type: {}", cell_type),
+        }
+    }
+
+    /// Resolve a decomposition reference to an aigpin_iv value.
+    fn resolve_decomp_ref(&self, ref_val: i64, gate_outputs: &[usize]) -> usize {
+        if ref_val < 0 {
+            // Reference to intermediate gate output
+            // The inversion bit might be encoded in ref_val
+            let base_ref = ref_val | 1; // Clear potential inversion bit for index calc
+            let gate_idx = (-(base_ref >> 1) - 1) as usize;
+            if gate_idx >= gate_outputs.len() {
+                panic!(
+                    "resolve_decomp_ref: ref_val={}, base_ref={}, gate_idx={}, gate_outputs.len()={}",
+                    ref_val, base_ref, gate_idx, gate_outputs.len()
+                );
+            }
+            let invert = (ref_val & 1) != (base_ref & 1);
+            let gate_out = gate_outputs[gate_idx] << 1;
+            if invert {
+                gate_out ^ 1
+            } else {
+                gate_out
+            }
+        } else {
+            // Direct input reference (already has inversion bit)
+            ref_val as usize
+        }
     }
 
     pub fn from_netlistdb(netlistdb: &NetlistDB) -> AIG {
@@ -540,19 +1208,38 @@ impl AIG {
             ..Default::default()
         };
 
+        clilog::info!("Starting clock tracing for {} cells...", netlistdb.num_cells);
+        let clock_start = std::time::Instant::now();
+        let mut seq_count = 0;
+        let mut trace_count = 0;
+
         for cellid in 1..netlistdb.num_cells {
-            if !matches!(
-                netlistdb.celltypes[cellid].as_str(),
-                "DFF" | "DFFSR" | "$__RAMGEM_SYNC_"
-            ) {
+            let celltype = netlistdb.celltypes[cellid].as_str();
+
+            // Check if this is a sequential element (AIGPDK or SKY130)
+            let is_aigpdk_seq = matches!(celltype, "DFF" | "DFFSR" | "$__RAMGEM_SYNC_");
+            let is_sky130_seq = is_sky130_cell(celltype) && is_sequential_cell(extract_cell_type(celltype));
+
+            if !is_aigpdk_seq && !is_sky130_seq {
                 continue;
             }
+
+            seq_count += 1;
+            if seq_count <= 5 {
+                use netlistdb::GeneralHierName;
+                clilog::info!("  Processing seq cell {} ({}): {}", seq_count, celltype, netlistdb.cellnames[cellid].dbg_fmt_hier());
+            } else if seq_count % 500 == 0 {
+                clilog::info!("  Processed {} sequential cells ({} clock traces) in {:?}...", seq_count, trace_count, clock_start.elapsed());
+            }
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if !matches!(
-                    netlistdb.pinnames[pinid].1.as_str(),
-                    "CLK" | "PORT_R_CLK" | "PORT_W_CLK"
-                ) {
+                let pin_name = netlistdb.pinnames[pinid].1.as_str();
+                // Both AIGPDK and SKY130 use "CLK" for clock pins
+                if !matches!(pin_name, "CLK" | "PORT_R_CLK" | "PORT_W_CLK") {
                     continue;
+                }
+                trace_count += 1;
+                if seq_count <= 5 {
+                    clilog::info!("    Tracing clock pin {} for cell {}...", pinid, cellid);
                 }
                 if let Err(pinid) = aig.trace_clock_pin(netlistdb, pinid, false, true) {
                     use netlistdb::GeneralHierName;
@@ -567,6 +1254,8 @@ impl AIG {
                 }
             }
         }
+        clilog::info!("Clock tracing done in {:?}, {} sequential cells", clock_start.elapsed(), seq_count);
+
         for (&clk, &(flagr, flagf)) in &aig.clock_pin2aigpins {
             clilog::info!(
                 "inferred clock port {} ({})",
@@ -579,6 +1268,9 @@ impl AIG {
             );
         }
 
+        clilog::info!("Starting AIG DFS build for {} pins...", netlistdb.num_pins);
+        let dfs_start = std::time::Instant::now();
+
         let mut topo_vis = vec![false; netlistdb.num_pins];
         let mut topo_instack = vec![false; netlistdb.num_pins];
 
@@ -586,8 +1278,12 @@ impl AIG {
             aig.dfs_netlistdb_build_aig(netlistdb, &mut topo_vis, &mut topo_instack, pinid);
         }
 
+        clilog::info!("AIG DFS build done in {:?}, {} AIG pins created", dfs_start.elapsed(), aig.num_aigpins);
+
         for cellid in 0..netlistdb.num_cells {
-            if matches!(netlistdb.celltypes[cellid].as_str(), "DFF" | "DFFSR") {
+            let celltype = netlistdb.celltypes[cellid].as_str();
+
+            if matches!(celltype, "DFF" | "DFFSR") {
                 let mut ap_s_iv = 1;
                 let mut ap_r_iv = 1;
                 let mut ap_d_iv = 0;
@@ -615,7 +1311,48 @@ impl AIG {
                 dff.en_iv = ap_clken_iv;
                 dff.d_iv = d_in;
                 assert_ne!(dff.q, 0);
-            } else if netlistdb.celltypes[cellid].as_str() == "$__RAMGEM_SYNC_" {
+            } else if is_sky130_cell(celltype) && is_sequential_cell(extract_cell_type(celltype)) {
+                // Handle SKY130 DFFs (dfxtp, edfxtp, dfrtp, etc.)
+                let cell_type = extract_cell_type(celltype);
+                let mut ap_d_iv = 0;
+                let mut ap_clken_iv = 0;
+                let mut ap_enable_iv = 1; // For edfxtp (data enable)
+                let mut ap_s_iv = 1; // Active-high set (converted from active-low SET_B)
+                let mut ap_r_iv = 1; // Active-high reset (converted from active-low RESET_B)
+
+                for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                    let pin_iv = aig.pin2aigpin_iv[pinid];
+                    match netlistdb.pinnames[pinid].1.as_str() {
+                        "D" => ap_d_iv = pin_iv,
+                        "DE" => ap_enable_iv = pin_iv, // Data enable for edfxtp
+                        "SET_B" => ap_s_iv = pin_iv ^ 1, // Convert active-low to active-high
+                        "RESET_B" => ap_r_iv = pin_iv ^ 1, // Convert active-low to active-high
+                        "CLK" => {
+                            ap_clken_iv =
+                                aig.trace_clock_pin(netlistdb, pinid, false, false).unwrap()
+                        }
+                        _ => {}
+                    }
+                }
+
+                // For edfxtp, the clock enable is gated by DE (data enable)
+                if cell_type == "edfxtp" {
+                    ap_clken_iv = aig.add_and_gate(ap_clken_iv, ap_enable_iv);
+                }
+
+                let mut d_in = ap_d_iv;
+
+                // Apply async set/reset to D input and clock enable (same as AIGPDK DFF)
+                d_in = aig.add_and_gate(d_in ^ 1, ap_s_iv) ^ 1;
+                ap_clken_iv = aig.add_and_gate(ap_clken_iv ^ 1, ap_s_iv) ^ 1;
+                d_in = aig.add_and_gate(d_in, ap_r_iv);
+                ap_clken_iv = aig.add_and_gate(ap_clken_iv ^ 1, ap_r_iv) ^ 1;
+
+                let dff = aig.dffs.entry(cellid).or_default();
+                dff.en_iv = ap_clken_iv;
+                dff.d_iv = d_in;
+                assert_ne!(dff.q, 0, "SKY130 DFF {} has no Q output built", cellid);
+            } else if celltype == "$__RAMGEM_SYNC_" {
                 let mut sram = aig.srams.entry(cellid).or_default().clone();
                 let mut write_clken_iv = 0;
                 for pinid in netlistdb.cell2pin.iter_set(cellid) {
@@ -650,6 +1387,57 @@ impl AIG {
                     let or_en = aig.add_and_gate(or_en, write_clken_iv);
                     sram.port_w_wr_en_iv[i] = or_en;
                 }
+                *aig.srams.get_mut(&cellid).unwrap() = sram;
+            } else if celltype.starts_with("CF_SRAM_") {
+                // ChipFlow SRAM: single-port with shared address
+                // Pins: CLKin, EN, R_WB, AD[9:0], BEN[31:0], DI[31:0], DO[31:0]
+                let mut sram = aig.srams.entry(cellid).or_default().clone();
+                let mut clken_iv = 0;
+                let mut r_wb_iv = 0;  // 0=write, 1=read
+
+                for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                    let bit = netlistdb.pinnames[pinid].2.map(|i| i as usize);
+                    let pin_iv = aig.pin2aigpin_iv[pinid];
+                    match netlistdb.pinnames[pinid].1.as_str() {
+                        "CLKin" => {
+                            clken_iv = aig.trace_clock_pin(netlistdb, pinid, false, false).unwrap();
+                        }
+                        "EN" => {
+                            // EN combined with clock for read enable
+                            // (we'll combine later)
+                        }
+                        "R_WB" => {
+                            r_wb_iv = pin_iv; // 0=write, 1=read
+                        }
+                        "AD" => {
+                            // Shared address for read and write
+                            let idx = bit.unwrap();
+                            if idx < AIGPDK_SRAM_ADDR_WIDTH {
+                                sram.port_r_addr_iv[idx] = pin_iv;
+                                sram.port_w_addr_iv[idx] = pin_iv;
+                            }
+                        }
+                        "DI" => {
+                            sram.port_w_wr_data_iv[bit.unwrap()] = pin_iv;
+                        }
+                        "BEN" => {
+                            // Byte enable becomes write enable when R_WB=0
+                            sram.port_w_wr_en_iv[bit.unwrap()] = pin_iv;
+                        }
+                        _ => {} // Ignore control pins like SM, TM, Scan*, vpwr*
+                    }
+                }
+
+                // Read enable: clken AND R_WB (read when R_WB=1)
+                sram.port_r_en_iv = aig.add_and_gate(clken_iv, r_wb_iv);
+
+                // Write enable: clken AND !R_WB (write when R_WB=0) AND BEN
+                let write_clken_iv = aig.add_and_gate(clken_iv, r_wb_iv ^ 1);
+                for i in 0..32 {
+                    let ben_iv = sram.port_w_wr_en_iv[i];
+                    sram.port_w_wr_en_iv[i] = aig.add_and_gate(write_clken_iv, ben_iv);
+                }
+
                 *aig.srams.get_mut(&cellid).unwrap() = sram;
             } else if netlistdb.celltypes[cellid].as_str() == "GEM_ASSERT" {
                 // Parse GEM_ASSERT cells for assertion checking
