@@ -110,6 +110,7 @@ impl CellInputs {
 
     /// Get input, panicking if not set.
     #[inline]
+    #[allow(dead_code)]
     fn get(&self, field: usize) -> usize {
         assert_ne!(field, usize::MAX, "Required input pin not set");
         field
@@ -117,6 +118,7 @@ impl CellInputs {
 
     /// Get input or return alternative if not set.
     #[inline]
+    #[allow(dead_code)]
     fn get_or(&self, field: usize, alt: usize) -> usize {
         if field == usize::MAX { alt } else { field }
     }

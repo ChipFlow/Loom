@@ -333,7 +333,6 @@ impl AIG {
         loop {
             iteration += 1;
             {
-                use netlistdb::GeneralHierName;
                 let pin_name = netlistdb.pinnames[current_pinid].dbg_fmt_pin();
                 let dir = if netlistdb.pindirect[current_pinid] == Direction::I { "I" } else { "O" };
                 path.push((current_pinid, format!("{}:{}", pin_name, dir)));
@@ -943,7 +942,7 @@ impl AIG {
         celltype: &str,
     ) {
         let cell_type = extract_cell_type(celltype);
-        let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
+        let _output_pin_name = netlistdb.pinnames[pinid].1.as_str();
 
         // Tie cells and SRAM were already handled in preprocess
         if is_tie_cell(cell_type) || celltype.starts_with("CF_SRAM_") {
@@ -1619,7 +1618,7 @@ impl AIG {
             + self.displays.len()
     }
 
-    pub fn get_endpoint_group(&self, endpt_id: usize) -> EndpointGroup {
+    pub fn get_endpoint_group(&self, endpt_id: usize) -> EndpointGroup<'_> {
         let po_len = self.primary_outputs.len();
         let dff_len = self.dffs.len();
         let sram_len = self.srams.len();

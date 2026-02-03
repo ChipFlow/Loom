@@ -175,7 +175,7 @@ impl TimingLibrary {
             name: "AND2".to_string(),
             pins: IndexMap::new(),
         };
-        let mut and_out = PinTiming {
+        let and_out = PinTiming {
             name: "X".to_string(),
             direction: "output".to_string(),
             is_clock: false,
