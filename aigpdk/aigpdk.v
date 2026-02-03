@@ -168,3 +168,21 @@ module CKLNQD (CP, E, Q);
    end
    assign Q = CP & QD;
 endmodule
+
+// GEM Assertion cell - fires an event when A is low (assertion fails)
+// FLAVOR: 0=assert, 1=assume, 2=cover, 3=stop, 4=finish
+module GEM_ASSERT (CLK, EN, A);
+   input CLK;  // Clock/trigger signal
+   input EN;   // Enable signal
+   input A;    // Assertion condition (should be high for pass)
+   // No output - this is a side-effect only cell
+   // GEM kernel writes to event buffer when (EN && !A)
+endmodule
+
+// GEM Display cell - fires a display event with message ID
+module GEM_DISPLAY (CLK, EN, MSG_ID);
+   input CLK;       // Clock/trigger signal
+   input EN;        // Enable/trigger condition
+   input [31:0] MSG_ID;  // Message table index
+   // No output - this is a side-effect only cell
+endmodule

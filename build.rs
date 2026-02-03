@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 fn main() {
-    println!("Building cuda source files for GEM...");
     println!("cargo:rerun-if-changed=csrc");
 
     #[cfg(feature = "cuda")] {
+        println!("Building CUDA source files for GEM...");
         let csrc_headers = ucc::import_csrc();
         let mut cl_cuda = ucc::cl_cuda();
         cl_cuda.ccbin(false);
@@ -21,5 +21,16 @@ fn main() {
         ucc::bindgen(["csrc/kernel_v1.cu"], "kernel_v1.rs");
         ucc::export_csrc();
         ucc::make_compile_commands(&[&cl_cuda]);
+    }
+
+    #[cfg(feature = "metal")] {
+        println!("Building Metal shader for GEM...");
+        // Compile Metal shader to metallib
+        ucc::cl_metal()
+            .file("csrc/kernel_v1.metal")
+            .std_version("metal3.0")
+            .macos_version_min("14.0")
+            .compile("gem_metal");
+        // METALLIB_PATH environment variable is set by the compile step
     }
 }

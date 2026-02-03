@@ -43,6 +43,11 @@ impl LeafPinProvider for AIGPDKLeafPins {
             ("CKLNQD", "CP" | "E", None) => Direction::I,
             ("CKLNQD", "Q", None) => Direction::O,
 
+            // GEM assertion and display cells (no outputs)
+            ("GEM_ASSERT", "CLK" | "EN" | "A", None) => Direction::I,
+            ("GEM_DISPLAY", "CLK" | "EN", None) => Direction::I,
+            ("GEM_DISPLAY", "MSG_ID", Some(0..=31)) => Direction::I,
+
             ("$__RAMGEM_ASYNC_", _, _) => {
                 panic!("Async RAM (lib cell {}) not supported yet in GEM.", macro_name);
             },
@@ -80,6 +85,10 @@ impl LeafPinProvider for AIGPDKLeafPins {
              "AND2_11_1", "A" | "B" | "Y") => None,
             ("DFF" | "DFFSR" | "LATCH", "CLK" | "D" | "Q" | "S" | "R") => None,
             ("CKLNQD", "CP" | "E" | "Q") => None,
+            // GEM assertion and display cells
+            ("GEM_ASSERT", "CLK" | "EN" | "A") => None,
+            ("GEM_DISPLAY", "CLK" | "EN") => None,
+            ("GEM_DISPLAY", "MSG_ID") => Some(SVerilogRange(31, 0)),
             ("$__RAMGEM_SYNC_",
              "PORT_R_CLK" | "PORT_W_CLK") => None,
             ("$__RAMGEM_SYNC_",

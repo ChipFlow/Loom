@@ -1,0 +1,19 @@
+# Synthesis outputs
+*_synth.gv
+*_synth_slang.gv
+*.tcl
+
+# VCD outputs
+gem_output*.vcd
+*.vcd
+# Exception: SKY130 test input VCD
+!6_final_test_input.vcd
+
+# Compiled outputs
+*.vvp
+*.gemparts
+
+# Exception: keep tracked test files
+!dff_test.vcd
+!dff_test.gemparts
+!dff_test_synth.gv

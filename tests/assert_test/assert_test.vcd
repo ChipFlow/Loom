@@ -1,0 +1,168 @@
+$date
+	Tue Jan  6 21:01:23 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module assert_tb $end
+$var wire 1 ! overflow_flag $end
+$var wire 4 " data_out [3:0] $end
+$var reg 1 # clk $end
+$var reg 4 $ data_in [3:0] $end
+$var reg 1 % rst $end
+$scope module dut $end
+$var wire 1 # clk $end
+$var wire 4 & data_in [3:0] $end
+$var wire 1 ' no_overflow_condition $end
+$var wire 1 % rst $end
+$var reg 4 ( counter [3:0] $end
+$var reg 4 ) data_out [3:0] $end
+$var reg 1 ! overflow_flag $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+$comment Show the parameter values. $end
+$dumpall
+$end
+#0
+$dumpvars
+bx )
+bx (
+1'
+b0 &
+1%
+b0 $
+0#
+bx "
+x!
+$end
+#5000
+0!
+b0 "
+b0 )
+b0 (
+1#
+#10000
+0#
+#15000
+1#
+#20000
+0#
+0%
+#25000
+b1 (
+1#
+#30000
+0#
+b11 $
+b11 &
+#35000
+b11 "
+b11 )
+b10 (
+1#
+#40000
+0#
+b1101 $
+b1101 &
+#45000
+b1101 "
+b1101 )
+b11 (
+1#
+#50000
+0#
+#55000
+b100 (
+1#
+#60000
+0#
+#65000
+b101 (
+1#
+#70000
+0#
+b1001 $
+b1001 &
+#75000
+b1001 "
+b1001 )
+b110 (
+1#
+#80000
+0#
+b11 $
+b11 &
+#85000
+b11 "
+b11 )
+b111 (
+1#
+#90000
+0#
+b1010 $
+b1010 &
+#95000
+b1010 "
+b1010 )
+b1000 (
+1#
+#100000
+0#
+b1001 $
+b1001 &
+#105000
+b1001 "
+b1001 )
+b1001 (
+1#
+#110000
+0#
+#115000
+b1010 (
+1#
+#120000
+0#
+b1111 $
+b1111 &
+#125000
+0'
+b1111 "
+b1111 )
+b1011 (
+1#
+#130000
+1'
+0#
+b101 $
+b101 &
+#135000
+b101 "
+b101 )
+b1100 (
+1#
+#140000
+0#
+#145000
+b1101 (
+1#
+#150000
+0#
+#155000
+b1110 (
+1#
+#160000
+0#
+#165000
+b1111 (
+1#
+#170000
+0#
+#175000
+b0 (
+1#
+#180000
+0#

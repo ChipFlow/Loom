@@ -135,10 +135,19 @@ The mapped result will be stored in a binary file `result.gemparts`.
 If the mapping failed due to failure to partition deep circuits (which often shows as trying to partition a circuit with only 0 or 1 endpoints), try adding a `--level-split` option to force a stage split. For example `--level-split 30` or `--level-split 20,40`. If you used this, remember to add the same `--level-split` option when you simulate.
 
 ## Simulate the Design
-Run the following. Replace `NUM_BLOCKS` with twice the number of physical streaming multiprocessors (SMs) of your GPU. If ports in your `input.vcd` are not in top-level, add a `--input-vcd-scope` to specify it.
+Run the following. Replace `NUM_BLOCKS` with twice the number of physical streaming multiprocessors (SMs) of your GPU.
+
 ``` sh
-cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope input/vcd/scope --output-vcd-scope desired/output/scope
+cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
 ```
+
+**VCD Scope Handling**: GEM automatically detects the correct VCD scope containing your design's ports. In most cases, you don't need to specify `--input-vcd-scope`. If auto-detection fails or you need to override it, use:
+
+``` sh
+cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
+```
+
+Use slash separators (`/`) for hierarchical paths, not dots. See [docs/troubleshooting-vcd.md](docs/troubleshooting-vcd.md) for details.
 
 The simulated output ports value will be stored in `output.vcd`.
 

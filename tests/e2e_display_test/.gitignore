@@ -1,0 +1,11 @@
+# Build outputs
+*.gemparts
+*_synth.gv
+*_synth.json
+*.vcd
+*.log
+
+# Compiled binaries
+*_iverilog
+*.vvp
+*.out

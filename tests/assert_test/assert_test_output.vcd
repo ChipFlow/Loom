@@ -1,0 +1,46 @@
+$timescale 1 ps $end
+$scope module gem_top_module $end
+$var wire 1 ! data_out[3] $end
+$var wire 1 " data_out[2] $end
+$var wire 1 # data_out[1] $end
+$var wire 1 $ data_out[0] $end
+$var wire 1 % overflow_flag $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+#0
+0!
+0"
+0#
+0$
+0%
+#5000
+#15000
+#25000
+#35000
+1!
+1"
+#45000
+1$
+#55000
+#65000
+#75000
+0"
+#85000
+1"
+#95000
+0"
+1#
+0$
+#105000
+0#
+1$
+#115000
+#125000
+1"
+1#
+#135000
+0"
+#145000
+#155000
+#165000
