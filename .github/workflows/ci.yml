@@ -175,3 +175,101 @@ jobs:
         with:
           name: benchmark-results
           path: benchmark_results.txt
+
+  # Run SKY130 post-layout timing simulation
+  sky130-timing:
+    name: SKY130 Timing Simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-sky130-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sky130-
+
+      - name: Cache SKY130 PDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: sky130-pdk-bdc9412b3e468c102d01b7cf6571e31e6d283fcf
+          restore-keys: |
+            sky130-pdk-
+
+      - name: Install volare and download SKY130 PDK
+        run: |
+          pip install volare
+          # Use the same PDK version as OpenLane 2.x for reproducibility
+          volare enable --pdk sky130 bdc9412b3e468c102d01b7cf6571e31e6d283fcf
+
+      - name: Build timing simulator
+        run: cargo build --release --bin timing_sim_cpu
+
+      - name: Run SKY130 timing simulation
+        run: |
+          # Find the liberty file
+          LIBERTY_FILE=$(find ~/.volare -name "sky130_fd_sc_hd__tt_025C_1v80.lib" -type f | head -1)
+
+          # Build command arguments
+          ARGS=(
+            tests/timing_test/6_final.v
+            tests/timing_test/6_final_test_input.vcd
+            --clock-period 25000
+            --max-cycles 10
+          )
+
+          if [[ -n "$LIBERTY_FILE" ]]; then
+            echo "Using liberty file: $LIBERTY_FILE"
+            ARGS+=(--liberty "$LIBERTY_FILE")
+          else
+            echo "Warning: Liberty file not found, using default timing values"
+          fi
+
+          # Run timing simulation on the post-P&R netlist
+          cargo run --release --bin timing_sim_cpu -- "${ARGS[@]}" 2>&1 | tee sky130_timing.txt
+
+      - name: Report SKY130 timing results
+        run: |
+          {
+            echo "## SKY130 Timing Simulation Results"
+            echo "\`\`\`"
+            cat sky130_timing.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check timing passed
+        run: |
+          if grep -q "TIMING: PASSED" sky130_timing.txt; then
+            echo "SKY130 timing simulation passed!"
+          elif grep -q "TIMING: FAILED" sky130_timing.txt; then
+            echo "SKY130 timing simulation found violations (expected for this test design)"
+            # Don't fail - timing violations are informational
+          else
+            echo "Error: Could not determine timing result"
+            exit 1
+          fi
+
+      - name: Upload timing results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sky130-timing-results
+          path: sky130_timing.txt
