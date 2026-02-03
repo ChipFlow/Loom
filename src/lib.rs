@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod aigpdk;
 
+pub mod sky130;
+
+pub mod sky130_decomp;
+
 pub mod aig;
 
 pub mod liberty_parser;

@@ -150,6 +150,141 @@ impl TimingLibrary {
         Self::from_file(path)
     }
 
+    /// Create a TimingLibrary with default SKY130 timing values.
+    ///
+    /// These are approximate values based on typical SKY130 HD cell characteristics.
+    /// For accurate timing, provide a proper Liberty file from the Skywater PDK.
+    pub fn default_sky130() -> Self {
+        // SKY130 typical timing values (in picoseconds):
+        // - Inverter: ~30ps
+        // - 2-input gates: ~50ps
+        // - Complex gates (AOI/OAI): ~60-80ps
+        // - DFF clk-to-Q: ~150ps
+        // - DFF setup: ~80ps
+        // - DFF hold: ~20ps
+        // - SRAM read: ~500ps (conservative estimate)
+
+        let mut lib = TimingLibrary {
+            name: "sky130_default".to_string(),
+            time_unit: "1ps".to_string(),
+            cells: IndexMap::new(),
+        };
+
+        // Add generic AND gate timing (used for all combinational logic)
+        let mut and_cell = CellTiming {
+            name: "AND2".to_string(),
+            pins: IndexMap::new(),
+        };
+        let mut and_out = PinTiming {
+            name: "X".to_string(),
+            direction: "output".to_string(),
+            is_clock: false,
+            timing_arcs: vec![TimingArc {
+                related_pin: "A".to_string(),
+                timing_type: None,
+                cell_rise_ps: Some(50),
+                cell_fall_ps: Some(50),
+                rise_constraint_ps: None,
+                fall_constraint_ps: None,
+            }],
+        };
+        and_cell.pins.insert("X".to_string(), and_out);
+        lib.cells.insert("AND2".to_string(), and_cell);
+
+        // Also add as AND2_00_0 for compatibility with existing lookup
+        let mut and_compat = CellTiming {
+            name: "AND2_00_0".to_string(),
+            pins: IndexMap::new(),
+        };
+        let and_compat_out = PinTiming {
+            name: "Y".to_string(),
+            direction: "output".to_string(),
+            is_clock: false,
+            timing_arcs: vec![TimingArc {
+                related_pin: "A".to_string(),
+                timing_type: None,
+                cell_rise_ps: Some(50),
+                cell_fall_ps: Some(50),
+                rise_constraint_ps: None,
+                fall_constraint_ps: None,
+            }],
+        };
+        and_compat.pins.insert("Y".to_string(), and_compat_out);
+        lib.cells.insert("AND2_00_0".to_string(), and_compat);
+
+        // Add DFF timing
+        let mut dff_cell = CellTiming {
+            name: "DFF".to_string(),
+            pins: IndexMap::new(),
+        };
+        // D pin with setup/hold
+        let d_pin = PinTiming {
+            name: "D".to_string(),
+            direction: "input".to_string(),
+            is_clock: false,
+            timing_arcs: vec![
+                TimingArc {
+                    related_pin: "CLK".to_string(),
+                    timing_type: Some("setup_rising".to_string()),
+                    cell_rise_ps: None,
+                    cell_fall_ps: None,
+                    rise_constraint_ps: Some(80),
+                    fall_constraint_ps: Some(80),
+                },
+                TimingArc {
+                    related_pin: "CLK".to_string(),
+                    timing_type: Some("hold_rising".to_string()),
+                    cell_rise_ps: None,
+                    cell_fall_ps: None,
+                    rise_constraint_ps: Some(20),
+                    fall_constraint_ps: Some(20),
+                },
+            ],
+        };
+        dff_cell.pins.insert("D".to_string(), d_pin);
+        // Q pin with clk-to-Q
+        let q_pin = PinTiming {
+            name: "Q".to_string(),
+            direction: "output".to_string(),
+            is_clock: false,
+            timing_arcs: vec![TimingArc {
+                related_pin: "CLK".to_string(),
+                timing_type: Some("rising_edge".to_string()),
+                cell_rise_ps: Some(150),
+                cell_fall_ps: Some(150),
+                rise_constraint_ps: None,
+                fall_constraint_ps: None,
+            }],
+        };
+        dff_cell.pins.insert("Q".to_string(), q_pin);
+        lib.cells.insert("DFF".to_string(), dff_cell);
+
+        // Add SRAM timing (for CF_SRAM_* cells)
+        let mut sram_cell = CellTiming {
+            name: "$__RAMGEM_SYNC_".to_string(),
+            pins: IndexMap::new(),
+        };
+        let rd_data_pin = PinTiming {
+            name: "PORT_R_RD_DATA".to_string(),
+            direction: "output".to_string(),
+            is_clock: false,
+            timing_arcs: vec![TimingArc {
+                related_pin: "PORT_R_CLK".to_string(),
+                timing_type: Some("rising_edge".to_string()),
+                cell_rise_ps: Some(500),
+                cell_fall_ps: Some(500),
+                rise_constraint_ps: None,
+                fall_constraint_ps: None,
+            }],
+        };
+        sram_cell
+            .pins
+            .insert("PORT_R_RD_DATA".to_string(), rd_data_pin);
+        lib.cells.insert("$__RAMGEM_SYNC_".to_string(), sram_cell);
+
+        lib
+    }
+
     /// Parse Liberty content from a string.
     pub fn parse(content: &str) -> Result<Self, String> {
         let mut lib = TimingLibrary::default();

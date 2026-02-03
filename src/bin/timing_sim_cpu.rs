@@ -13,6 +13,7 @@ use gem::aig::{DriverType, AIG};
 use gem::aigpdk::AIGPDKLeafPins;
 use gem::flatten::PackedDelay;
 use gem::liberty_parser::TimingLibrary;
+use gem::sky130::{detect_library_from_file, extract_cell_type, CellLibrary, SKY130LeafPins};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,7 +26,7 @@ use vcd_ng::{FFValueChange, FastFlow, FastFlowToken, Parser, Scope, ScopeItem, V
 #[command(name = "timing_sim_cpu")]
 #[command(about = "CPU timing simulation with per-gate delays")]
 struct Args {
-    /// Gate-level verilog path synthesized in AIGPDK library.
+    /// Gate-level verilog path synthesized in AIGPDK or SKY130 library.
     netlist_verilog: PathBuf,
 
     /// VCD input signal path
@@ -170,22 +171,42 @@ fn main() {
     let args = <Args as clap::Parser>::parse();
     clilog::info!("Timing simulation args:\n{:#?}", args);
 
-    // Load Liberty library
+    // Detect cell library
+    let cell_library = detect_library_from_file(&args.netlist_verilog)
+        .expect("Failed to read netlist file for library detection");
+    clilog::info!("Detected cell library: {}", cell_library);
+
+    if cell_library == CellLibrary::Mixed {
+        panic!("Mixed AIGPDK and SKY130 cells in netlist not supported");
+    }
+
+    // Load Liberty library (or use defaults for SKY130)
     let lib = if let Some(lib_path) = &args.liberty {
         TimingLibrary::from_file(lib_path).expect("Failed to load Liberty library")
+    } else if cell_library == CellLibrary::SKY130 {
+        clilog::info!("Using default SKY130 timing values (no liberty file)");
+        TimingLibrary::default_sky130()
     } else {
         TimingLibrary::load_aigpdk().expect("Failed to load default AIGPDK library")
     };
-    clilog::info!("Loaded Liberty library: {}", lib.name);
+    clilog::info!("Loaded timing library: {}", lib.name);
 
-    // Load netlist
+    // Load netlist with appropriate LeafPinProvider
     clilog::info!("Loading netlist: {:?}", args.netlist_verilog);
-    let netlistdb = NetlistDB::from_sverilog_file(
-        &args.netlist_verilog,
-        args.top_module.as_deref(),
-        &AIGPDKLeafPins(),
-    )
-    .expect("Failed to build netlist");
+    let netlistdb = match cell_library {
+        CellLibrary::SKY130 => NetlistDB::from_sverilog_file(
+            &args.netlist_verilog,
+            args.top_module.as_deref(),
+            &SKY130LeafPins,
+        )
+        .expect("Failed to build netlist"),
+        CellLibrary::AIGPDK | CellLibrary::Mixed => NetlistDB::from_sverilog_file(
+            &args.netlist_verilog,
+            args.top_module.as_deref(),
+            &AIGPDKLeafPins(),
+        )
+        .expect("Failed to build netlist"),
+    };
 
     // Build AIG
     let aig = AIG::from_netlistdb(&netlistdb);
@@ -203,15 +224,34 @@ fn main() {
     // Identify clock ports for posedge detection
     let mut posedge_monitor = std::collections::HashSet::new();
     for cellid in 1..netlistdb.num_cells {
-        if matches!(
-            netlistdb.celltypes[cellid].as_str(),
-            "DFF" | "DFFSR" | "$__RAMGEM_SYNC_"
-        ) {
+        let celltype = netlistdb.celltypes[cellid].as_str();
+
+        // Check for DFF cells (AIGPDK or SKY130)
+        let is_dff = match cell_library {
+            CellLibrary::SKY130 => {
+                let ct = extract_cell_type(celltype);
+                matches!(
+                    ct,
+                    "dfxtp" | "dfrtp" | "dfrbp" | "dfstp" | "dfbbp" | "edfxtp" | "sdfxtp"
+                )
+            }
+            _ => matches!(celltype, "DFF" | "DFFSR"),
+        };
+
+        // Check for SRAM cells
+        let is_sram = match cell_library {
+            CellLibrary::SKY130 => celltype.starts_with("CF_SRAM_"),
+            _ => celltype == "$__RAMGEM_SYNC_",
+        };
+
+        if is_dff || is_sram {
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if matches!(
-                    netlistdb.pinnames[pinid].1.as_str(),
-                    "CLK" | "PORT_R_CLK" | "PORT_W_CLK"
-                ) {
+                let pin_name = netlistdb.pinnames[pinid].1.as_str();
+
+                // Check for clock pins
+                let is_clk = matches!(pin_name, "CLK" | "CLKin" | "PORT_R_CLK" | "PORT_W_CLK");
+
+                if is_clk {
                     let netid = netlistdb.pin2net[pinid];
                     if Some(netid) == netlistdb.net_zero || Some(netid) == netlistdb.net_one {
                         continue;
@@ -293,7 +333,25 @@ fn main() {
 
                     // Latch DFF values
                     for cellid in 1..netlistdb.num_cells {
-                        if matches!(netlistdb.celltypes[cellid].as_str(), "DFF" | "DFFSR") {
+                        let celltype = netlistdb.celltypes[cellid].as_str();
+                        let is_dff = match cell_library {
+                            CellLibrary::SKY130 => {
+                                let ct = extract_cell_type(celltype);
+                                matches!(
+                                    ct,
+                                    "dfxtp"
+                                        | "dfrtp"
+                                        | "dfrbp"
+                                        | "dfstp"
+                                        | "dfbbp"
+                                        | "edfxtp"
+                                        | "sdfxtp"
+                                )
+                            }
+                            _ => matches!(celltype, "DFF" | "DFFSR"),
+                        };
+
+                        if is_dff {
                             let mut pinid_d = usize::MAX;
                             let mut pinid_q = usize::MAX;
                             for pinid in netlistdb.cell2pin.iter_set(cellid) {

@@ -3,6 +3,7 @@
 use compact_str::CompactString;
 use gem::aig::{DriverType, SimControlType, AIG};
 use gem::aigpdk::{AIGPDKLeafPins, AIGPDK_SRAM_SIZE};
+use gem::sky130::{SKY130LeafPins, CellLibrary, detect_library_from_file};
 use gem::display::{extract_display_info_from_json, format_display_message};
 use gem::event_buffer::{
     process_events, AssertConfig, EventBuffer, EventType, SimControl, SimStats, MAX_EVENTS,
@@ -616,12 +617,34 @@ fn main() {
     let args = <SimulatorArgs as clap::Parser>::parse();
     clilog::info!("Simulator args:\n{:#?}", args);
 
-    let netlistdb = NetlistDB::from_sverilog_file(
-        &args.netlist_verilog,
-        args.top_module.as_deref(),
-        &AIGPDKLeafPins(),
-    )
-    .expect("cannot build netlist");
+    // Detect cell library
+    let lib = detect_library_from_file(&args.netlist_verilog)
+        .expect("Failed to read netlist file");
+    clilog::info!("Detected cell library: {}", lib);
+
+    if lib == CellLibrary::Mixed {
+        panic!("Mixed AIGPDK and SKY130 cells in netlist not supported");
+    }
+
+    // Use appropriate LeafPinProvider based on detected library
+    let netlistdb = match lib {
+        CellLibrary::SKY130 => {
+            NetlistDB::from_sverilog_file(
+                &args.netlist_verilog,
+                args.top_module.as_deref(),
+                &SKY130LeafPins,
+            )
+            .expect("cannot build netlist")
+        }
+        CellLibrary::AIGPDK | CellLibrary::Mixed => {
+            NetlistDB::from_sverilog_file(
+                &args.netlist_verilog,
+                args.top_module.as_deref(),
+                &AIGPDKLeafPins(),
+            )
+            .expect("cannot build netlist")
+        }
+    };
 
     let aig = AIG::from_netlistdb(&netlistdb);
     let stageds = build_staged_aigs(&aig, &args.level_split);
