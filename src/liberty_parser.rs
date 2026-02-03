@@ -972,4 +972,96 @@ mod tests {
             assert_eq!(fall, 1, "Wrong fall delay for {}", name);
         }
     }
+
+    #[test]
+    fn test_parse_sky130_format() {
+        // Test SKY130-style liberty format with quoted names
+        let sky130_lib = r#"
+library ("sky130_fd_sc_hd__tt_025C_1v80") {
+  time_unit : "1ns";
+  cell ("sky130_fd_sc_hd__inv_1") {
+    pin ("A") {
+      direction : input;
+    }
+    pin ("Y") {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (scalar) {
+          values ("50.0");
+        }
+        cell_fall (scalar) {
+          values ("45.0");
+        }
+      }
+    }
+  }
+  cell ("sky130_fd_sc_hd__dfxtp_1") {
+    pin ("CLK") {
+      direction : input;
+      clock : true;
+    }
+    pin ("D") {
+      direction : input;
+      timing () {
+        related_pin : "CLK";
+        timing_type : setup_rising;
+        rise_constraint (scalar) {
+          values ("80.0");
+        }
+        fall_constraint (scalar) {
+          values ("75.0");
+        }
+      }
+    }
+    pin ("Q") {
+      direction : output;
+      timing () {
+        related_pin : "CLK";
+        timing_type : rising_edge;
+        cell_rise (scalar) {
+          values ("150.0");
+        }
+        cell_fall (scalar) {
+          values ("140.0");
+        }
+      }
+    }
+  }
+}
+"#;
+
+        let lib = TimingLibrary::parse(sky130_lib).expect("Failed to parse SKY130-style library");
+
+        // Check library name
+        assert_eq!(lib.name, "sky130_fd_sc_hd__tt_025C_1v80");
+        assert_eq!(lib.time_unit, "1ns");
+
+        // Check inverter cell
+        let inv_cell = lib.get_cell("sky130_fd_sc_hd__inv_1");
+        assert!(inv_cell.is_some(), "Missing inverter cell");
+        let inv = inv_cell.unwrap();
+        let (rise, fall) = inv.max_combinational_delay();
+        assert_eq!(rise, 50); // 50ns
+        assert_eq!(fall, 45); // 45ns
+
+        // Check DFF cell
+        let dff_cell = lib.get_cell("sky130_fd_sc_hd__dfxtp_1");
+        assert!(dff_cell.is_some(), "Missing DFF cell");
+        let dff = dff_cell.unwrap();
+
+        // Check setup time
+        let setup = dff.setup_time("D");
+        assert!(setup.is_some(), "Missing setup time");
+        let (rise_setup, fall_setup) = setup.unwrap();
+        assert_eq!(rise_setup, 80);
+        assert_eq!(fall_setup, 75);
+
+        // Check clock-to-Q
+        let clk_q = dff.clock_to_q("Q");
+        assert!(clk_q.is_some(), "Missing clock-to-Q");
+        let (rise_q, fall_q) = clk_q.unwrap();
+        assert_eq!(rise_q, 150);
+        assert_eq!(fall_q, 140);
+    }
 }
