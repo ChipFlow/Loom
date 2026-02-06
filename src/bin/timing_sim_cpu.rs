@@ -15,9 +15,10 @@ use gem::flatten::PackedDelay;
 use gem::liberty_parser::TimingLibrary;
 use gem::sky130::{detect_library_from_file, extract_cell_type, CellLibrary, SKY130LeafPins};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use sverilogparse::SVerilogRange;
 use vcd_ng::{FFValueChange, FastFlow, FastFlowToken, Parser, Scope, ScopeItem, Var};
@@ -59,6 +60,197 @@ struct Args {
     /// Verbose output with per-cycle timing.
     #[clap(long)]
     verbose: bool,
+
+    /// Output events JSON file for UART TX decoding.
+    #[clap(long)]
+    output_events: Option<PathBuf>,
+
+    /// UART baud rate (default: 115200).
+    #[clap(long, default_value = "115200")]
+    baud_rate: u32,
+
+    /// UART TX GPIO index (default: 6 for Caravel).
+    #[clap(long, default_value = "6")]
+    uart_tx_gpio: usize,
+
+    /// Firmware binary to load into QSPI flash for functional simulation.
+    #[clap(long)]
+    firmware: Option<PathBuf>,
+
+    /// Firmware offset in flash (default: 0x100000 for ChipFlow).
+    #[clap(long, default_value = "1048576")]
+    firmware_offset: usize,
+
+    /// Flash clock GPIO index (default: 0 for Caravel).
+    #[clap(long, default_value = "0")]
+    flash_clk_gpio: usize,
+
+    /// Flash CSN GPIO index (default: 1 for Caravel).
+    #[clap(long, default_value = "1")]
+    flash_csn_gpio: usize,
+
+    /// Flash D0 GPIO index (default: 2 for Caravel).
+    #[clap(long, default_value = "2")]
+    flash_d0_gpio: usize,
+}
+
+/// UART TX decoder state machine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UartState {
+    Idle,
+    StartBit { start_cycle: usize },
+    DataBits { start_cycle: usize, bits_received: u8, value: u8 },
+    StopBit { start_cycle: usize, value: u8 },
+}
+
+/// Decoded UART event.
+#[derive(Debug, Serialize)]
+struct UartEvent {
+    timestamp: usize,
+    peripheral: String,
+    event: String,
+    payload: u8,
+}
+
+/// QSPI Flash simulator for functional simulation.
+struct QspiFlash {
+    data: Vec<u8>,
+    // State
+    last_clk: bool,
+    last_csn: bool,
+    bit_count: u8,
+    byte_count: u32,
+    curr_byte: u8,
+    out_buffer: u8,
+    command: u8,
+    addr: u32,
+    data_width: u8, // 1 for single SPI, 4 for quad
+}
+
+impl QspiFlash {
+    fn new() -> Self {
+        // 16MB flash, initialized to 0xFF (erased state)
+        Self {
+            data: vec![0xFF; 16 * 1024 * 1024],
+            last_clk: false,
+            last_csn: true,
+            bit_count: 0,
+            byte_count: 0,
+            curr_byte: 0,
+            out_buffer: 0,
+            command: 0,
+            addr: 0,
+            data_width: 1,
+        }
+    }
+
+    fn load_firmware(&mut self, path: &std::path::Path, offset: usize) -> std::io::Result<usize> {
+        use std::io::Read;
+        let mut file = File::open(path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let len = buf.len();
+        if offset + len > self.data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Firmware too large for flash",
+            ));
+        }
+        self.data[offset..offset + len].copy_from_slice(&buf);
+        Ok(len)
+    }
+
+    fn process_byte(&mut self) {
+        self.out_buffer = 0;
+        if self.byte_count == 0 {
+            // Command byte
+            self.addr = 0;
+            self.data_width = 1;
+            self.command = self.curr_byte;
+            match self.command {
+                0xAB => {} // Power up
+                0x03 | 0x9F | 0xFF | 0x35 | 0x31 | 0x50 | 0x05 | 0x01 | 0x06 => {} // Various
+                0xEB => self.data_width = 4, // Quad read
+                _ => {} // Ignore unknown commands
+            }
+        } else {
+            match self.command {
+                0x03 => {
+                    // Single read: 3 address bytes, then data
+                    if self.byte_count <= 3 {
+                        self.addr |= (self.curr_byte as u32) << ((3 - self.byte_count) * 8);
+                    }
+                    if self.byte_count >= 3 {
+                        let idx = (self.addr & 0x00FFFFFF) as usize;
+                        self.out_buffer = if idx < self.data.len() {
+                            self.data[idx]
+                        } else {
+                            0xFF
+                        };
+                        self.addr = self.addr.wrapping_add(1) & 0x00FFFFFF;
+                    }
+                }
+                0xEB => {
+                    // Quad read: 3 address bytes + 1 mode + 2 dummy, then data
+                    if self.byte_count <= 3 {
+                        self.addr |= (self.curr_byte as u32) << ((3 - self.byte_count) * 8);
+                    }
+                    if self.byte_count >= 6 {
+                        let idx = (self.addr & 0x00FFFFFF) as usize;
+                        self.out_buffer = if idx < self.data.len() {
+                            self.data[idx]
+                        } else {
+                            0xFF
+                        };
+                        self.addr = self.addr.wrapping_add(1) & 0x00FFFFFF;
+                    }
+                }
+                0x9F => {
+                    // Read ID
+                    const FLASH_ID: [u8; 4] = [0xCA, 0x7C, 0xA7, 0xFF];
+                    self.out_buffer = FLASH_ID[(self.byte_count as usize) % FLASH_ID.len()];
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Step the flash simulation. Returns the value to drive on d_i (4 bits).
+    fn step(&mut self, clk: bool, csn: bool, d_o: u8) -> u8 {
+        let mut d_i = 0u8;
+
+        if csn && !self.last_csn {
+            // Rising edge of CSN - deselect, reset state
+            self.bit_count = 0;
+            self.byte_count = 0;
+            self.data_width = 1;
+        } else if clk && !self.last_clk && !csn {
+            // Rising clock edge while selected - sample input
+            if self.data_width == 4 {
+                self.curr_byte = (self.curr_byte << 4) | (d_o & 0xF);
+            } else {
+                self.curr_byte = (self.curr_byte << 1) | (d_o & 0x1);
+            }
+            self.out_buffer = self.out_buffer << self.data_width;
+            self.bit_count += self.data_width;
+            if self.bit_count >= 8 {
+                self.process_byte();
+                self.byte_count += 1;
+                self.bit_count = 0;
+            }
+        } else if !clk && self.last_clk && !csn {
+            // Falling clock edge while selected - output data
+            if self.data_width == 4 {
+                d_i = (self.out_buffer >> 4) & 0xF;
+            } else {
+                d_i = ((self.out_buffer >> 7) & 0x1) << 1; // MISO on d[1]
+            }
+        }
+
+        self.last_clk = clk;
+        self.last_csn = csn;
+        d_i
+    }
 }
 
 /// Timing state for CPU simulation.
@@ -452,13 +644,176 @@ fn main() {
         }
     }
 
+    // UART TX monitoring setup
+    let uart_tx_pin = if args.output_events.is_some() {
+        // Find gpio_out[uart_tx_gpio] pin
+        let gpio_out_name = format!("gpio_out[{}]", args.uart_tx_gpio);
+        let mut found_pin = None;
+        for pinid in 0..netlistdb.num_pins {
+            if netlistdb.pin2cell[pinid] == 0 {
+                // Primary IO
+                let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                if pin_name.contains(&gpio_out_name) || pin_name.ends_with(&format!("gpio_out:{}", args.uart_tx_gpio)) {
+                    found_pin = Some(pinid);
+                    clilog::info!("Found UART TX on pin {}: {}", pinid, pin_name);
+                    break;
+                }
+            }
+        }
+        if found_pin.is_none() {
+            clilog::warn!("Could not find gpio_out[{}] for UART TX monitoring", args.uart_tx_gpio);
+        }
+        found_pin
+    } else {
+        None
+    };
+
+    let clock_hz = 1_000_000_000_000u64 / args.clock_period;
+    let cycles_per_bit = (clock_hz / args.baud_rate as u64) as usize;
+    let mut uart_state = UartState::Idle;
+    let mut uart_events: Vec<UartEvent> = Vec::new();
+    let mut uart_last_tx = 1u8; // UART idles high
+
+    // Track last flash d_in value to re-apply after VCD overwrites
+    let mut flash_last_d_in = 0xFu8; // Flash idles with all lines high
+
+    if let Some(tx_pin) = uart_tx_pin {
+        let has_aig_mapping = aig.pin2aigpin_iv.get(tx_pin).map_or(false, |&v| v != usize::MAX);
+        clilog::info!(
+            "UART monitoring: baud={}, clock={}Hz, cycles_per_bit={}, has_aig_mapping={}",
+            args.baud_rate,
+            clock_hz,
+            cycles_per_bit,
+            has_aig_mapping
+        );
+        if !has_aig_mapping {
+            clilog::warn!("UART TX pin {} has no AIG mapping - output won't be tracked!", tx_pin);
+        }
+    }
+
+    // QSPI Flash setup for functional simulation
+    let mut flash = if args.firmware.is_some() {
+        Some(QspiFlash::new())
+    } else {
+        None
+    };
+
+    // Helper to find gpio pin by index
+    let find_gpio_pin = |gpio_type: &str, idx: usize| -> Option<usize> {
+        let gpio_name = format!("{}[{}]", gpio_type, idx);
+        for pinid in 0..netlistdb.num_pins {
+            if netlistdb.pin2cell[pinid] == 0 {
+                let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                if pin_name.contains(&gpio_name) || pin_name.ends_with(&format!("{}:{}", gpio_type, idx)) {
+                    return Some(pinid);
+                }
+            }
+        }
+        None
+    };
+
+    // Find flash GPIO pins
+    let flash_clk_out = find_gpio_pin("gpio_out", args.flash_clk_gpio);
+    let flash_csn_out = find_gpio_pin("gpio_out", args.flash_csn_gpio);
+    let flash_d_out: Vec<Option<usize>> = (0..4)
+        .map(|i| find_gpio_pin("gpio_out", args.flash_d0_gpio + i))
+        .collect();
+    let flash_d_in: Vec<Option<usize>> = (0..4)
+        .map(|i| find_gpio_pin("gpio_in", args.flash_d0_gpio + i))
+        .collect();
+
+    if let Some(ref mut fl) = flash {
+        if let Some(fw_path) = &args.firmware {
+            match fl.load_firmware(fw_path, args.firmware_offset) {
+                Ok(size) => {
+                    clilog::info!(
+                        "Loaded {} bytes firmware from {:?} at offset 0x{:X}",
+                        size,
+                        fw_path,
+                        args.firmware_offset
+                    );
+                }
+                Err(e) => {
+                    clilog::error!("Failed to load firmware: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // Log flash pin mappings and AIG status
+        clilog::info!(
+            "Flash pins: clk={:?}, csn={:?}, d_out={:?}, d_in={:?}",
+            flash_clk_out,
+            flash_csn_out,
+            flash_d_out,
+            flash_d_in
+        );
+
+        // Check AIG mappings for flash pins
+        if let Some(clk_pin) = flash_clk_out {
+            let has_aig = aig.pin2aigpin_iv.get(clk_pin).map_or(false, |&v| v != usize::MAX);
+            clilog::info!("Flash CLK pin {} AIG mapping: {}", clk_pin, has_aig);
+        }
+        if let Some(csn_pin) = flash_csn_out {
+            let has_aig = aig.pin2aigpin_iv.get(csn_pin).map_or(false, |&v| v != usize::MAX);
+            clilog::info!("Flash CSN pin {} AIG mapping: {}", csn_pin, has_aig);
+        }
+    }
+
     clilog::info!("Starting timing simulation...");
+
+    // Pre-run: process initial VCD values and evaluate AIG to get correct initial state
+    // This is needed so that on the first clock edge, DFFs latch the correct D values
+    let mut initial_phase = true;
+    let mut initial_inputs_set = false;
 
     while let Some(tok) = vcdflow.next_token().unwrap() {
         match tok {
             FastFlowToken::Timestamp(t) => {
                 if t == vcd_time {
                     continue;
+                }
+
+                // Initial phase: after time 0 values are set, evaluate AIG to get correct D inputs
+                if initial_phase && t > 0 && initial_inputs_set {
+                    initial_phase = false;
+                    clilog::debug!("Initial phase: evaluating AIG with reset state");
+
+                    // Evaluate combinational logic to set up correct D values
+                    for i in 1..=aig.num_aigpins {
+                        match &aig.drivers[i] {
+                            DriverType::AndGate(a, b) => {
+                                state.eval_and(i, *a, *b);
+                            }
+                            DriverType::InputPort(pinid) => {
+                                state.values[i] = circ_state[*pinid];
+                            }
+                            DriverType::DFF(_) | DriverType::InputClockFlag(_, _)
+                            | DriverType::Tie0 | DriverType::SRAM(_) => {
+                                // DFFs start at 0, others don't change
+                            }
+                        }
+                    }
+
+                    // Update circ_state from AIG
+                    for (pinid, &aigpin_iv) in aig.pin2aigpin_iv.iter().enumerate() {
+                        if aigpin_iv != usize::MAX {
+                            let idx = aigpin_iv >> 1;
+                            let inv = (aigpin_iv & 1) != 0;
+                            if idx > 0 && idx <= aig.num_aigpins {
+                                circ_state[pinid] = state.values[idx] ^ (inv as u8);
+                            }
+                        }
+                    }
+
+                    // Find reset signal value (gpio_in[40])
+                    let reset_pin = find_gpio_pin("gpio_in", 40);
+                    clilog::debug!(
+                        "Initial: gpio_in[40] (reset) = {:?}, gpio_out[0] (flash clk) = {}, gpio_out[1] (csn) = {}",
+                        reset_pin.map(|p| circ_state[p]),
+                        flash_clk_out.map(|p| circ_state[p]).unwrap_or(0),
+                        flash_csn_out.map(|p| circ_state[p]).unwrap_or(0)
+                    );
                 }
 
                 if last_rising_edge {
@@ -497,15 +852,25 @@ fn main() {
                         if is_dff {
                             let mut pinid_d = usize::MAX;
                             let mut pinid_q = usize::MAX;
+                            let mut pinid_de = usize::MAX;  // Data enable for edfxtp
                             for pinid in netlistdb.cell2pin.iter_set(cellid) {
                                 match netlistdb.pinnames[pinid].1.as_str() {
                                     "D" => pinid_d = pinid,
                                     "Q" => pinid_q = pinid,
+                                    "DE" => pinid_de = pinid,  // Enable input
                                     _ => {}
                                 }
                             }
                             if pinid_d != usize::MAX && pinid_q != usize::MAX {
-                                circ_state[pinid_q] = circ_state[pinid_d];
+                                // For enable DFFs (edfxtp), only update Q if DE is high
+                                let should_latch = if pinid_de != usize::MAX {
+                                    circ_state[pinid_de] != 0
+                                } else {
+                                    true  // Regular DFFs always latch
+                                };
+                                if should_latch {
+                                    circ_state[pinid_q] = circ_state[pinid_d];
+                                }
                             }
                         }
                     }
@@ -525,10 +890,15 @@ fn main() {
                             }
                             DriverType::DFF(cell_idx) => {
                                 // Get Q value from DFF (latched at cycle start)
-                                if aig.dffs.contains_key(cell_idx) {
-                                    // The DFF output has clk-to-Q delay
-                                    state.arrivals[i] = state.delays[i].max_delay() as u64;
+                                // Find the Q pin for this cell and get its value
+                                for pinid in netlistdb.cell2pin.iter_set(*cell_idx) {
+                                    if netlistdb.pinnames[pinid].1.as_str() == "Q" {
+                                        state.values[i] = circ_state[pinid];
+                                        break;
+                                    }
                                 }
+                                // The DFF output has clk-to-Q delay
+                                state.arrivals[i] = state.delays[i].max_delay() as u64;
                             }
                             DriverType::InputClockFlag(_, _) | DriverType::Tie0 => {
                                 state.arrivals[i] = 0;
@@ -606,6 +976,136 @@ fn main() {
                             }
                         }
                     }
+
+                    // Step QSPI flash simulation
+                    if let Some(ref mut fl) = flash {
+                        // Read flash interface outputs from design
+                        let clk = flash_clk_out.map(|p| circ_state[p] != 0).unwrap_or(false);
+                        let csn = flash_csn_out.map(|p| circ_state[p] != 0).unwrap_or(true);
+                        let mut d_out = 0u8;
+                        for (i, opt_pin) in flash_d_out.iter().enumerate() {
+                            if let Some(pin) = opt_pin {
+                                if circ_state[*pin] != 0 {
+                                    d_out |= 1 << i;
+                                }
+                            }
+                        }
+
+                        // Debug: log flash activity in early cycles
+                        if args.verbose && stats.cycles_simulated <= 25 {
+                            let reset_val = find_gpio_pin("gpio_in", 40).map(|p| circ_state[p]).unwrap_or(255);
+
+                            // Count how many non-zero values in circ_state (rough proxy for "active" state)
+                            let nonzero_count = circ_state.iter().filter(|&&v| v != 0).count();
+
+                            clilog::debug!(
+                                "Cycle {}: reset={}, clk={}, csn={}, d_out=0x{:X}, byte_count={}, nonzero_pins={}",
+                                stats.cycles_simulated, reset_val, clk, csn, d_out, fl.byte_count, nonzero_count
+                            );
+                        }
+
+                        // Step flash and get response
+                        let d_in = fl.step(clk, csn, d_out);
+                        flash_last_d_in = d_in;
+
+                        // Drive flash data inputs back into design
+                        for (i, opt_pin) in flash_d_in.iter().enumerate() {
+                            if let Some(pin) = opt_pin {
+                                circ_state[*pin] = ((d_in >> i) & 1) as u8;
+                            }
+                        }
+                    }
+
+                    // UART TX decoding
+                    if let Some(tx_pin) = uart_tx_pin {
+                        let tx = circ_state[tx_pin];
+                        let cycle = stats.cycles_simulated;
+
+                        // Debug: print TX value periodically
+                        if args.verbose && cycle % 1000 == 0 {
+                            clilog::debug!("Cycle {}: UART TX = {}", cycle, tx);
+                        }
+
+                        uart_state = match uart_state {
+                            UartState::Idle => {
+                                if uart_last_tx == 1 && tx == 0 {
+                                    // Falling edge - start bit detected
+                                    UartState::StartBit { start_cycle: cycle }
+                                } else {
+                                    UartState::Idle
+                                }
+                            }
+                            UartState::StartBit { start_cycle } => {
+                                // Sample at middle of start bit
+                                if cycle >= start_cycle + cycles_per_bit / 2 {
+                                    if tx == 0 {
+                                        // Valid start bit, move to data
+                                        UartState::DataBits {
+                                            start_cycle: start_cycle + cycles_per_bit,
+                                            bits_received: 0,
+                                            value: 0,
+                                        }
+                                    } else {
+                                        // False start, go back to idle
+                                        UartState::Idle
+                                    }
+                                } else {
+                                    UartState::StartBit { start_cycle }
+                                }
+                            }
+                            UartState::DataBits { start_cycle, bits_received, value } => {
+                                // Sample at middle of each bit
+                                let bit_center = start_cycle + (bits_received as usize) * cycles_per_bit + cycles_per_bit / 2;
+                                if cycle >= bit_center {
+                                    let new_value = value | ((tx as u8) << bits_received);
+                                    if bits_received >= 7 {
+                                        // All 8 bits received, expect stop bit
+                                        UartState::StopBit {
+                                            start_cycle: start_cycle + 8 * cycles_per_bit,
+                                            value: new_value,
+                                        }
+                                    } else {
+                                        UartState::DataBits {
+                                            start_cycle,
+                                            bits_received: bits_received + 1,
+                                            value: new_value,
+                                        }
+                                    }
+                                } else {
+                                    UartState::DataBits { start_cycle, bits_received, value }
+                                }
+                            }
+                            UartState::StopBit { start_cycle, value } => {
+                                // Sample at middle of stop bit
+                                if cycle >= start_cycle + cycles_per_bit / 2 {
+                                    if tx == 1 {
+                                        // Valid stop bit - record the byte
+                                        uart_events.push(UartEvent {
+                                            timestamp: cycle,
+                                            peripheral: "uart_0".to_string(),
+                                            event: "tx".to_string(),
+                                            payload: value,
+                                        });
+                                        if args.verbose {
+                                            let ch = if value >= 32 && value < 127 {
+                                                value as char
+                                            } else {
+                                                '.'
+                                            };
+                                            clilog::info!(
+                                                "UART TX @ cycle {}: 0x{:02X} '{}'",
+                                                cycle, value, ch
+                                            );
+                                        }
+                                    }
+                                    UartState::Idle
+                                } else {
+                                    UartState::StopBit { start_cycle, value }
+                                }
+                            }
+                        };
+                        uart_last_tx = tx;
+                    }
                 }
 
                 vcd_time = t;
@@ -626,8 +1126,36 @@ fn main() {
                         };
                     }
                 }
+                // Re-apply flash d_in values after VCD might have overwritten them
+                if flash.is_some() {
+                    for (i, opt_pin) in flash_d_in.iter().enumerate() {
+                        if let Some(pin) = opt_pin {
+                            circ_state[*pin] = ((flash_last_d_in >> i) & 1) as u8;
+                        }
+                    }
+                }
+                // Mark that initial inputs have been set (for cycle 0)
+                if initial_phase {
+                    initial_inputs_set = true;
+                }
             }
         }
+    }
+
+    // Write UART events if requested
+    if let Some(output_path) = &args.output_events {
+        clilog::info!("Captured {} UART TX events", uart_events.len());
+
+        #[derive(Serialize)]
+        struct EventsOutput {
+            events: Vec<UartEvent>,
+        }
+
+        let output = EventsOutput { events: uart_events };
+        let json = serde_json::to_string_pretty(&output).expect("Failed to serialize events");
+        let mut file = File::create(output_path).expect("Failed to create events file");
+        file.write_all(json.as_bytes()).expect("Failed to write events");
+        clilog::info!("Wrote events to {:?}", output_path);
     }
 
     // Print results

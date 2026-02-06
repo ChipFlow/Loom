@@ -1058,10 +1058,13 @@ impl AIG {
         }
 
         let output_iv = if decomp.output_idx < 0 {
+            // Negative index = reference to a gate we just created
             let gate_idx = (-decomp.output_idx - 1) as usize;
             gate_outputs[gate_idx] << 1
         } else {
-            decomp.output_idx as usize
+            // Positive index = passthrough to an existing AIG pin
+            // Need to encode as (index << 1) since output_idx is a raw index
+            (decomp.output_idx as usize) << 1
         };
 
         let final_iv = if decomp.output_inverted {
