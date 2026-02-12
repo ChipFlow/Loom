@@ -6,8 +6,7 @@
 
 use crate::aigpdk::AIGPDK_SRAM_ADDR_WIDTH;
 use crate::sky130::{extract_cell_type, is_sky130_cell};
-use crate::sky130_decomp::{decompose_sky130_cell, is_multi_output_cell, is_sequential_cell, is_tie_cell, CellInputs};
-use crate::sky130_pdk::PdkModels;
+use crate::sky130_pdk::{decompose_with_pdk, is_multi_output_cell, is_sequential_cell, is_tie_cell, CellInputs, PdkModels};
 use indexmap::{IndexMap, IndexSet};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use smallvec::SmallVec;
@@ -1035,11 +1034,11 @@ impl AIG {
         }
 
         let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
-        let decomp = if let Some(pdk) = pdk_models {
-            crate::sky130_pdk::decompose_with_pdk(cell_type, &inputs, output_pin_name, pdk)
-        } else {
-            decompose_sky130_cell(cell_type, &inputs)
-        };
+        let pdk = pdk_models.expect(
+            "PDK models required for SKY130 cell decomposition. \
+             Ensure sky130_fd_sc_hd submodule is initialized."
+        );
+        let decomp = decompose_with_pdk(cell_type, &inputs, output_pin_name, pdk);
 
         // Use SmallVec for gate outputs - most cells have ≤5 gates
         let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
@@ -1100,127 +1099,70 @@ impl AIG {
     ) {
         let output_pin_name = netlistdb.pinnames[output_pinid].1.as_str();
 
-        // Use PDK models for ha/fa when available (not for dfbbp - that's sequential)
-        if let Some(pdk) = pdk_models {
-            if matches!(cell_type, "ha" | "fa") && pdk.models.contains_key(cell_type) {
-                let mut inputs = CellInputs::new();
-                for ipin in netlistdb.cell2pin.iter_set(cellid) {
-                    if netlistdb.pindirect[ipin] == Direction::I {
-                        let pin_name = netlistdb.pinnames[ipin].1.as_str();
-                        inputs.set_pin(pin_name, self.pin2aigpin_iv[ipin]);
+        // dfbbp is sequential - handle inline (not in PDK combinational models)
+        if cell_type == "dfbbp" {
+            if output_pin_name == "Q_N" {
+                // Q_N is inverted Q
+                for opin in netlistdb.cell2pin.iter_set(cellid) {
+                    if netlistdb.pinnames[opin].1.as_str() == "Q" {
+                        self.pin2aigpin_iv[output_pinid] = self.pin2aigpin_iv[opin] ^ 1;
+                        return;
                     }
                 }
-                let decomp = crate::sky130_pdk::decompose_with_pdk(
-                    cell_type, &inputs, output_pin_name, pdk,
-                );
-                // Build the AIG gates from the decomposition
-                let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
-                for (a_ref, b_ref) in &decomp.and_gates {
-                    let a_iv = self.resolve_decomp_ref(*a_ref, &gate_outputs);
-                    let b_iv = self.resolve_decomp_ref(*b_ref, &gate_outputs);
-                    let gate_out = self.add_and_gate(a_iv, b_iv);
-                    gate_outputs.push(gate_out >> 1);
+                panic!("dfbbp missing Q pin");
+            } else {
+                // Q output - build DFF logic
+                let dff = self.dffs.get(&cellid).unwrap();
+                let q = dff.q;
+                let mut ap_s_iv = 1;
+                let mut ap_r_iv = 1;
+                let mut q_out = q << 1;
+
+                for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
+                    let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
+                    let prev = self.pin2aigpin_iv[dep_pinid];
+                    match pin_name {
+                        "SET_B" => ap_s_iv = prev ^ 1,
+                        "RESET_B" => ap_r_iv = prev ^ 1,
+                        _ => {}
+                    }
                 }
-                let output_iv = if decomp.output_idx < 0 {
-                    let gate_idx = (-decomp.output_idx - 1) as usize;
-                    gate_outputs[gate_idx] << 1
-                } else {
-                    (decomp.output_idx as usize) << 1
-                };
-                let final_iv = if decomp.output_inverted { output_iv ^ 1 } else { output_iv };
-                self.pin2aigpin_iv[output_pinid] = final_iv;
-                return;
+                q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
+                q_out = self.add_and_gate(q_out, ap_r_iv);
+                self.pin2aigpin_iv[output_pinid] = q_out;
             }
+            return;
         }
 
-        let mut a_iv = 0usize;
-        let mut b_iv = 0usize;
-        let mut cin_iv = 0usize;
-
+        // Use PDK models for ha/fa
+        let pdk = pdk_models.expect(
+            "PDK models required for SKY130 multi-output cell decomposition. \
+             Ensure sky130_fd_sc_hd submodule is initialized."
+        );
+        let mut inputs = CellInputs::new();
         for ipin in netlistdb.cell2pin.iter_set(cellid) {
             if netlistdb.pindirect[ipin] == Direction::I {
                 let pin_name = netlistdb.pinnames[ipin].1.as_str();
-                match pin_name {
-                    "A" => a_iv = self.pin2aigpin_iv[ipin],
-                    "B" => b_iv = self.pin2aigpin_iv[ipin],
-                    "CIN" => cin_iv = self.pin2aigpin_iv[ipin],
-                    _ => {}
-                }
+                inputs.set_pin(pin_name, self.pin2aigpin_iv[ipin]);
             }
         }
-
-        match cell_type {
-            "ha" => {
-                match output_pin_name {
-                    "SUM" => {
-                        let t1 = self.add_and_gate(a_iv, b_iv ^ 1);
-                        let t2 = self.add_and_gate(a_iv ^ 1, b_iv);
-                        let sum = self.add_and_gate(t1 ^ 1, t2 ^ 1) ^ 1;
-                        self.pin2aigpin_iv[output_pinid] = sum;
-                    }
-                    "COUT" => {
-                        let cout = self.add_and_gate(a_iv, b_iv);
-                        self.pin2aigpin_iv[output_pinid] = cout;
-                    }
-                    _ => panic!("Unknown ha output pin: {}", output_pin_name),
-                }
-            }
-            "fa" => {
-                match output_pin_name {
-                    "SUM" => {
-                        let ab1 = self.add_and_gate(a_iv, b_iv ^ 1);
-                        let ab2 = self.add_and_gate(a_iv ^ 1, b_iv);
-                        let a_xor_b = self.add_and_gate(ab1 ^ 1, ab2 ^ 1) ^ 1;
-                        let sc1 = self.add_and_gate(a_xor_b, cin_iv ^ 1);
-                        let sc2 = self.add_and_gate(a_xor_b ^ 1, cin_iv);
-                        let sum = self.add_and_gate(sc1 ^ 1, sc2 ^ 1) ^ 1;
-                        self.pin2aigpin_iv[output_pinid] = sum;
-                    }
-                    "COUT" => {
-                        let ab = self.add_and_gate(a_iv, b_iv);
-                        let ac = self.add_and_gate(a_iv, cin_iv);
-                        let bc = self.add_and_gate(b_iv, cin_iv);
-                        let t1 = self.add_and_gate(ab ^ 1, ac ^ 1);
-                        let cout = self.add_and_gate(t1, bc ^ 1) ^ 1;
-                        self.pin2aigpin_iv[output_pinid] = cout;
-                    }
-                    _ => panic!("Unknown fa output pin: {}", output_pin_name),
-                }
-            }
-            "dfbbp" => {
-                if output_pin_name == "Q_N" {
-                    // Q_N is inverted Q
-                    for opin in netlistdb.cell2pin.iter_set(cellid) {
-                        if netlistdb.pinnames[opin].1.as_str() == "Q" {
-                            self.pin2aigpin_iv[output_pinid] = self.pin2aigpin_iv[opin] ^ 1;
-                            return;
-                        }
-                    }
-                    panic!("dfbbp missing Q pin");
-                } else {
-                    // Q output - build DFF logic
-                    let dff = self.dffs.get(&cellid).unwrap();
-                    let q = dff.q;
-                    let mut ap_s_iv = 1;
-                    let mut ap_r_iv = 1;
-                    let mut q_out = q << 1;
-
-                    for dep_pinid in netlistdb.cell2pin.iter_set(cellid) {
-                        let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
-                        let prev = self.pin2aigpin_iv[dep_pinid];
-                        match pin_name {
-                            "SET_B" => ap_s_iv = prev ^ 1,
-                            "RESET_B" => ap_r_iv = prev ^ 1,
-                            _ => {}
-                        }
-                    }
-                    q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
-                    q_out = self.add_and_gate(q_out, ap_r_iv);
-                    self.pin2aigpin_iv[output_pinid] = q_out;
-                }
-            }
-            _ => panic!("Unknown multi-output cell type: {}", cell_type),
+        let decomp = decompose_with_pdk(cell_type, &inputs, output_pin_name, pdk);
+        // Build the AIG gates from the decomposition
+        let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
+        for (a_ref, b_ref) in &decomp.and_gates {
+            let a_iv = self.resolve_decomp_ref(*a_ref, &gate_outputs);
+            let b_iv = self.resolve_decomp_ref(*b_ref, &gate_outputs);
+            let gate_out = self.add_and_gate(a_iv, b_iv);
+            gate_outputs.push(gate_out >> 1);
         }
+        let output_iv = if decomp.output_idx < 0 {
+            let gate_idx = (-decomp.output_idx - 1) as usize;
+            gate_outputs[gate_idx] << 1
+        } else {
+            (decomp.output_idx as usize) << 1
+        };
+        let final_iv = if decomp.output_inverted { output_iv ^ 1 } else { output_iv };
+        self.pin2aigpin_iv[output_pinid] = final_iv;
     }
 
     /// Resolve a decomposition reference to an aigpin_iv value.
@@ -1249,13 +1191,45 @@ impl AIG {
         }
     }
 
-    /// Build an AIG from a netlistdb, using PDK behavioral models for decomposition.
+    /// Build an AIG from a netlistdb, using explicit PDK behavioral models for decomposition.
     pub fn from_netlistdb_with_pdk(netlistdb: &NetlistDB, pdk_models: &PdkModels) -> AIG {
         Self::from_netlistdb_impl(netlistdb, Some(pdk_models))
     }
 
+    /// Build an AIG from a netlistdb.
+    ///
+    /// For designs with SKY130 cells, automatically loads PDK models from the
+    /// `sky130_fd_sc_hd/cells` submodule. Panics with a helpful message if the
+    /// submodule is not initialized.
     pub fn from_netlistdb(netlistdb: &NetlistDB) -> AIG {
-        Self::from_netlistdb_impl(netlistdb, None)
+        // Check if the design uses SKY130 cells
+        let has_sky130 = (1..netlistdb.num_cells)
+            .any(|cid| is_sky130_cell(netlistdb.celltypes[cid].as_str()));
+
+        if has_sky130 {
+            let pdk_path = std::path::PathBuf::from("sky130_fd_sc_hd/cells");
+            assert!(
+                pdk_path.exists(),
+                "Design uses SKY130 cells but sky130_fd_sc_hd submodule not found. \
+                 Run: git submodule update --init"
+            );
+            // Collect cell types
+            let mut cell_types: Vec<String> = Vec::new();
+            for cellid in 1..netlistdb.num_cells {
+                let celltype = netlistdb.celltypes[cellid].as_str();
+                if is_sky130_cell(celltype) {
+                    let ct = extract_cell_type(celltype).to_string();
+                    if !cell_types.contains(&ct) {
+                        cell_types.push(ct);
+                    }
+                }
+            }
+            cell_types.sort();
+            let pdk_models = crate::sky130_pdk::load_pdk_models(&pdk_path, &cell_types);
+            Self::from_netlistdb_impl(netlistdb, Some(&pdk_models))
+        } else {
+            Self::from_netlistdb_impl(netlistdb, None)
+        }
     }
 
     fn from_netlistdb_impl(netlistdb: &NetlistDB, pdk_models: Option<&PdkModels>) -> AIG {

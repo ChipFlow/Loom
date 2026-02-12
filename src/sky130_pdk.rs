@@ -14,7 +14,140 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::sky130_decomp::{CellInputs, DecompResult};
+// ============================================================================
+// Core types (formerly in sky130_decomp.rs)
+// ============================================================================
+
+/// Fixed-size struct for collecting input pins during SKY130 decomposition.
+/// Most SKY130 cells have at most 5 inputs. Using a fixed struct avoids heap allocation.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct CellInputs {
+    pub a: usize,
+    pub a_n: usize,
+    pub a0: usize,
+    pub a1: usize,
+    pub a1_n: usize,
+    pub a2: usize,
+    pub a2_n: usize,
+    pub a3: usize,
+    pub a4: usize,
+    pub b: usize,
+    pub b_n: usize,
+    pub b1: usize,
+    pub b1_n: usize,
+    pub b2: usize,
+    pub c: usize,
+    pub c_n: usize,
+    pub c1: usize,
+    pub d: usize,
+    pub d1: usize,
+    pub s: usize,
+    pub s0: usize,
+    pub cin: usize,
+    pub set_b: usize,
+    pub reset_b: usize,
+}
+
+impl CellInputs {
+    /// Create a new CellInputs with all pins set to MAX (unset).
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            a: usize::MAX,
+            a_n: usize::MAX,
+            a0: usize::MAX,
+            a1: usize::MAX,
+            a1_n: usize::MAX,
+            a2: usize::MAX,
+            a2_n: usize::MAX,
+            a3: usize::MAX,
+            a4: usize::MAX,
+            b: usize::MAX,
+            b_n: usize::MAX,
+            b1: usize::MAX,
+            b1_n: usize::MAX,
+            b2: usize::MAX,
+            c: usize::MAX,
+            c_n: usize::MAX,
+            c1: usize::MAX,
+            d: usize::MAX,
+            d1: usize::MAX,
+            s: usize::MAX,
+            s0: usize::MAX,
+            cin: usize::MAX,
+            set_b: usize::MAX,
+            reset_b: usize::MAX,
+        }
+    }
+
+    /// Set a pin value by name. Returns true if the pin was recognized.
+    #[inline]
+    pub fn set_pin(&mut self, pin_name: &str, value: usize) -> bool {
+        match pin_name {
+            "A" => self.a = value,
+            "A_N" => self.a_n = value,
+            "A0" => self.a0 = value,
+            "A1" => self.a1 = value,
+            "A1_N" => self.a1_n = value,
+            "A2" => self.a2 = value,
+            "A2_N" => self.a2_n = value,
+            "A3" => self.a3 = value,
+            "A4" => self.a4 = value,
+            "B" => self.b = value,
+            "B_N" => self.b_n = value,
+            "B1" => self.b1 = value,
+            "B1_N" => self.b1_n = value,
+            "B2" => self.b2 = value,
+            "C" => self.c = value,
+            "C_N" => self.c_n = value,
+            "C1" => self.c1 = value,
+            "D" => self.d = value,
+            "D1" => self.d1 = value,
+            "S" => self.s = value,
+            "S0" => self.s0 = value,
+            "CIN" => self.cin = value,
+            "SET_B" => self.set_b = value,
+            "RESET_B" => self.reset_b = value,
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Result of decomposing a cell into AIG operations.
+///
+/// The decomposition produces a sequence of AND gates that must be built
+/// in order, where later gates can reference earlier ones.
+#[derive(Debug, Clone)]
+pub struct DecompResult {
+    /// Sequence of AND gate operations to build.
+    /// Each entry is (input_a_iv, input_b_iv) where the lower bit is inversion.
+    /// References to earlier gates use negative indices (-1 = first gate output, etc.)
+    pub and_gates: Vec<(i64, i64)>,
+    /// Index of the final output (-1 = first gate, -2 = second gate, etc.)
+    /// Positive values reference original inputs.
+    pub output_idx: i64,
+    /// Whether to invert the final output
+    pub output_inverted: bool,
+}
+
+/// Check if a cell type is a sequential element (DFF or latch).
+pub fn is_sequential_cell(cell_type: &str) -> bool {
+    matches!(
+        cell_type,
+        "dfxtp" | "dfrtp" | "dfrbp" | "dfstp" | "dfbbp" | "edfxtp" | "sdfxtp" | "dlxtp" | "dlat"
+    )
+}
+
+/// Check if a cell is a tie cell (constant generator).
+pub fn is_tie_cell(cell_type: &str) -> bool {
+    cell_type == "conb"
+}
+
+/// Check if a cell has multiple outputs (like adders).
+pub fn is_multi_output_cell(cell_type: &str) -> bool {
+    matches!(cell_type, "ha" | "fa" | "dfbbp")
+}
 
 // ============================================================================
 // Data structures
@@ -939,8 +1072,8 @@ pub fn load_pdk_models(pdk_cells_path: &Path, cell_types: &[String]) -> PdkModel
 
     for cell_type in cell_types {
         // Skip sequential and tie cells - handled elsewhere
-        if crate::sky130_decomp::is_sequential_cell(cell_type)
-            || crate::sky130_decomp::is_tie_cell(cell_type)
+        if is_sequential_cell(cell_type)
+            || is_tie_cell(cell_type)
         {
             continue;
         }
@@ -1044,102 +1177,97 @@ fn load_udp(models_path: &Path, udp_name: &str) -> Option<UdpModel> {
     parse_udp(&src)
 }
 
-/// Decompose a cell using PDK models, falling back to hand-coded decomposition
-/// if no PDK model is available.
+/// Decompose a cell using PDK models.
 ///
-/// This is the main entry point for PDK-based decomposition.
+/// This is the main entry point for PDK-based decomposition. Panics if no
+/// PDK model is available for the given cell type.
 pub fn decompose_with_pdk(
     cell_type: &str,
     inputs: &CellInputs,
     output_pin: &str,
     pdk: &PdkModels,
 ) -> DecompResult {
-    if let Some(model) = pdk.models.get(cell_type) {
-        let mut and_gates = Vec::new();
-        let mut wires: HashMap<String, WireVal> = HashMap::new();
+    let model = pdk.models.get(cell_type).unwrap_or_else(|| {
+        panic!(
+            "No PDK model found for cell type '{}'. Ensure the sky130_fd_sc_hd submodule is \
+             initialized (git submodule update --init) and the cell model exists.",
+            cell_type
+        )
+    });
 
-        // Map module input port names to their aigpin_iv values
-        for input_name in &model.inputs {
-            let aigpin_iv = get_cell_input_by_name(inputs, input_name);
-            if aigpin_iv == usize::MAX {
-                panic!(
-                    "Input pin '{}' not set in CellInputs for cell type '{}'",
-                    input_name, cell_type
-                );
-            }
-            wires.insert(input_name.clone(), WireVal::AigPin(aigpin_iv));
-        }
+    let mut and_gates = Vec::new();
+    let mut wires: HashMap<String, WireVal> = HashMap::new();
 
-        // Process gates in order
-        for gate in &model.gates {
-            let gate_type = gate.gate_type.as_str();
-
-            if gate_type == "buf" {
-                assert_eq!(gate.inputs.len(), 1);
-                let input_val = wires.get(&gate.inputs[0]).copied().unwrap_or_else(|| {
-                    panic!("Unknown wire '{}' in buf gate", gate.inputs[0])
-                });
-                wires.insert(gate.output.clone(), input_val);
-                continue;
-            }
-
-            if gate_type.starts_with("sky130_fd_sc_hd__udp_") {
-                let result = build_udp_aig(gate, &wires, &pdk.udps, &mut and_gates);
-                wires.insert(gate.output.clone(), result);
-                continue;
-            }
-
-            let input_vals: Vec<WireVal> = gate
-                .inputs
-                .iter()
-                .map(|name| {
-                    wires.get(name).copied().unwrap_or_else(|| {
-                        panic!("Unknown wire '{}' in {} gate", name, gate_type)
-                    })
-                })
-                .collect();
-
-            let result = match gate_type {
-                "not" => {
-                    assert_eq!(input_vals.len(), 1);
-                    input_vals[0].inverted()
-                }
-                "and" => build_chain_gate(&input_vals, false, false, &mut and_gates),
-                "nand" => build_chain_gate(&input_vals, false, true, &mut and_gates),
-                "or" => build_chain_gate(&input_vals, true, true, &mut and_gates),
-                "nor" => build_chain_gate(&input_vals, true, false, &mut and_gates),
-                "xor" => build_xor_chain(&input_vals, false, &mut and_gates),
-                "xnor" => build_xor_chain(&input_vals, true, &mut and_gates),
-                _ => panic!(
-                    "Unknown gate type '{}' in model '{}'",
-                    gate_type, model.module_name
-                ),
-            };
-
-            wires.insert(gate.output.clone(), result);
-        }
-
-        // Get the requested output
-        let output_val = wires.get(output_pin).copied().unwrap_or_else(|| {
+    // Map module input port names to their aigpin_iv values
+    for input_name in &model.inputs {
+        let aigpin_iv = get_cell_input_by_name(inputs, input_name);
+        if aigpin_iv == usize::MAX {
             panic!(
-                "Output pin '{}' not found in model '{}'. Available: {:?}",
-                output_pin, model.module_name, model.outputs
-            )
-        });
-
-        finalize_decomp_result(and_gates, output_val)
-    } else {
-        // Fallback: use hand-coded decomposition
-        if crate::sky130_decomp::is_multi_output_cell(cell_type) {
-            match cell_type {
-                "ha" => crate::sky130_decomp::decompose_ha(inputs, output_pin),
-                "fa" => crate::sky130_decomp::decompose_fa(inputs, output_pin),
-                _ => panic!("Unknown multi-output cell: {}", cell_type),
-            }
-        } else {
-            crate::sky130_decomp::decompose_sky130_cell(cell_type, inputs)
+                "Input pin '{}' not set in CellInputs for cell type '{}'",
+                input_name, cell_type
+            );
         }
+        wires.insert(input_name.clone(), WireVal::AigPin(aigpin_iv));
     }
+
+    // Process gates in order
+    for gate in &model.gates {
+        let gate_type = gate.gate_type.as_str();
+
+        if gate_type == "buf" {
+            assert_eq!(gate.inputs.len(), 1);
+            let input_val = wires.get(&gate.inputs[0]).copied().unwrap_or_else(|| {
+                panic!("Unknown wire '{}' in buf gate", gate.inputs[0])
+            });
+            wires.insert(gate.output.clone(), input_val);
+            continue;
+        }
+
+        if gate_type.starts_with("sky130_fd_sc_hd__udp_") {
+            let result = build_udp_aig(gate, &wires, &pdk.udps, &mut and_gates);
+            wires.insert(gate.output.clone(), result);
+            continue;
+        }
+
+        let input_vals: Vec<WireVal> = gate
+            .inputs
+            .iter()
+            .map(|name| {
+                wires.get(name).copied().unwrap_or_else(|| {
+                    panic!("Unknown wire '{}' in {} gate", name, gate_type)
+                })
+            })
+            .collect();
+
+        let result = match gate_type {
+            "not" => {
+                assert_eq!(input_vals.len(), 1);
+                input_vals[0].inverted()
+            }
+            "and" => build_chain_gate(&input_vals, false, false, &mut and_gates),
+            "nand" => build_chain_gate(&input_vals, false, true, &mut and_gates),
+            "or" => build_chain_gate(&input_vals, true, true, &mut and_gates),
+            "nor" => build_chain_gate(&input_vals, true, false, &mut and_gates),
+            "xor" => build_xor_chain(&input_vals, false, &mut and_gates),
+            "xnor" => build_xor_chain(&input_vals, true, &mut and_gates),
+            _ => panic!(
+                "Unknown gate type '{}' in model '{}'",
+                gate_type, model.module_name
+            ),
+        };
+
+        wires.insert(gate.output.clone(), result);
+    }
+
+    // Get the requested output
+    let output_val = wires.get(output_pin).copied().unwrap_or_else(|| {
+        panic!(
+            "Output pin '{}' not found in model '{}'. Available: {:?}",
+            output_pin, model.module_name, model.outputs
+        )
+    });
+
+    finalize_decomp_result(and_gates, output_val)
 }
 
 // ============================================================================

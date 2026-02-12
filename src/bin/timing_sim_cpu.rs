@@ -14,7 +14,7 @@ use gem::aigpdk::AIGPDKLeafPins;
 use gem::flatten::PackedDelay;
 use gem::liberty_parser::TimingLibrary;
 use gem::sky130::{detect_library_from_file, extract_cell_type, is_sky130_cell, CellLibrary, SKY130LeafPins};
-use gem::sky130_decomp::is_sequential_cell;
+use gem::sky130_pdk::is_sequential_cell;
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
