@@ -18,3 +18,7 @@ __pycache__/
 debug_trace.csv
 *_watchlist.json
 api_artifacts/
+tb_verify_sim
+
+# Build output directories
+**/build/results/
