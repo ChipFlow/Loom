@@ -1,0 +1,642 @@
+{
+  "process": "sky130",
+  "package": {
+    "package_type": {
+      "name": "openframe",
+      "package_type": "OpenframePackageDef"
+    }
+  },
+  "port_map": {
+    "ports": {
+      "soc": {
+        "flash": {
+          "clk": {
+            "type": "io",
+            "pins": [
+              [
+                31,
+                "gpio",
+                0,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_flash_clk",
+            "iomodel": {
+              "invert": [
+                false
+              ],
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "o"
+            }
+          },
+          "csn": {
+            "type": "io",
+            "pins": [
+              [
+                32,
+                "gpio",
+                1,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_flash_csn",
+            "iomodel": {
+              "invert": [
+                false
+              ],
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "o"
+            }
+          },
+          "d": {
+            "type": "io",
+            "pins": [
+              [
+                33,
+                "gpio",
+                2,
+                null,
+                null
+              ],
+              [
+                34,
+                "gpio",
+                3,
+                null,
+                null
+              ],
+              [
+                35,
+                "gpio",
+                4,
+                null,
+                null
+              ],
+              [
+                36,
+                "gpio",
+                5,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_flash_d",
+            "iomodel": {
+              "invert": [
+                false,
+                false,
+                false,
+                false
+              ],
+              "individual_oe": true,
+              "clock_domain": "sync",
+              "width": 4,
+              "direction": "io"
+            }
+          }
+        },
+        "uart_0": {
+          "tx": {
+            "type": "io",
+            "pins": [
+              [
+                37,
+                "gpio",
+                6,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_uart_0_tx",
+            "iomodel": {
+              "invert": [
+                false
+              ],
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "o"
+            }
+          },
+          "rx": {
+            "type": "io",
+            "pins": [
+              [
+                41,
+                "gpio",
+                7,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_uart_0_rx",
+            "iomodel": {
+              "invert": [
+                false
+              ],
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "i"
+            }
+          }
+        },
+        "gpio_0": {
+          "gpio": {
+            "type": "io",
+            "pins": [
+              [
+                42,
+                "gpio",
+                8,
+                null,
+                null
+              ],
+              [
+                43,
+                "gpio",
+                9,
+                null,
+                null
+              ],
+              [
+                44,
+                "gpio",
+                10,
+                null,
+                null
+              ],
+              [
+                45,
+                "gpio",
+                11,
+                null,
+                null
+              ],
+              [
+                46,
+                "gpio",
+                12,
+                null,
+                null
+              ],
+              [
+                48,
+                "gpio",
+                13,
+                null,
+                null
+              ],
+              [
+                50,
+                "gpio",
+                14,
+                null,
+                null
+              ],
+              [
+                51,
+                "gpio",
+                15,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_gpio_0_gpio",
+            "iomodel": {
+              "invert": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ],
+              "individual_oe": true,
+              "clock_domain": "sync",
+              "width": 8,
+              "direction": "io"
+            }
+          }
+        },
+        "gpio_open_drain": {
+          "gpio": {
+            "type": "io",
+            "pins": [
+              [
+                2,
+                "gpio",
+                25,
+                null,
+                null
+              ],
+              [
+                3,
+                "gpio",
+                26,
+                null,
+                null
+              ],
+              [
+                4,
+                "gpio",
+                27,
+                null,
+                null
+              ],
+              [
+                5,
+                "gpio",
+                28,
+                null,
+                null
+              ]
+            ],
+            "port_name": "soc_gpio_open_drain_gpio",
+            "iomodel": {
+              "invert": [
+                false,
+                false,
+                false,
+                false
+              ],
+              "individual_oe": true,
+              "clock_domain": "sync",
+              "sky130_drive_mode": "open_drain_strong_up",
+              "width": 4,
+              "direction": "io"
+            }
+          }
+        }
+      },
+      "_core": {
+        "bringup_pins": {
+          "clk": {
+            "type": "clock",
+            "pins": [
+              [
+                22,
+                "gpio",
+                38,
+                null,
+                null
+              ]
+            ],
+            "port_name": "clk",
+            "iomodel": {
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "i"
+            }
+          },
+          "rst_n": {
+            "type": "reset",
+            "pins": [
+              [
+                25,
+                "gpio",
+                40,
+                null,
+                null
+              ]
+            ],
+            "port_name": "rst_n",
+            "iomodel": {
+              "invert": true,
+              "clock_domain": "sync",
+              "width": 1,
+              "direction": "i"
+            }
+          },
+          "vss": {
+            "type": "power",
+            "pins": [
+              [
+                18,
+                "vcc",
+                0,
+                1.8,
+                "d"
+              ]
+            ],
+            "port_name": "vss",
+            "iomodel": {
+              "width": 1,
+              "direction": "i"
+            }
+          },
+          "vdd": {
+            "type": "power",
+            "pins": [
+              [
+                23,
+                "vss",
+                0,
+                null,
+                "d"
+              ]
+            ],
+            "port_name": "vdd",
+            "iomodel": {
+              "width": 1,
+              "direction": "i"
+            }
+          }
+        }
+      }
+    }
+  },
+  "metadata": {
+    "soc": {
+      "interface": {
+        "members": {
+          "flash": {
+            "type": "interface",
+            "members": {
+              "clk": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "flash__clk__o",
+                    "dir": "out",
+                    "width": 1,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "width": 1,
+                    "direction": "o",
+                    "invert": [
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              },
+              "csn": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "flash__csn__o",
+                    "dir": "out",
+                    "width": 1,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "width": 1,
+                    "direction": "o",
+                    "invert": [
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              },
+              "d": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "flash__d__o",
+                    "dir": "out",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "oe": {
+                    "type": "port",
+                    "name": "flash__d__oe",
+                    "dir": "out",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "i": {
+                    "type": "port",
+                    "name": "flash__d__i",
+                    "dir": "in",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "individual_oe": true,
+                    "width": 4,
+                    "direction": "io",
+                    "invert": [
+                      false,
+                      false,
+                      false,
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              }
+            },
+            "annotations": {
+              "https://api.chipflow.com/schemas/0/simulatable-interface": {
+                "uid": "com.chipflow.chipflow.QSPIFlashSignature",
+                "parameters": []
+              }
+            }
+          },
+          "uart_0": {
+            "type": "interface",
+            "members": {
+              "tx": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "uart_0__tx__o",
+                    "dir": "out",
+                    "width": 1,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "width": 1,
+                    "direction": "o",
+                    "invert": [
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              },
+              "rx": {
+                "type": "interface",
+                "members": {
+                  "i": {
+                    "type": "port",
+                    "name": "uart_0__rx__i",
+                    "dir": "in",
+                    "width": 1,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "width": 1,
+                    "direction": "i",
+                    "invert": [
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              }
+            },
+            "annotations": {
+              "https://api.chipflow.com/schemas/0/simulatable-interface": {
+                "uid": "com.chipflow.chipflow.UARTSignature",
+                "parameters": []
+              }
+            }
+          },
+          "gpio_0": {
+            "type": "interface",
+            "members": {
+              "gpio": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "gpio_0__gpio__o",
+                    "dir": "out",
+                    "width": 8,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "oe": {
+                    "type": "port",
+                    "name": "gpio_0__gpio__oe",
+                    "dir": "out",
+                    "width": 8,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "i": {
+                    "type": "port",
+                    "name": "gpio_0__gpio__i",
+                    "dir": "in",
+                    "width": 8,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "individual_oe": true,
+                    "width": 8,
+                    "direction": "io",
+                    "invert": [
+                      false,
+                      false,
+                      false,
+                      false,
+                      false,
+                      false,
+                      false,
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              }
+            },
+            "annotations": {
+              "https://api.chipflow.com/schemas/0/simulatable-interface": {
+                "uid": "com.chipflow.chipflow.GPIOSignature",
+                "parameters": [
+                  [
+                    "pin_count",
+                    8
+                  ]
+                ]
+              }
+            }
+          },
+          "gpio_open_drain": {
+            "type": "interface",
+            "members": {
+              "gpio": {
+                "type": "interface",
+                "members": {
+                  "o": {
+                    "type": "port",
+                    "name": "gpio_open_drain__gpio__o",
+                    "dir": "out",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "oe": {
+                    "type": "port",
+                    "name": "gpio_open_drain__gpio__oe",
+                    "dir": "out",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  },
+                  "i": {
+                    "type": "port",
+                    "name": "gpio_open_drain__gpio__i",
+                    "dir": "in",
+                    "width": 4,
+                    "signed": false,
+                    "init": "0"
+                  }
+                },
+                "annotations": {
+                  "https://api.chipflow.com/schemas/0/pin-annotation": {
+                    "sky130_drive_mode": "open_drain_strong_up",
+                    "individual_oe": true,
+                    "width": 4,
+                    "direction": "io",
+                    "invert": [
+                      false,
+                      false,
+                      false,
+                      false
+                    ],
+                    "clock_domain": "sync"
+                  }
+                }
+              }
+            },
+            "annotations": {
+              "https://api.chipflow.com/schemas/0/simulatable-interface": {
+                "uid": "com.chipflow.chipflow.GPIOSignature",
+                "parameters": [
+                  [
+                    "pin_count",
+                    4
+                  ]
+                ]
+              }
+            }
+          }
+        },
+        "annotations": {}
+      }
+    }
+  }
+}
