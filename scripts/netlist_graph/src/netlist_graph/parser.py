@@ -82,8 +82,8 @@ def parse_netlist(netlist_path: Path) -> nx.DiGraph:
         cells_parsed += 1
 
         # Parse port connections
-        inputs: list[str] = []
-        outputs: list[str] = []
+        inputs: list[tuple[str, str]] = []   # (net, pin_name)
+        outputs: list[tuple[str, str]] = []  # (net, pin_name)
 
         for port_match in PORT_PATTERN.finditer(ports_str):
             pin_name = port_match.group(1)
@@ -92,20 +92,26 @@ def parse_netlist(netlist_path: Path) -> nx.DiGraph:
 
             pin_type = classify_pin(pin_name)
             if pin_type == "output":
-                outputs.extend(nets)
+                for net in nets:
+                    outputs.append((net, pin_name))
             else:
-                inputs.extend(nets)
+                for net in nets:
+                    inputs.append((net, pin_name))
 
         # Add nodes
-        for net in inputs + outputs:
+        for net, _pin in inputs + outputs:
             if net and not G.has_node(net):
                 G.add_node(net, type="net")
 
         # Create edges from inputs to outputs through this cell
-        for inp in inputs:
-            for out in outputs:
+        for inp, inp_pin in inputs:
+            for out, out_pin in outputs:
                 if inp and out:
-                    G.add_edge(inp, out, cell=inst_name, cell_type=cell_type)
+                    G.add_edge(
+                        inp, out,
+                        cell=inst_name, cell_type=cell_type,
+                        in_pin=inp_pin, out_pin=out_pin,
+                    )
 
     logger.info(f"Parsed {cells_parsed} cells")
     logger.info(f"Graph has {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")

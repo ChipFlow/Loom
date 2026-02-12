@@ -280,6 +280,63 @@ def watchlist(netlist: Path, output: Path, signals: tuple[str, ...]):
     click.echo(f"Wrote {len(watchlist_data['signals'])} signals to {output}")
 
 
+@main.command()
+@click.argument("netlist", type=click.Path(exists=True, path_type=Path))
+@click.argument("signal", type=str)
+@click.option("-d", "--depth", default=20, help="Maximum trace depth")
+@click.option("--through-regs", is_flag=True, help="Continue tracing past register boundaries")
+def cone(netlist: Path, signal: str, depth: int, through_regs: bool):
+    """Trace the combinational logic cone of a signal.
+
+    SIGNAL can be a hierarchical name (e.g., top.soc.sram.wb_bus__ack),
+    a raw net name (e.g., _05294_), or a glob pattern.
+
+    Stops at register (DFF) boundaries by default. Shows the logic tree
+    with cell types and pin connections.
+
+    Examples:
+        netlist-graph cone design.v top.soc.sram.wb_bus__ack
+        netlist-graph cone design.v _05294_ --through-regs
+    """
+    graph = NetlistGraph.from_file(netlist)
+    click.echo(f"Loaded {graph.num_nodes} nodes, {graph.num_edges} edges")
+
+    # Resolve signal name
+    resolved = graph.resolve_name(signal)
+    if not resolved:
+        matches = graph.search(signal, limit=10)
+        if matches:
+            click.echo(f"No unique match for '{signal}'. Candidates:")
+            for m in matches:
+                click.echo(f"  {graph._short_net(m)}")
+        else:
+            click.echo(f"No nets matching '{signal}'")
+        return
+
+    click.echo(f"\nLogic cone of: {graph._short_net(resolved)}")
+    if not through_regs:
+        click.echo("(stopping at register boundaries, use --through-regs to continue)\n")
+
+    cone_data = graph.logic_cone(resolved, max_depth=depth, through_regs=through_regs)
+
+    for depth_level, net, cell_type, input_pins in cone_data:
+        indent = "  " * depth_level
+        short_net = graph._short_net(net)
+        short_type = graph._short_cell_type(cell_type)
+
+        if cell_type == "(primary)":
+            click.echo(f"{indent}{short_net}  [primary input]")
+        elif cell_type == "(reg-output)":
+            click.echo(f"{indent}{short_net}  [REG output]")
+        else:
+            is_reg = graph._is_register(cell_type)
+            pin_str = ", ".join(
+                f"{pin}={graph._short_net(src)}" for pin, src in input_pins
+            )
+            reg_marker = " [REG]" if is_reg else ""
+            click.echo(f"{indent}{short_net} = {short_type}({pin_str}){reg_marker}")
+
+
 @main.command("interactive")
 @click.argument("netlist", type=click.Path(exists=True, path_type=Path))
 def interactive_mode(netlist: Path):
