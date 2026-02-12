@@ -2,3 +2,19 @@
 /Cargo.lock
 /compile_commands.json
 .cache
+
+# Python
+__pycache__/
+*.pyc
+*.swp
+
+# Claude Code session data
+.claude/
+
+# Simulation artifacts
+*.vvp
+*.vcd
+*.tar.gz
+debug_trace.csv
+*_watchlist.json
+api_artifacts/
