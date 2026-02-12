@@ -602,9 +602,9 @@ pub fn decompose_sky130_cell(
             // = !(A1 & A2) & !B1 & !C1
             DecompResult {
                 and_gates: vec![
-                    (a1 as i64, a2 as i64),         // -1 = A1 & A2
-                    (-1 ^ 1, (b1 ^ 1) as i64),      // -2 = !(A1&A2) & !B1
-                    (-2, (c1 ^ 1) as i64),          // -3 = above & !C1
+                    (a1 as i64, a2 as i64),         // gate 0: A1 & A2 (ref: -1/-2)
+                    (-1 ^ 1, (b1 ^ 1) as i64),      // gate 1: !(A1&A2) & !B1 (ref: -3/-4)
+                    (-3, (c1 ^ 1) as i64),          // gate 2: gate1 & !C1 (ref: -5/-6)
                 ],
                 output_idx: -3,
                 output_inverted: false,
@@ -621,10 +621,10 @@ pub fn decompose_sky130_cell(
             // = !(A1&A2) & !(B1&B2) & !C1
             DecompResult {
                 and_gates: vec![
-                    (a1 as i64, a2 as i64),    // -1 = A1 & A2
-                    (b1 as i64, b2 as i64),    // -2 = B1 & B2
-                    (-1 ^ 1, -3 ^ 1),          // -3 = !(A1&A2) & !(B1&B2)
-                    (-3, (c1 ^ 1) as i64),     // -4 = above & !C1
+                    (a1 as i64, a2 as i64),    // gate 0: A1 & A2 (ref: -1/-2)
+                    (b1 as i64, b2 as i64),    // gate 1: B1 & B2 (ref: -3/-4)
+                    (-1 ^ 1, -3 ^ 1),          // gate 2: !(A1&A2) & !(B1&B2) (ref: -5/-6)
+                    (-5, (c1 ^ 1) as i64),     // gate 3: gate2 & !C1 (ref: -7/-8)
                 ],
                 output_idx: -4,
                 output_inverted: false,
@@ -640,10 +640,10 @@ pub fn decompose_sky130_cell(
             let c1 = inputs.c1;
             DecompResult {
                 and_gates: vec![
-                    (a1 as i64, a2 as i64),
-                    (b1 as i64, b2 as i64),
-                    (-1 ^ 1, -3 ^ 1),
-                    (-3, (c1 ^ 1) as i64),
+                    (a1 as i64, a2 as i64),    // gate 0: A1 & A2 (ref: -1/-2)
+                    (b1 as i64, b2 as i64),    // gate 1: B1 & B2 (ref: -3/-4)
+                    (-1 ^ 1, -3 ^ 1),          // gate 2: !(A1&A2) & !(B1&B2) (ref: -5/-6)
+                    (-5, (c1 ^ 1) as i64),     // gate 3: gate2 & !C1 (ref: -7/-8)
                 ],
                 output_idx: -4,
                 output_inverted: true,
@@ -659,10 +659,10 @@ pub fn decompose_sky130_cell(
             let d1 = inputs.d1;
             DecompResult {
                 and_gates: vec![
-                    (a1 as i64, a2 as i64),         // -1 = A1 & A2
-                    (-1 ^ 1, (b1 ^ 1) as i64),      // -2 = !(A1&A2) & !B1
-                    (-2, (c1 ^ 1) as i64),          // -3 = above & !C1
-                    (-3, (d1 ^ 1) as i64),          // -4 = above & !D1
+                    (a1 as i64, a2 as i64),         // gate 0: A1 & A2
+                    (-1 ^ 1, (b1 ^ 1) as i64),      // gate 1: !(A1&A2) & !B1
+                    (-3, (c1 ^ 1) as i64),          // gate 2: gate1 & !C1
+                    (-5, (d1 ^ 1) as i64),          // gate 3: gate2 & !D1
                 ],
                 output_idx: -4,
                 output_inverted: false,
@@ -936,9 +936,9 @@ pub fn decompose_sky130_cell(
             let c1 = inputs.c1;
             DecompResult {
                 and_gates: vec![
-                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),  // -1 = !(A1|A2)
-                    (-1 ^ 1, b1 as i64),                  // -2 = (A1|A2) & B1
-                    (-2, c1 as i64),                      // -3 = above & C1
+                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),  // gate 0: !(A1|A2) (ref: -1/-2)
+                    (-1 ^ 1, b1 as i64),                  // gate 1: (A1|A2) & B1 (ref: -3/-4)
+                    (-3, c1 as i64),                      // gate 2: gate1 & C1 (ref: -5/-6)
                 ],
                 output_idx: -3,
                 output_inverted: true,
@@ -953,9 +953,9 @@ pub fn decompose_sky130_cell(
             let c1 = inputs.c1;
             DecompResult {
                 and_gates: vec![
-                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),
-                    (-1 ^ 1, b1 as i64),
-                    (-2, c1 as i64),
+                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),  // gate 0: !(A1|A2) (ref: -1/-2)
+                    (-1 ^ 1, b1 as i64),                  // gate 1: (A1|A2) & B1 (ref: -3/-4)
+                    (-3, c1 as i64),                      // gate 2: gate1 & C1 (ref: -5/-6)
                 ],
                 output_idx: -3,
                 output_inverted: false,
@@ -971,10 +971,10 @@ pub fn decompose_sky130_cell(
             let c1 = inputs.c1;
             DecompResult {
                 and_gates: vec![
-                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),
-                    ((b1 ^ 1) as i64, (b2 ^ 1) as i64),
-                    (-1 ^ 1, -3 ^ 1),
-                    (-3, c1 as i64),
+                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),  // gate 0: !(A1|A2) (ref: -1/-2)
+                    ((b1 ^ 1) as i64, (b2 ^ 1) as i64),  // gate 1: !(B1|B2) (ref: -3/-4)
+                    (-1 ^ 1, -3 ^ 1),                     // gate 2: (A1|A2) & (B1|B2) (ref: -5/-6)
+                    (-5, c1 as i64),                      // gate 3: gate2 & C1 (ref: -7/-8)
                 ],
                 output_idx: -4,
                 output_inverted: true,
@@ -990,10 +990,10 @@ pub fn decompose_sky130_cell(
             let c1 = inputs.c1;
             DecompResult {
                 and_gates: vec![
-                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),
-                    ((b1 ^ 1) as i64, (b2 ^ 1) as i64),
-                    (-1 ^ 1, -3 ^ 1),
-                    (-3, c1 as i64),
+                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),  // gate 0: !(A1|A2) (ref: -1/-2)
+                    ((b1 ^ 1) as i64, (b2 ^ 1) as i64),  // gate 1: !(B1|B2) (ref: -3/-4)
+                    (-1 ^ 1, -3 ^ 1),                     // gate 2: (A1|A2) & (B1|B2) (ref: -5/-6)
+                    (-5, c1 as i64),                      // gate 3: gate2 & C1 (ref: -7/-8)
                 ],
                 output_idx: -4,
                 output_inverted: false,
@@ -1009,10 +1009,10 @@ pub fn decompose_sky130_cell(
             let d1 = inputs.d1;
             DecompResult {
                 and_gates: vec![
-                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64),
-                    (-1 ^ 1, b1 as i64),
-                    (-2, c1 as i64),
-                    (-3, d1 as i64),
+                    ((a1 ^ 1) as i64, (a2 ^ 1) as i64), // gate 0: !(A1|A2)
+                    (-1 ^ 1, b1 as i64),                  // gate 1: (A1|A2) & B1
+                    (-3, c1 as i64),                       // gate 2: (A1|A2) & B1 & C1
+                    (-5, d1 as i64),                       // gate 3: (A1|A2) & B1 & C1 & D1
                 ],
                 output_idx: -4,
                 output_inverted: true,
@@ -1098,24 +1098,111 @@ pub fn decompose_sky130_cell(
         }
 
         // === Arithmetic cells ===
+        // Note: HA and FA have multiple outputs. Use decompose_ha/decompose_fa for testing.
+        // The main decompose function panics because it can only return one output.
 
-        // Half adder: SUM = A ^ B, COUT = A & B
-        // Returns two outputs, handled specially by AIG builder
         "ha" => {
-            // This cell has two outputs - handled specially
             panic!(
-                "Half adder (ha) has multiple outputs and must be handled specially in AIG builder"
+                "Half adder (ha) has multiple outputs - use decompose_ha() instead"
             );
         }
 
-        // Full adder: SUM = A ^ B ^ CIN, COUT = (A & B) | (A & CIN) | (B & CIN)
         "fa" => {
             panic!(
-                "Full adder (fa) has multiple outputs and must be handled specially in AIG builder"
+                "Full adder (fa) has multiple outputs - use decompose_fa() instead"
             );
         }
 
         _ => panic!("Unknown SKY130 cell type for decomposition: {}", cell_type),
+    }
+}
+
+/// Decompose half adder for a specific output.
+/// HA: SUM = A ^ B, COUT = A & B
+pub fn decompose_ha(inputs: &CellInputs, output: &str) -> DecompResult {
+    let a = inputs.a;
+    let b = inputs.b;
+
+    match output {
+        "SUM" => {
+            // XOR = (A & !B) | (!A & B) = !( !(A & !B) & !(!A & B) )
+            let a_iv = a as i64;
+            let b_iv = b as i64;
+            let a_inv = (a ^ 1) as i64;
+            let b_inv = (b ^ 1) as i64;
+            DecompResult {
+                and_gates: vec![
+                    (a_iv, b_inv),    // gate 0: A & !B
+                    (a_inv, b_iv),    // gate 1: !A & B
+                    (-1 ^ 1, -3 ^ 1), // gate 2: !(A & !B) & !(!A & B)
+                ],
+                output_idx: -3,
+                output_inverted: true,
+            }
+        }
+        "COUT" => {
+            // COUT = A & B
+            DecompResult::single_and(a as i64, b as i64, false)
+        }
+        _ => panic!("Unknown HA output: {}", output),
+    }
+}
+
+/// Decompose full adder for a specific output.
+/// FA: SUM = A ^ B ^ CIN, COUT = (A & B) | (A & CIN) | (B & CIN)
+pub fn decompose_fa(inputs: &CellInputs, output: &str) -> DecompResult {
+    let a = inputs.a;
+    let b = inputs.b;
+    let cin = inputs.cin;
+
+    match output {
+        "SUM" => {
+            // SUM = A ^ B ^ CIN
+            // First compute A ^ B, then XOR with CIN
+            let a_iv = a as i64;
+            let b_iv = b as i64;
+            let a_inv = (a ^ 1) as i64;
+            let b_inv = (b ^ 1) as i64;
+            let cin_iv = cin as i64;
+            let cin_inv = (cin ^ 1) as i64;
+
+            DecompResult {
+                and_gates: vec![
+                    // A ^ B computation
+                    (a_iv, b_inv),    // gate 0: A & !B (ref: -1/-2)
+                    (a_inv, b_iv),    // gate 1: !A & B (ref: -3/-4)
+                    (-1 ^ 1, -3 ^ 1), // gate 2: NOR = !(A&!B) & !(!A&B) (ref: -5/-6)
+                    // gate 2 inverted (-6) gives A ^ B
+
+                    // (A^B) ^ CIN computation
+                    (-6, cin_inv),    // gate 3: (A^B) & !CIN (ref: -7/-8)
+                    (-5, cin_iv),     // gate 4: !(A^B) & CIN (ref: -9/-10)
+                    (-7 ^ 1, -9 ^ 1), // gate 5: NOR (ref: -11/-12)
+                ],
+                output_idx: -6,
+                output_inverted: true, // Invert NOR to get XOR
+            }
+        }
+        "COUT" => {
+            // COUT = (A & B) | (A & CIN) | (B & CIN)
+            // = !( !(A&B) & !(A&CIN) & !(B&CIN) )
+            let a_iv = a as i64;
+            let b_iv = b as i64;
+            let cin_iv = cin as i64;
+
+            DecompResult {
+                and_gates: vec![
+                    (a_iv, b_iv),     // gate 0: A & B (ref: -1/-2)
+                    (a_iv, cin_iv),   // gate 1: A & CIN (ref: -3/-4)
+                    (b_iv, cin_iv),   // gate 2: B & CIN (ref: -5/-6)
+                    (-1 ^ 1, -3 ^ 1), // gate 3: !(A&B) & !(A&CIN) (ref: -7/-8)
+                    (-7, -5 ^ 1),     // gate 4: gate3 & !(B&CIN) (ref: -9/-10)
+                ],
+                output_idx: -5,
+                output_inverted: true,
+            }
+        }
+        _ => panic!("Unknown FA output: {}", output),
     }
 }
 
@@ -1783,5 +1870,1056 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ========== Additional tests for cells used in the design ==========
+
+    fn setup_o221_inputs(a1: bool, a2: bool, b1: bool, b2: bool, c1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("B1", 6usize);
+        vals.insert(6, b1);
+        vals.insert(7, !b1);
+
+        cell_inputs.set_pin("B2", 8usize);
+        vals.insert(8, b2);
+        vals.insert(9, !b2);
+
+        cell_inputs.set_pin("C1", 10usize);
+        vals.insert(10, c1);
+        vals.insert(11, !c1);
+
+        (cell_inputs, vals)
+    }
+
+    fn setup_a221_inputs(a1: bool, a2: bool, b1: bool, b2: bool, c1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        setup_o221_inputs(a1, a2, b1, b2, c1) // Same pin layout
+    }
+
+    fn setup_o211_inputs(a1: bool, a2: bool, b1: bool, c1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("B1", 6usize);
+        vals.insert(6, b1);
+        vals.insert(7, !b1);
+
+        cell_inputs.set_pin("C1", 8usize);
+        vals.insert(8, c1);
+        vals.insert(9, !c1);
+
+        (cell_inputs, vals)
+    }
+
+    fn setup_a211_inputs(a1: bool, a2: bool, b1: bool, c1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        setup_o211_inputs(a1, a2, b1, c1) // Same pin layout
+    }
+
+    fn setup_a31_inputs(a1: bool, a2: bool, a3: bool, b1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("A3", 6usize);
+        vals.insert(6, a3);
+        vals.insert(7, !a3);
+
+        cell_inputs.set_pin("B1", 8usize);
+        vals.insert(8, b1);
+        vals.insert(9, !b1);
+
+        (cell_inputs, vals)
+    }
+
+    fn setup_a32_inputs(a1: bool, a2: bool, a3: bool, b1: bool, b2: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("A3", 6usize);
+        vals.insert(6, a3);
+        vals.insert(7, !a3);
+
+        cell_inputs.set_pin("B1", 8usize);
+        vals.insert(8, b1);
+        vals.insert(9, !b1);
+
+        cell_inputs.set_pin("B2", 10usize);
+        vals.insert(10, b2);
+        vals.insert(11, !b2);
+
+        (cell_inputs, vals)
+    }
+
+    fn setup_o21b_inputs(a1: bool, a2: bool, b1_n: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("B1_N", 6usize);
+        vals.insert(6, b1_n);
+        vals.insert(7, !b1_n);
+
+        (cell_inputs, vals)
+    }
+
+    fn setup_a21b_inputs(a1: bool, a2: bool, b1_n: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        setup_o21b_inputs(a1, a2, b1_n) // Same pin layout
+    }
+
+    #[test]
+    fn test_truth_table_o221ai() {
+        // o221ai: Y = !((A1 | A2) & (B1 | B2) & C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for b2 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_o221_inputs(a1, a2, b1, b2, c1);
+                            let decomp = decompose_sky130_cell("o221ai", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 || a2) && (b1 || b2) && c1);
+                            assert_eq!(result, expected, "o221ai({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, b2, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_o221a() {
+        // o221a: Y = (A1 | A2) & (B1 | B2) & C1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for b2 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_o221_inputs(a1, a2, b1, b2, c1);
+                            let decomp = decompose_sky130_cell("o221a", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = (a1 || a2) && (b1 || b2) && c1;
+                            assert_eq!(result, expected, "o221a({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, b2, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a221oi() {
+        // a221oi: Y = !((A1 & A2) | (B1 & B2) | C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for b2 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_a221_inputs(a1, a2, b1, b2, c1);
+                            let decomp = decompose_sky130_cell("a221oi", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 && a2) || (b1 && b2) || c1);
+                            assert_eq!(result, expected, "a221oi({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, b2, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a221o() {
+        // a221o: Y = (A1 & A2) | (B1 & B2) | C1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for b2 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_a221_inputs(a1, a2, b1, b2, c1);
+                            let decomp = decompose_sky130_cell("a221o", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = (a1 && a2) || (b1 && b2) || c1;
+                            assert_eq!(result, expected, "a221o({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, b2, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_o211ai() {
+        // o211ai: Y = !((A1 | A2) & B1 & C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for c1 in [false, true] {
+                        let (inputs, vals) = setup_o211_inputs(a1, a2, b1, c1);
+                        let decomp = decompose_sky130_cell("o211ai", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = !((a1 || a2) && b1 && c1);
+                        assert_eq!(result, expected, "o211ai({}, {}, {}, {}) = {} (expected {})", a1, a2, b1, c1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_o211a() {
+        // o211a: Y = (A1 | A2) & B1 & C1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for c1 in [false, true] {
+                        let (inputs, vals) = setup_o211_inputs(a1, a2, b1, c1);
+                        let decomp = decompose_sky130_cell("o211a", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = (a1 || a2) && b1 && c1;
+                        assert_eq!(result, expected, "o211a({}, {}, {}, {}) = {} (expected {})", a1, a2, b1, c1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a211oi() {
+        // a211oi: Y = !((A1 & A2) | B1 | C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for c1 in [false, true] {
+                        let (inputs, vals) = setup_a211_inputs(a1, a2, b1, c1);
+                        let decomp = decompose_sky130_cell("a211oi", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = !((a1 && a2) || b1 || c1);
+                        assert_eq!(result, expected, "a211oi({}, {}, {}, {}) = {} (expected {})", a1, a2, b1, c1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a31oi() {
+        // a31oi: Y = !((A1 & A2 & A3) | B1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        let (inputs, vals) = setup_a31_inputs(a1, a2, a3, b1);
+                        let decomp = decompose_sky130_cell("a31oi", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = !((a1 && a2 && a3) || b1);
+                        assert_eq!(result, expected, "a31oi({}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a31o() {
+        // a31o: Y = (A1 & A2 & A3) | B1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        let (inputs, vals) = setup_a31_inputs(a1, a2, a3, b1);
+                        let decomp = decompose_sky130_cell("a31o", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = (a1 && a2 && a3) || b1;
+                        assert_eq!(result, expected, "a31o({}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a32oi() {
+        // a32oi: Y = !((A1 & A2 & A3) | (B1 & B2))
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        for b2 in [false, true] {
+                            let (inputs, vals) = setup_a32_inputs(a1, a2, a3, b1, b2);
+                            let decomp = decompose_sky130_cell("a32oi", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 && a2 && a3) || (b1 && b2));
+                            assert_eq!(result, expected, "a32oi({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, b2, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a32o() {
+        // a32o: Y = (A1 & A2 & A3) | (B1 & B2)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        for b2 in [false, true] {
+                            let (inputs, vals) = setup_a32_inputs(a1, a2, a3, b1, b2);
+                            let decomp = decompose_sky130_cell("a32o", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = (a1 && a2 && a3) || (b1 && b2);
+                            assert_eq!(result, expected, "a32o({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, b2, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_o21bai() {
+        // o21bai: Y = !((A1 | A2) & !B1_N)
+        // Note: B1_N is the input, !B1_N is B1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1_n in [false, true] {
+                    let (inputs, vals) = setup_o21b_inputs(a1, a2, b1_n);
+                    let decomp = decompose_sky130_cell("o21bai", &inputs);
+                    let result = eval_decomp(&decomp, &vals);
+                    let b1 = !b1_n;  // Actual B1 value
+                    let expected = !((a1 || a2) && b1);
+                    assert_eq!(result, expected, "o21bai(A1={}, A2={}, B1_N={}) = {} (expected {})", a1, a2, b1_n, result, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a21boi() {
+        // a21boi: Y = !((A1 & A2) | !B1_N)
+        // Note: B1_N is the input, !B1_N is B1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1_n in [false, true] {
+                    let (inputs, vals) = setup_a21b_inputs(a1, a2, b1_n);
+                    let decomp = decompose_sky130_cell("a21boi", &inputs);
+                    let result = eval_decomp(&decomp, &vals);
+                    let b1 = !b1_n;  // Actual B1 value
+                    let expected = !((a1 && a2) || b1);
+                    assert_eq!(result, expected, "a21boi(A1={}, A2={}, B1_N={}) = {} (expected {})", a1, a2, b1_n, result, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_bufinv() {
+        // bufinv: Y = !A (same as inverter)
+        for a in [false, true] {
+            let mut cell_inputs = CellInputs::new();
+            let mut vals = std::collections::HashMap::new();
+            cell_inputs.set_pin("A", 2usize);
+            vals.insert(2, a);
+            vals.insert(3, !a);
+
+            let decomp = decompose_sky130_cell("bufinv", &cell_inputs);
+            let result = eval_decomp(&decomp, &vals);
+            let expected = !a;
+            assert_eq!(result, expected, "bufinv({}) = {} (expected {})", a, result, expected);
+        }
+    }
+
+    #[test]
+    fn test_truth_table_clkbuf() {
+        // clkbuf: X = A (buffer)
+        for a in [false, true] {
+            let mut cell_inputs = CellInputs::new();
+            let mut vals = std::collections::HashMap::new();
+            cell_inputs.set_pin("A", 2usize);
+            vals.insert(2, a);
+            vals.insert(3, !a);
+
+            let decomp = decompose_sky130_cell("clkbuf", &cell_inputs);
+            let result = eval_decomp(&decomp, &vals);
+            let expected = a;
+            assert_eq!(result, expected, "clkbuf({}) = {} (expected {})", a, result, expected);
+        }
+    }
+
+    #[test]
+    fn test_truth_table_clkinv() {
+        // clkinv: Y = !A (inverter)
+        for a in [false, true] {
+            let mut cell_inputs = CellInputs::new();
+            let mut vals = std::collections::HashMap::new();
+            cell_inputs.set_pin("A", 2usize);
+            vals.insert(2, a);
+            vals.insert(3, !a);
+
+            let decomp = decompose_sky130_cell("clkinv", &cell_inputs);
+            let result = eval_decomp(&decomp, &vals);
+            let expected = !a;
+            assert_eq!(result, expected, "clkinv({}) = {} (expected {})", a, result, expected);
+        }
+    }
+
+    #[test]
+    fn test_truth_table_clkinvlp() {
+        // clkinvlp: Y = !A (low-power clock inverter)
+        for a in [false, true] {
+            let mut cell_inputs = CellInputs::new();
+            let mut vals = std::collections::HashMap::new();
+            cell_inputs.set_pin("A", 2usize);
+            vals.insert(2, a);
+            vals.insert(3, !a);
+
+            let decomp = decompose_sky130_cell("clkinvlp", &cell_inputs);
+            let result = eval_decomp(&decomp, &vals);
+            let expected = !a;
+            assert_eq!(result, expected, "clkinvlp({}) = {} (expected {})", a, result, expected);
+        }
+    }
+
+    #[test]
+    fn test_truth_table_clkdlybuf4s50() {
+        // clkdlybuf4s50: X = A (clock delay buffer)
+        for a in [false, true] {
+            let mut cell_inputs = CellInputs::new();
+            let mut vals = std::collections::HashMap::new();
+            cell_inputs.set_pin("A", 2usize);
+            vals.insert(2, a);
+            vals.insert(3, !a);
+
+            let decomp = decompose_sky130_cell("clkdlybuf4s50", &cell_inputs);
+            let result = eval_decomp(&decomp, &vals);
+            let expected = a;
+            assert_eq!(result, expected, "clkdlybuf4s50({}) = {} (expected {})", a, result, expected);
+        }
+    }
+
+    fn setup_nand3b_inputs(a_n: bool, b: bool, c: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A_N", 2usize);
+        vals.insert(2, a_n);
+        vals.insert(3, !a_n);
+
+        cell_inputs.set_pin("B", 4usize);
+        vals.insert(4, b);
+        vals.insert(5, !b);
+
+        cell_inputs.set_pin("C", 6usize);
+        vals.insert(6, c);
+        vals.insert(7, !c);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_nand3b() {
+        // nand3b: Y = !(!A_N & B & C)
+        // A_N is the inverted input, so !A_N gives A
+        for a_n in [false, true] {
+            for b in [false, true] {
+                for c in [false, true] {
+                    let (inputs, vals) = setup_nand3b_inputs(a_n, b, c);
+                    let decomp = decompose_sky130_cell("nand3b", &inputs);
+                    let result = eval_decomp(&decomp, &vals);
+                    let a = !a_n;  // Effective A value
+                    let expected = !(a && b && c);
+                    assert_eq!(result, expected, "nand3b(A_N={}, B={}, C={}) = {} (expected {})", a_n, b, c, result, expected);
+                }
+            }
+        }
+    }
+
+    fn setup_nor3b_inputs(a: bool, b: bool, c_n: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A", 2usize);
+        vals.insert(2, a);
+        vals.insert(3, !a);
+
+        cell_inputs.set_pin("B", 4usize);
+        vals.insert(4, b);
+        vals.insert(5, !b);
+
+        cell_inputs.set_pin("C_N", 6usize);
+        vals.insert(6, c_n);
+        vals.insert(7, !c_n);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_nor3b() {
+        // nor3b: Y = !(A | B | !C_N)
+        // C_N is the inverted input, so !C_N gives C
+        for a in [false, true] {
+            for b in [false, true] {
+                for c_n in [false, true] {
+                    let (inputs, vals) = setup_nor3b_inputs(a, b, c_n);
+                    let decomp = decompose_sky130_cell("nor3b", &inputs);
+                    let result = eval_decomp(&decomp, &vals);
+                    let c = !c_n;  // Effective C value
+                    let expected = !(a || b || c);
+                    assert_eq!(result, expected, "nor3b(A={}, B={}, C_N={}) = {} (expected {})", a, b, c_n, result, expected);
+                }
+            }
+        }
+    }
+
+    fn setup_o31_inputs(a1: bool, a2: bool, a3: bool, b1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("A3", 6usize);
+        vals.insert(6, a3);
+        vals.insert(7, !a3);
+
+        cell_inputs.set_pin("B1", 8usize);
+        vals.insert(8, b1);
+        vals.insert(9, !b1);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_o31ai() {
+        // o31ai: Y = !((A1 | A2 | A3) & B1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        let (inputs, vals) = setup_o31_inputs(a1, a2, a3, b1);
+                        let decomp = decompose_sky130_cell("o31ai", &inputs);
+                        let result = eval_decomp(&decomp, &vals);
+                        let expected = !((a1 || a2 || a3) && b1);
+                        assert_eq!(result, expected, "o31ai({}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, result, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    fn setup_o41_inputs(a1: bool, a2: bool, a3: bool, a4: bool, b1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A1", 2usize);
+        vals.insert(2, a1);
+        vals.insert(3, !a1);
+
+        cell_inputs.set_pin("A2", 4usize);
+        vals.insert(4, a2);
+        vals.insert(5, !a2);
+
+        cell_inputs.set_pin("A3", 6usize);
+        vals.insert(6, a3);
+        vals.insert(7, !a3);
+
+        cell_inputs.set_pin("A4", 8usize);
+        vals.insert(8, a4);
+        vals.insert(9, !a4);
+
+        cell_inputs.set_pin("B1", 10usize);
+        vals.insert(10, b1);
+        vals.insert(11, !b1);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_o41ai() {
+        // o41ai: Y = !((A1 | A2 | A3 | A4) & B1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for a4 in [false, true] {
+                        for b1 in [false, true] {
+                            let (inputs, vals) = setup_o41_inputs(a1, a2, a3, a4, b1);
+                            let decomp = decompose_sky130_cell("o41ai", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 || a2 || a3 || a4) && b1);
+                            assert_eq!(result, expected, "o41ai({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, a4, b1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn setup_a41_inputs(a1: bool, a2: bool, a3: bool, a4: bool, b1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        setup_o41_inputs(a1, a2, a3, a4, b1) // Same layout
+    }
+
+    #[test]
+    fn test_truth_table_a41oi() {
+        // a41oi: Y = !((A1 & A2 & A3 & A4) | B1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for a4 in [false, true] {
+                        for b1 in [false, true] {
+                            let (inputs, vals) = setup_a41_inputs(a1, a2, a3, a4, b1);
+                            let decomp = decompose_sky130_cell("a41oi", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 && a2 && a3 && a4) || b1);
+                            assert_eq!(result, expected, "a41oi({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, a4, b1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a41o() {
+        // a41o: Y = (A1 & A2 & A3 & A4) | B1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for a4 in [false, true] {
+                        for b1 in [false, true] {
+                            let (inputs, vals) = setup_a41_inputs(a1, a2, a3, a4, b1);
+                            let decomp = decompose_sky130_cell("a41o", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = (a1 && a2 && a3 && a4) || b1;
+                            assert_eq!(result, expected, "a41o({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, a4, b1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ========== Multi-output arithmetic cell tests (HA, FA) ==========
+
+    fn setup_ha_inputs(a: bool, b: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A", 2usize);
+        vals.insert(2, a);
+        vals.insert(3, !a);
+
+        cell_inputs.set_pin("B", 4usize);
+        vals.insert(4, b);
+        vals.insert(5, !b);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_ha_sum() {
+        // HA SUM = A ^ B
+        for a in [false, true] {
+            for b in [false, true] {
+                let (inputs, vals) = setup_ha_inputs(a, b);
+                let decomp = decompose_ha(&inputs, "SUM");
+                let result = eval_decomp(&decomp, &vals);
+                let expected = a ^ b;
+                assert_eq!(result, expected, "ha_sum({}, {}) = {} (expected {})", a, b, result, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_ha_cout() {
+        // HA COUT = A & B
+        for a in [false, true] {
+            for b in [false, true] {
+                let (inputs, vals) = setup_ha_inputs(a, b);
+                let decomp = decompose_ha(&inputs, "COUT");
+                let result = eval_decomp(&decomp, &vals);
+                let expected = a && b;
+                assert_eq!(result, expected, "ha_cout({}, {}) = {} (expected {})", a, b, result, expected);
+            }
+        }
+    }
+
+    fn setup_fa_inputs(a: bool, b: bool, cin: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut cell_inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+
+        cell_inputs.set_pin("A", 2usize);
+        vals.insert(2, a);
+        vals.insert(3, !a);
+
+        cell_inputs.set_pin("B", 4usize);
+        vals.insert(4, b);
+        vals.insert(5, !b);
+
+        cell_inputs.set_pin("CIN", 6usize);
+        vals.insert(6, cin);
+        vals.insert(7, !cin);
+
+        (cell_inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_fa_sum() {
+        // FA SUM = A ^ B ^ CIN
+        for a in [false, true] {
+            for b in [false, true] {
+                for cin in [false, true] {
+                    let (inputs, vals) = setup_fa_inputs(a, b, cin);
+                    let decomp = decompose_fa(&inputs, "SUM");
+                    let result = eval_decomp(&decomp, &vals);
+                    let expected = a ^ b ^ cin;
+                    assert_eq!(result, expected, "fa_sum({}, {}, {}) = {} (expected {})", a, b, cin, result, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_fa_cout() {
+        // FA COUT = (A & B) | (A & CIN) | (B & CIN) = majority function
+        for a in [false, true] {
+            for b in [false, true] {
+                for cin in [false, true] {
+                    let (inputs, vals) = setup_fa_inputs(a, b, cin);
+                    let decomp = decompose_fa(&inputs, "COUT");
+                    let result = eval_decomp(&decomp, &vals);
+                    let expected = (a && b) || (a && cin) || (b && cin);
+                    assert_eq!(result, expected, "fa_cout({}, {}, {}) = {} (expected {})", a, b, cin, result, expected);
+                }
+            }
+        }
+    }
+
+    // ========== Sequential cell tests (DFF behavior) ==========
+    // These test the expected behavior of DFF cells, not decomposition.
+    // DFFs are not decomposed but handled specially in the AIG.
+
+    /// Simulates DFF behavior for testing.
+    /// Returns new Q value after clock edge.
+    fn simulate_dff(d: bool, de: Option<bool>, reset_b: Option<bool>, set_b: Option<bool>, q_prev: bool) -> bool {
+        // Async reset takes priority (active low)
+        if let Some(rst) = reset_b {
+            if !rst {
+                return false;
+            }
+        }
+        // Async set next priority (active low)
+        if let Some(set) = set_b {
+            if !set {
+                return true;
+            }
+        }
+        // Data enable check
+        if let Some(en) = de {
+            if !en {
+                return q_prev; // Hold previous value
+            }
+        }
+        // Normal latch
+        d
+    }
+
+    #[test]
+    fn test_dff_basic_dfxtp() {
+        // dfxtp: basic DFF, Q follows D on clock edge
+        for d in [false, true] {
+            for q_prev in [false, true] {
+                let q_new = simulate_dff(d, None, None, None, q_prev);
+                assert_eq!(q_new, d, "dfxtp: D={}, Q_prev={} -> Q={} (expected {})", d, q_prev, q_new, d);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dff_with_enable_edfxtp() {
+        // edfxtp: DFF with data enable
+        // When DE=1, Q follows D; when DE=0, Q holds previous value
+        for d in [false, true] {
+            for de in [false, true] {
+                for q_prev in [false, true] {
+                    let q_new = simulate_dff(d, Some(de), None, None, q_prev);
+                    let expected = if de { d } else { q_prev };
+                    assert_eq!(q_new, expected, "edfxtp: D={}, DE={}, Q_prev={} -> Q={} (expected {})", d, de, q_prev, q_new, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dff_with_reset_dfrtp() {
+        // dfrtp: DFF with async reset (RESET_B active low)
+        // When RESET_B=0, Q=0 regardless of D
+        // When RESET_B=1, Q follows D
+        for d in [false, true] {
+            for reset_b in [false, true] {
+                for q_prev in [false, true] {
+                    let q_new = simulate_dff(d, None, Some(reset_b), None, q_prev);
+                    let expected = if !reset_b { false } else { d };
+                    assert_eq!(q_new, expected, "dfrtp: D={}, RESET_B={}, Q_prev={} -> Q={} (expected {})", d, reset_b, q_prev, q_new, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dff_with_set_dfstp() {
+        // dfstp: DFF with async set (SET_B active low)
+        // When SET_B=0, Q=1 regardless of D
+        // When SET_B=1, Q follows D
+        for d in [false, true] {
+            for set_b in [false, true] {
+                for q_prev in [false, true] {
+                    let q_new = simulate_dff(d, None, None, Some(set_b), q_prev);
+                    let expected = if !set_b { true } else { d };
+                    assert_eq!(q_new, expected, "dfstp: D={}, SET_B={}, Q_prev={} -> Q={} (expected {})", d, set_b, q_prev, q_new, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dff_reset_priority_over_set() {
+        // When both RESET_B and SET_B are active, RESET takes priority
+        // (This matches typical silicon behavior)
+        for d in [false, true] {
+            let q_new = simulate_dff(d, None, Some(false), Some(false), true);
+            assert_eq!(q_new, false, "Reset should take priority over set");
+        }
+    }
+
+    #[test]
+    fn test_dff_with_enable_and_reset() {
+        // Combined enable and reset
+        // Reset should override enable
+        for d in [false, true] {
+            for de in [false, true] {
+                for reset_b in [false, true] {
+                    for q_prev in [false, true] {
+                        let q_new = simulate_dff(d, Some(de), Some(reset_b), None, q_prev);
+                        let expected = if !reset_b {
+                            false // Reset active
+                        } else if de {
+                            d // Enable active, latch D
+                        } else {
+                            q_prev // Enable inactive, hold
+                        };
+                        assert_eq!(q_new, expected,
+                            "DFF+EN+RST: D={}, DE={}, RESET_B={}, Q_prev={} -> Q={} (expected {})",
+                            d, de, reset_b, q_prev, q_new, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    // ========== 5-input cells with 4 AND gates ==========
+
+    fn setup_o2111_inputs(a1: bool, a2: bool, b1: bool, c1: bool, d1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+        inputs.a1 = 10; vals.insert(10, a1);
+        inputs.a2 = 12; vals.insert(12, a2);
+        inputs.b1 = 14; vals.insert(14, b1);
+        inputs.c1 = 16; vals.insert(16, c1);
+        inputs.d1 = 18; vals.insert(18, d1);
+        (inputs, vals)
+    }
+
+    fn setup_a2111_inputs(a1: bool, a2: bool, b1: bool, c1: bool, d1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        setup_o2111_inputs(a1, a2, b1, c1, d1)
+    }
+
+    fn setup_a311_inputs(a1: bool, a2: bool, a3: bool, b1: bool, c1: bool) -> (CellInputs, std::collections::HashMap<i64, bool>) {
+        let mut inputs = CellInputs::new();
+        let mut vals = std::collections::HashMap::new();
+        inputs.a1 = 10; vals.insert(10, a1);
+        inputs.a2 = 12; vals.insert(12, a2);
+        inputs.a3 = 14; vals.insert(14, a3);
+        inputs.b1 = 16; vals.insert(16, b1);
+        inputs.c1 = 18; vals.insert(18, c1);
+        (inputs, vals)
+    }
+
+    #[test]
+    fn test_truth_table_o2111ai() {
+        // o2111ai: Y = !((A1 | A2) & B1 & C1 & D1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for c1 in [false, true] {
+                        for d1 in [false, true] {
+                            let (inputs, vals) = setup_o2111_inputs(a1, a2, b1, c1, d1);
+                            let decomp = decompose_sky130_cell("o2111ai", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 || a2) && b1 && c1 && d1);
+                            assert_eq!(result, expected, "o2111ai({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, c1, d1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a2111oi() {
+        // a2111oi: Y = !((A1 & A2) | B1 | C1 | D1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for b1 in [false, true] {
+                    for c1 in [false, true] {
+                        for d1 in [false, true] {
+                            let (inputs, vals) = setup_a2111_inputs(a1, a2, b1, c1, d1);
+                            let decomp = decompose_sky130_cell("a2111oi", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 && a2) || b1 || c1 || d1);
+                            assert_eq!(result, expected, "a2111oi({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, b1, c1, d1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a311oi() {
+        // a311oi: Y = !((A1 & A2 & A3) | B1 | C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_a311_inputs(a1, a2, a3, b1, c1);
+                            let decomp = decompose_sky130_cell("a311oi", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 && a2 && a3) || b1 || c1);
+                            assert_eq!(result, expected, "a311oi({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_a311o() {
+        // a311o: Y = (A1 & A2 & A3) | B1 | C1
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_a311_inputs(a1, a2, a3, b1, c1);
+                            let decomp = decompose_sky130_cell("a311o", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = (a1 && a2 && a3) || b1 || c1;
+                            assert_eq!(result, expected, "a311o({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truth_table_o311ai() {
+        // o311ai: Y = !((A1 | A2 | A3) & B1 & C1)
+        for a1 in [false, true] {
+            for a2 in [false, true] {
+                for a3 in [false, true] {
+                    for b1 in [false, true] {
+                        for c1 in [false, true] {
+                            let (inputs, vals) = setup_a311_inputs(a1, a2, a3, b1, c1);
+                            let decomp = decompose_sky130_cell("o311ai", &inputs);
+                            let result = eval_decomp(&decomp, &vals);
+                            let expected = !((a1 || a2 || a3) && b1 && c1);
+                            assert_eq!(result, expected, "o311ai({}, {}, {}, {}, {}) = {} (expected {})", a1, a2, a3, b1, c1, result, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ========== Helper function tests ==========
+
+    #[test]
+    fn test_is_sequential_cell() {
+        assert!(is_sequential_cell("dfxtp"));
+        assert!(is_sequential_cell("dfrtp"));
+        assert!(is_sequential_cell("dfrbp"));
+        assert!(is_sequential_cell("dfstp"));
+        assert!(is_sequential_cell("dfbbp"));
+        assert!(is_sequential_cell("edfxtp"));
+        assert!(is_sequential_cell("sdfxtp"));
+        assert!(is_sequential_cell("dlxtp"));
+        assert!(is_sequential_cell("dlat"));
+
+        assert!(!is_sequential_cell("inv"));
+        assert!(!is_sequential_cell("nand2"));
+        assert!(!is_sequential_cell("fa"));
+    }
+
+    #[test]
+    fn test_is_tie_cell() {
+        assert!(is_tie_cell("conb"));
+        assert!(!is_tie_cell("inv"));
+        assert!(!is_tie_cell("dfxtp"));
+    }
+
+    #[test]
+    fn test_is_multi_output_cell() {
+        assert!(is_multi_output_cell("ha"));
+        assert!(is_multi_output_cell("fa"));
+        assert!(is_multi_output_cell("dfbbp"));
+        assert!(!is_multi_output_cell("inv"));
+        assert!(!is_multi_output_cell("dfxtp"));
     }
 }
