@@ -4,3 +4,6 @@
 [submodule "benchmarks/dataset"]
 	path = benchmarks/dataset
 	url = https://github.com/ChipFlow/GEM-dataset.git
+[submodule "sky130_fd_sc_hd"]
+	path = sky130_fd_sc_hd
+	url = https://github.com/google/skywater-pdk-libs-sky130_fd_sc_hd.git

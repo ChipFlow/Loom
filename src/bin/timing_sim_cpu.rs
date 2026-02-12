@@ -239,6 +239,18 @@ struct Args {
     /// Reset polarity: true = GPIO high means reset active.
     #[clap(long)]
     reset_active_high: bool,
+
+    /// Enable Wishbone bus monitor. Provide a hierarchical prefix to search
+    /// for bus signals (e.g. "soc" finds inst$top.soc.*.{cyc,stb,ack,...}).
+    /// Logs protocol-level bus transactions to stderr.
+    #[clap(long)]
+    wb_monitor: Option<String>,
+
+    /// Path to PDK cell library for vendor-verified decompositions.
+    /// Points to the cells/ directory of sky130_fd_sc_hd.
+    /// Defaults to sky130_fd_sc_hd/cells if the submodule is present.
+    #[clap(long)]
+    pdk_cells: Option<PathBuf>,
 }
 
 /// Testbench configuration loaded from JSON.
@@ -714,6 +726,404 @@ impl WatchlistEntry {
                     _ => format!("0x{:0width$X}", value, width = (pins.len() + 3) / 4),
                 }
             }
+        }
+    }
+}
+
+/// A discovered Wishbone bus (master or slave side).
+struct WbBus {
+    /// Human-readable label (e.g. "cpu.fetch.ibus", "sram.wb_bus").
+    label: String,
+    /// CYC signal pin (Option since slaves don't have it).
+    cyc_pin: Option<usize>,
+    /// STB signal pin.
+    stb_pin: Option<usize>,
+    /// WE signal pin.
+    we_pin: Option<usize>,
+    /// ACK signal pin.
+    ack_pin: Option<usize>,
+    /// Address bits (index = bit position, value = pin; usize::MAX = not found).
+    adr_pins: Vec<usize>,
+    /// Write data bits.
+    dat_w_pins: Vec<usize>,
+    /// Read data bits.
+    dat_r_pins: Vec<usize>,
+    /// Byte select bits.
+    sel_pins: Vec<usize>,
+}
+
+impl WbBus {
+    fn new(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            cyc_pin: None,
+            stb_pin: None,
+            we_pin: None,
+            ack_pin: None,
+            adr_pins: Vec::new(),
+            dat_w_pins: Vec::new(),
+            dat_r_pins: Vec::new(),
+            sel_pins: Vec::new(),
+        }
+    }
+
+    fn read_bus_value(pins: &[usize], circ_state: &[u8]) -> u64 {
+        let mut val = 0u64;
+        for (i, &pin) in pins.iter().enumerate() {
+            if pin < circ_state.len() && circ_state[pin] != 0 {
+                val |= 1u64 << i;
+            }
+        }
+        val
+    }
+
+    fn read_bit(pin: Option<usize>, circ_state: &[u8]) -> u8 {
+        pin.map(|p| if p < circ_state.len() { circ_state[p] } else { 0 }).unwrap_or(0)
+    }
+}
+
+/// Wishbone bus monitor: auto-discovers bus signals and logs transactions.
+struct WishboneBusMonitor {
+    /// All discovered buses (masters and slaves).
+    buses: Vec<WbBus>,
+    /// Arbiter grant pin (if found).
+    grant_pin: Option<usize>,
+    /// Extra single-bit signals (e.g. read_port__en, write_port__en).
+    extra: Vec<(String, usize)>,
+    /// Previous cycle's CYC values for edge detection (indexed same as buses).
+    prev_cyc: Vec<u8>,
+    /// Previous cycle's ACK values for edge detection.
+    prev_ack: Vec<u8>,
+    /// Previous grant value.
+    prev_grant: u8,
+    /// First cycle dbus CYC went high (for targeted tracing).
+    first_dbus_cycle: Option<usize>,
+}
+
+impl WishboneBusMonitor {
+    /// Discover all Wishbone signals under the given hierarchical prefix.
+    /// E.g. prefix="soc" matches `inst$top.soc.cpu.fetch.ibus__cyc`, etc.
+    fn discover(prefix: &str, netlistdb: &NetlistDB) -> Self {
+        // We'll search pin names for patterns containing the prefix and WB signal names.
+        // Signal patterns we look for (double underscore = Amaranth convention):
+        //   __cyc, __stb, __we, __ack, __adr[N], __dat_w[N], __dat_r[N], __sel[N]
+        //   .grant (arbiter)
+        //   .read_port__en, .write_port__en[N], .read_port__data[N] (SRAM-specific)
+
+        // Step 1: Collect all matching signal names and their pins.
+        // Use a HashMap: signal_full_path -> pin_id
+        let mut signal_pins: HashMap<String, usize> = HashMap::new();
+        let match_prefix = format!("{}.", prefix);
+
+        // Helper: find best pin for a net name (prefer DFF Q outputs).
+        let find_best_pin = |net_pattern: &str| -> Option<usize> {
+            // First: DFF Q output
+            for pinid in 0..netlistdb.num_pins {
+                let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                if pin_name.contains(net_pattern) && pin_name.ends_with(":Q") {
+                    return Some(pinid);
+                }
+            }
+            // Second: net name lookup
+            for netid in 0..netlistdb.num_nets {
+                let net_name = netlistdb.netnames[netid].dbg_fmt_pin();
+                if net_name.contains(net_pattern) {
+                    for pinid in netlistdb.net2pin.iter_set(netid) {
+                        return Some(pinid);
+                    }
+                }
+            }
+            // Third: any pin containing pattern
+            for pinid in 0..netlistdb.num_pins {
+                let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                if pin_name.contains(net_pattern) {
+                    return Some(pinid);
+                }
+            }
+            None
+        };
+
+        // Step 2: Find all wire declarations matching WB signal patterns.
+        // Scan all net names for the prefix.
+        let wb_signal_suffixes = [
+            "__cyc", "__stb", "__we", "__ack",
+        ];
+
+        let wb_bus_suffixes = [
+            ("__adr", 30),
+            ("__dat_w", 32),
+            ("__dat_r", 32),
+            ("__sel", 4),
+        ];
+
+        let extra_suffixes = [
+            "read_port__en", "read_port__data",
+            "write_port__en",
+        ];
+
+        // Discover bus names by finding unique hierarchical paths before the WB signal suffix.
+        let mut bus_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for netid in 0..netlistdb.num_nets {
+            let net_name = netlistdb.netnames[netid].dbg_fmt_pin();
+            if !net_name.contains(&match_prefix) {
+                continue;
+            }
+
+            // Extract the path portion relevant to our prefix
+            // Net names look like: \inst$top.soc.cpu.fetch.ibus__cyc
+            // We want to extract: cpu.fetch.ibus
+            for suffix in &wb_signal_suffixes {
+                if net_name.contains(suffix) {
+                    // Find the bus path: everything between the prefix and the signal suffix
+                    if let Some(prefix_pos) = net_name.find(&match_prefix) {
+                        let after_prefix = &net_name[prefix_pos + match_prefix.len()..];
+                        // Find where the WB signal starts (at the last __ before the suffix)
+                        if let Some(sig_pos) = after_prefix.rfind(suffix) {
+                            let bus_path = &after_prefix[..sig_pos];
+                            // Remove trailing dot if any
+                            let bus_path = bus_path.trim_end_matches('.');
+                            if !bus_path.is_empty() {
+                                bus_paths.insert(bus_path.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // Also check bus suffixes (with [N] indices)
+            for (suffix, _) in &wb_bus_suffixes {
+                if net_name.contains(suffix) {
+                    if let Some(prefix_pos) = net_name.find(&match_prefix) {
+                        let after_prefix = &net_name[prefix_pos + match_prefix.len()..];
+                        if let Some(sig_pos) = after_prefix.rfind(suffix) {
+                            let bus_path = &after_prefix[..sig_pos];
+                            let bus_path = bus_path.trim_end_matches('.');
+                            if !bus_path.is_empty() {
+                                bus_paths.insert(bus_path.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also look for arbiter grant
+        let mut grant_pin = None;
+        if let Some(pin) = find_best_pin(&format!("{}.wb_arbiter.grant", prefix)) {
+            grant_pin = Some(pin);
+        } else if let Some(pin) = find_best_pin("wb_arbiter.grant") {
+            grant_pin = Some(pin);
+        }
+
+        eprintln!("WB Monitor: prefix='{}', discovered {} bus paths: {:?}",
+                  prefix, bus_paths.len(), bus_paths);
+        if grant_pin.is_some() {
+            eprintln!("WB Monitor: arbiter grant pin found");
+        }
+
+        // Step 3: Build WbBus for each discovered path.
+        let mut buses = Vec::new();
+        let mut extra = Vec::new();
+
+        for bus_path in &bus_paths {
+            let mut bus = WbBus::new(bus_path);
+            let full_path = format!("{}.{}", prefix, bus_path);
+
+            // Single-bit control signals
+            bus.cyc_pin = find_best_pin(&format!("{}__cyc", full_path));
+            bus.stb_pin = find_best_pin(&format!("{}__stb", full_path));
+            bus.we_pin = find_best_pin(&format!("{}__we", full_path));
+            bus.ack_pin = find_best_pin(&format!("{}__ack", full_path));
+
+            // Multi-bit bus signals
+            for (suffix, max_bits) in &wb_bus_suffixes {
+                let mut pins = Vec::new();
+                for bit in 0..*max_bits {
+                    let pattern = format!("{}{}[{}]", full_path, suffix, bit);
+                    match find_best_pin(&pattern) {
+                        Some(pin) => pins.push(pin),
+                        None => pins.push(usize::MAX),
+                    }
+                }
+                // Trim trailing MAX entries
+                while pins.last() == Some(&usize::MAX) {
+                    pins.pop();
+                }
+                match *suffix {
+                    "__adr" => bus.adr_pins = pins,
+                    "__dat_w" => bus.dat_w_pins = pins,
+                    "__dat_r" => bus.dat_r_pins = pins,
+                    "__sel" => bus.sel_pins = pins,
+                    _ => {}
+                }
+            }
+
+            // Log what was found
+            let found_signals: Vec<String> = [
+                bus.cyc_pin.map(|_| "cyc"),
+                bus.stb_pin.map(|_| "stb"),
+                bus.we_pin.map(|_| "we"),
+                bus.ack_pin.map(|_| "ack"),
+            ].iter().filter_map(|x| *x).map(|s| s.to_string())
+            .chain(if !bus.adr_pins.is_empty() { vec![format!("adr[{}]", bus.adr_pins.len())] } else { vec![] })
+            .chain(if !bus.dat_w_pins.is_empty() { vec![format!("dat_w[{}]", bus.dat_w_pins.len())] } else { vec![] })
+            .chain(if !bus.dat_r_pins.is_empty() { vec![format!("dat_r[{}]", bus.dat_r_pins.len())] } else { vec![] })
+            .chain(if !bus.sel_pins.is_empty() { vec![format!("sel[{}]", bus.sel_pins.len())] } else { vec![] })
+            .collect();
+            eprintln!("  WB bus '{}': {}", bus_path, found_signals.join(", "));
+
+            buses.push(bus);
+        }
+
+        // Extra SRAM-specific signals
+        for suffix in &extra_suffixes {
+            let pattern = format!("{}.sram.{}", prefix, suffix);
+            if suffix.contains("[") || suffix == &"read_port__data" || suffix == &"write_port__en" {
+                // Multi-bit
+                for bit in 0..32 {
+                    let bit_pattern = format!("{}.sram.{}[{}]", prefix, suffix, bit);
+                    if let Some(pin) = find_best_pin(&bit_pattern) {
+                        extra.push((format!("sram.{}[{}]", suffix, bit), pin));
+                    }
+                }
+            } else {
+                if let Some(pin) = find_best_pin(&pattern) {
+                    extra.push((format!("sram.{}", suffix), pin));
+                }
+            }
+        }
+        if !extra.is_empty() {
+            eprintln!("  WB extra signals: {} found", extra.len());
+        }
+
+        let num_buses = buses.len();
+        Self {
+            prev_cyc: vec![0; num_buses],
+            prev_ack: vec![0; num_buses],
+            prev_grant: 0,
+            buses,
+            grant_pin,
+            extra,
+            first_dbus_cycle: None,
+        }
+    }
+
+    /// Log bus state for the current cycle. Returns true if anything interesting happened.
+    fn log_cycle(&mut self, cycle: usize, circ_state: &[u8]) -> bool {
+        let mut any_event = false;
+
+        let grant = self.grant_pin.map(|p| WbBus::read_bit(Some(p), circ_state)).unwrap_or(0);
+
+        for (i, bus) in self.buses.iter().enumerate() {
+            let cyc = WbBus::read_bit(bus.cyc_pin, circ_state);
+            let stb = WbBus::read_bit(bus.stb_pin, circ_state);
+            let we = WbBus::read_bit(bus.we_pin, circ_state);
+            let ack = WbBus::read_bit(bus.ack_pin, circ_state);
+
+            let prev_cyc = self.prev_cyc[i];
+            let prev_ack = self.prev_ack[i];
+
+            // Detect CYC rising edge (new transaction start)
+            if cyc == 1 && prev_cyc == 0 {
+                let adr = WbBus::read_bus_value(&bus.adr_pins, circ_state);
+                let sel = WbBus::read_bus_value(&bus.sel_pins, circ_state);
+                let dat_w = WbBus::read_bus_value(&bus.dat_w_pins, circ_state);
+                eprintln!("WB c{:6}: {} CYC↑ stb={} we={} adr=0x{:08X} sel=0x{:X} dat_w=0x{:08X} grant={}",
+                         cycle, bus.label, stb, we, adr, sel, dat_w, grant);
+                any_event = true;
+            }
+
+            // Detect CYC falling edge (transaction end)
+            if cyc == 0 && prev_cyc == 1 {
+                eprintln!("WB c{:6}: {} CYC↓", cycle, bus.label);
+                any_event = true;
+            }
+
+            // Detect ACK rising edge
+            if ack == 1 && prev_ack == 0 {
+                let adr = WbBus::read_bus_value(&bus.adr_pins, circ_state);
+                let dat_r = WbBus::read_bus_value(&bus.dat_r_pins, circ_state);
+                let dat_w = WbBus::read_bus_value(&bus.dat_w_pins, circ_state);
+                let sel = WbBus::read_bus_value(&bus.sel_pins, circ_state);
+                if WbBus::read_bit(bus.we_pin, circ_state) == 1 {
+                    eprintln!("WB c{:6}: {} ACK↑ WRITE adr=0x{:08X} dat_w=0x{:08X} sel=0x{:X}",
+                             cycle, bus.label, adr, dat_w, sel);
+                } else {
+                    eprintln!("WB c{:6}: {} ACK↑ READ  adr=0x{:08X} dat_r=0x{:08X}",
+                             cycle, bus.label, adr, dat_r);
+                }
+                any_event = true;
+            }
+
+            // Detect ACK falling edge
+            if ack == 0 && prev_ack == 1 {
+                eprintln!("WB c{:6}: {} ACK↓", cycle, bus.label);
+                any_event = true;
+            }
+
+            // Log ongoing transactions with address changes (for multi-cycle)
+            if cyc == 1 && stb == 1 && ack == 0 && cycle % 1000 == 0 {
+                let adr = WbBus::read_bus_value(&bus.adr_pins, circ_state);
+                eprintln!("WB c{:6}: {} STALL adr=0x{:08X} we={} grant={}",
+                         cycle, bus.label, adr, we, grant);
+                any_event = true;
+            }
+
+            self.prev_cyc[i] = cyc;
+            self.prev_ack[i] = ack;
+        }
+
+        // Grant changes
+        if grant != self.prev_grant {
+            eprintln!("WB c{:6}: arbiter.grant {}→{}", cycle, self.prev_grant, grant);
+            any_event = true;
+            self.prev_grant = grant;
+        }
+
+        // Detailed trace: dump ALL bus states every cycle for a window after first dbus CYC↑
+        // The dbus label contains "dbus"
+        let dbus_idx = self.buses.iter().position(|b| b.label.contains("dbus"));
+        if let Some(di) = dbus_idx {
+            let dbus_cyc = WbBus::read_bit(self.buses[di].cyc_pin, circ_state);
+            // Trace for 20 cycles after dbus first becomes active
+            if dbus_cyc == 1 && cycle <= self.first_dbus_cycle.unwrap_or(usize::MAX) + 20 {
+                if self.first_dbus_cycle.is_none() {
+                    self.first_dbus_cycle = Some(cycle);
+                }
+                // Dump ALL buses on every cycle in this window
+                let mut line = format!("WB TRACE c{:6}: grant={}", cycle, grant);
+                for bus in &self.buses {
+                    let cyc = WbBus::read_bit(bus.cyc_pin, circ_state);
+                    let stb = WbBus::read_bit(bus.stb_pin, circ_state);
+                    let we = WbBus::read_bit(bus.we_pin, circ_state);
+                    let ack = WbBus::read_bit(bus.ack_pin, circ_state);
+                    let adr = WbBus::read_bus_value(&bus.adr_pins, circ_state);
+                    line += &format!(" | {}:c{}s{}w{}a{} @{:08X}",
+                        &bus.label[..bus.label.len().min(12)], cyc, stb, we, ack, adr);
+                }
+                eprintln!("{}", line);
+                any_event = true;
+            }
+        }
+
+        any_event
+    }
+
+    /// Print a full bus state snapshot (useful at specific cycles).
+    fn dump_state(&self, cycle: usize, circ_state: &[u8]) {
+        let grant = self.grant_pin.map(|p| WbBus::read_bit(Some(p), circ_state)).unwrap_or(0);
+        eprintln!("=== WB SNAPSHOT cycle {} grant={} ===", cycle, grant);
+        for bus in &self.buses {
+            let cyc = WbBus::read_bit(bus.cyc_pin, circ_state);
+            let stb = WbBus::read_bit(bus.stb_pin, circ_state);
+            let we = WbBus::read_bit(bus.we_pin, circ_state);
+            let ack = WbBus::read_bit(bus.ack_pin, circ_state);
+            let adr = WbBus::read_bus_value(&bus.adr_pins, circ_state);
+            let dat_w = WbBus::read_bus_value(&bus.dat_w_pins, circ_state);
+            let dat_r = WbBus::read_bus_value(&bus.dat_r_pins, circ_state);
+            let sel = WbBus::read_bus_value(&bus.sel_pins, circ_state);
+            eprintln!("  {}: cyc={} stb={} we={} ack={} adr=0x{:08X} dat_w=0x{:08X} dat_r=0x{:08X} sel=0x{:X}",
+                     bus.label, cyc, stb, we, ack, adr, dat_w, dat_r, sel);
         }
     }
 }
@@ -1208,6 +1618,7 @@ fn run_programmatic_simulation(
     sram_cells: &mut Vec<SramCell>,
     watchlist_entries: Vec<WatchlistEntry>,
     mut trace_file: Option<File>,
+    mut wb_monitor: Option<WishboneBusMonitor>,
 ) {
     clilog::info!("Programmatic simulation: clock_gpio={}, reset_gpio={}, reset_active_high={}",
                   config.clock_gpio, config.reset_gpio, config.reset_active_high);
@@ -1346,6 +1757,78 @@ fn run_programmatic_simulation(
     clilog::info!("Wishbone debug: ibus_cyc={:?}, ibus_stb={:?}, dbus_cyc={:?}",
                   ibus_cyc_pin, ibus_stb_pin, dbus_cyc_pin);
     clilog::info!("ibus_adr pins found: {}/24", ibus_adr.iter().filter(|x| x.is_some()).count());
+
+    // SRAM peripheral (SRAMPeripheral Wishbone wrapper) signals
+    let sram_wb_ack_pin = find_net_pin("sram.wb_bus__ack");
+    let sram_read_en_pin = find_net_pin("sram.read_port__en");
+    let sram_write_en: Vec<Option<usize>> = (0..4).map(|i| {
+        find_net_pin(&format!("sram.write_port__en[{}]", i))
+    }).collect();
+    // Data bus address for store operations
+    let dbus_adr: Vec<Option<usize>> = (0..30).map(|i| {
+        find_net_pin(&format!("dbus__adr[{}]", i))
+    }).collect();
+    clilog::info!("SRAM peripheral: wb_ack={:?}, read_en={:?}, write_en=[{:?},{:?},{:?},{:?}]",
+                  sram_wb_ack_pin, sram_read_en_pin,
+                  sram_write_en[0], sram_write_en[1], sram_write_en[2], sram_write_en[3]);
+    clilog::info!("dbus_adr pins found: {}/30", dbus_adr.iter().filter(|x| x.is_some()).count());
+
+    // Trace the ACK logic chain:
+    // wb_bus__ack DFF D input = _05294_ = NOR2(_40863_) of (net2951, _09347_)
+    // _09347_ = NAND3(_28768_) of (_09336_, _09337_, _09346_)
+    let ack_d_pin = find_net_pin("_05294_");      // D input of ACK DFF
+    let ack_nor_a = find_net_pin("net2951");       // NOR2 input A (rst_n related)
+    let ack_nor_b = find_net_pin("_09347_");       // NOR2 input B (from NAND3)
+    let ack_nand_a = find_net_pin("_09336_");      // NAND3 input A
+    let ack_nand_b = find_net_pin("_09337_");      // NAND3 input B
+    let ack_nand_c = find_net_pin("_09346_");      // NAND3 input C
+    clilog::info!("ACK logic: D={:?}, NOR_A={:?}, NOR_B={:?}, NAND_A={:?}, NAND_B={:?}, NAND_C={:?}",
+                  ack_d_pin, ack_nor_a, ack_nor_b, ack_nand_a, ack_nand_b, ack_nand_c);
+
+    // Find the ACK DFF's AIG pin and trace back through its D input logic
+    if let Some(ack_pin) = sram_wb_ack_pin {
+        // Find the ACK DFF in the AIG
+        for i in 1..=aig.num_aigpins {
+            if let DriverType::DFF(cellid) = &aig.drivers[i] {
+                let cn = format!("{:?}", netlistdb.cellnames[*cellid]);
+                if cn.contains("wb_bus__ack") {
+                    eprintln!("ACK DFF: aigpin={}, cell={}", i, cn);
+                    // Find the D input pin of this DFF
+                    for pinid in netlistdb.cell2pin.iter_set(*cellid) {
+                        let pn = netlistdb.pinnames[pinid].1.as_str();
+                        if pn == "D" {
+                            let d_aig_iv = aig.pin2aigpin_iv[pinid];
+                            if d_aig_iv != usize::MAX {
+                                let d_idx = d_aig_iv >> 1;
+                                let d_inv = (d_aig_iv & 1) != 0;
+                                eprintln!("  D pin={}, aig_iv=0x{:x} (aigpin={}, inv={})", pinid, d_aig_iv, d_idx, d_inv);
+                                if d_idx > 0 && d_idx <= aig.num_aigpins {
+                                    // Show what drives this AIG pin
+                                    eprintln!("  D driver: {:?}", aig.drivers[d_idx]);
+                                    if let DriverType::AndGate(a, b) = &aig.drivers[d_idx] {
+                                        let a_idx = (*a as usize) >> 1;
+                                        let a_inv = (*a & 1) != 0;
+                                        let b_idx = (*b as usize) >> 1;
+                                        let b_inv = (*b & 1) != 0;
+                                        eprintln!("    AND({}{}, {}{})",
+                                                 if a_inv {"!"} else {""}, a_idx,
+                                                 if b_inv {"!"} else {""}, b_idx);
+                                        if a_idx > 0 && a_idx <= aig.num_aigpins {
+                                            eprintln!("    input A (aigpin {}): {:?}", a_idx, aig.drivers[a_idx]);
+                                        }
+                                        if b_idx > 0 && b_idx <= aig.num_aigpins {
+                                            eprintln!("    input B (aigpin {}): {:?}", b_idx, aig.drivers[b_idx]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     // Find sink__payload bits - this holds the reset vector (0x0FFFFC = 0x100000 - 4)
     let sink_payload: Vec<Option<usize>> = (0..32).map(|i| {
@@ -2293,6 +2776,163 @@ fn run_programmatic_simulation(
         let ibus_stb = ibus_stb_pin.map(|p| circ_state[p]).unwrap_or(255);
         let dbus_cyc = dbus_cyc_pin.map(|p| circ_state[p]).unwrap_or(255);
 
+        // SRAM peripheral trace: log whenever dbus_cyc is active
+        {
+            let sram_ack = sram_wb_ack_pin.map(|p| circ_state[p]).unwrap_or(255);
+            let sram_ren = sram_read_en_pin.map(|p| circ_state[p]).unwrap_or(255);
+            let sram_wen: Vec<u8> = sram_write_en.iter().map(|p| p.map(|p| circ_state[p]).unwrap_or(255)).collect();
+            let mut dbus_addr: u32 = 0;
+            for (i, opt_pin) in dbus_adr.iter().enumerate() {
+                if let Some(pin) = opt_pin {
+                    if circ_state[*pin] != 0 { dbus_addr |= 1 << i; }
+                }
+            }
+            // ACK logic chain values
+            let ack_d = ack_d_pin.map(|p| circ_state[p]).unwrap_or(255);
+            let nor_a = ack_nor_a.map(|p| circ_state[p]).unwrap_or(255);
+            let nor_b = ack_nor_b.map(|p| circ_state[p]).unwrap_or(255);
+            let nand_a = ack_nand_a.map(|p| circ_state[p]).unwrap_or(255);
+            let nand_b = ack_nand_b.map(|p| circ_state[p]).unwrap_or(255);
+            let nand_c = ack_nand_c.map(|p| circ_state[p]).unwrap_or(255);
+            // Log first dbus-active cycle with deep recursive AIG trace
+            static mut ACK_TRACE_DONE: bool = false;
+            let do_ack_trace = dbus_cyc == 1 && unsafe { !ACK_TRACE_DONE };
+            if do_ack_trace {
+                unsafe { ACK_TRACE_DONE = true; }
+                let v = |idx: usize| -> u8 { if idx <= aig.num_aigpins { state.values[idx] } else { 255 } };
+                let net_name = |idx: usize| -> String {
+                    if idx == 0 || idx > aig.num_aigpins { return String::new(); }
+                    let np = aigpin_to_netpin[idx];
+                    if np != usize::MAX {
+                        format!(" net={}", &netlistdb.pinnames[np].dbg_fmt_pin()[..60.min(netlistdb.pinnames[np].dbg_fmt_pin().len())])
+                    } else { String::new() }
+                };
+                // Find ACK DFF D input aigpin dynamically from DFF cell
+                let ack_d_aigpin = {
+                    let mut d_aigpin = 0usize;
+                    for cellid in 0..netlistdb.cellnames.len() {
+                        let cn = format!("{:?}", &netlistdb.cellnames[cellid]);
+                        if cn.contains("sram.wb_bus__ack$") {
+                            for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                                if netlistdb.pinnames[pinid].1.as_str() == "D" {
+                                    let aig_iv = aig.pin2aigpin_iv[pinid];
+                                    if aig_iv != usize::MAX { d_aigpin = aig_iv >> 1; }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    d_aigpin
+                };
+                eprintln!("  ACK DFF D aigpin = {}, val = {}", ack_d_aigpin, v(ack_d_aigpin));
+                // Recursive trace - follow ALL 0-valued paths to depth 12
+                let mut trace_result = String::new();
+                let mut stack: Vec<(usize, bool, usize, &str)> = vec![(ack_d_aigpin, false, 0, "ACK_D")];
+                while let Some((idx, inv, depth, label)) = stack.pop() {
+                    if depth > 12 || idx > aig.num_aigpins { continue; }
+                    let raw = if idx == 0 { 0 } else { v(idx) };
+                    let val = raw ^ (inv as u8);
+                    let prefix = "  ".repeat(depth);
+                    if idx == 0 {
+                        trace_result += &format!("\n{}{}: CONST inv={} val={}", prefix, label, inv, val);
+                        continue;
+                    }
+                    match &aig.drivers[idx] {
+                        DriverType::AndGate(a, b) => {
+                            let ai = (*a as usize) >> 1; let ainv = (*a & 1) != 0;
+                            let bi = (*b as usize) >> 1; let binv = (*b & 1) != 0;
+                            let av = if ai == 0 { ainv as u8 } else if ai <= aig.num_aigpins { v(ai) ^ (ainv as u8) } else { 255 };
+                            let bv = if bi == 0 { binv as u8 } else if bi <= aig.num_aigpins { v(bi) ^ (binv as u8) } else { 255 };
+                            trace_result += &format!("\n{}{}: [{}]{}AND({}{}={}, {}{}={}) raw={} val={}{}",
+                                prefix, label, idx, if inv {"!"} else {""},
+                                if ainv {"!"} else {""}, ai, av,
+                                if binv {"!"} else {""}, bi, bv, raw, val, net_name(idx));
+                            // Follow ALL 0-valued inputs when this gate output is 0
+                            if val == 0 && depth < 12 {
+                                if av == 0 { stack.push((ai, ainv, depth+1, "A")); }
+                                if bv == 0 { stack.push((bi, binv, depth+1, "B")); }
+                            }
+                        }
+                        DriverType::DFF(c) => {
+                            let cn = format!("{:?}", netlistdb.cellnames[*c]);
+                            trace_result += &format!("\n{}{}: [{}]{} DFF raw={} val={} cell={}",
+                                prefix, label, idx, if inv {"!"} else {""}, raw, val, &cn[..cn.len().min(80)]);
+                        }
+                        DriverType::InputPort(p) => {
+                            let pn = netlistdb.pinnames[*p].dbg_fmt_pin();
+                            trace_result += &format!("\n{}{}: [{}]{} INPUT raw={} val={} pin={}",
+                                prefix, label, idx, if inv {"!"} else {""}, raw, val, &pn[..pn.len().min(80)]);
+                        }
+                        d => {
+                            trace_result += &format!("\n{}{}: [{}]{} {:?} raw={} val={}",
+                                prefix, label, idx, if inv {"!"} else {""}, d, raw, val);
+                        }
+                    }
+                }
+                eprintln!("ACK DEEP TRACE at cycle {}:{}", cycle, trace_result);
+                // Direct check: ACK DFF, NOR2 _41001_, NAND3 _28827_ and related cells
+                let check_cells = ["sram.wb_bus__ack$", "_40863_", "_28768_", "_28758_", "_28757_", "_28756_", "_28727_", "_28755_",
+                                   "dbus__adr[26]$", "dbus__adr[22]$", "ibus__adr[26]$", "ibus__adr[22]$", "wb_arbiter.grant$"];
+                for pattern in &check_cells {
+                    for cellid in 0..netlistdb.cellnames.len() {
+                        let cn = format!("{:?}", &netlistdb.cellnames[cellid]);
+                        if !cn.contains(pattern) { continue; }
+                        let macro_name = &netlistdb.celltypes[cellid];
+                        eprintln!("  CELL {} [{}]: {}", cellid, macro_name, cn);
+                        for pinid in netlistdb.cell2pin.iter_set(cellid) {
+                            let pn = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                            let aig_iv = aig.pin2aigpin_iv[pinid];
+                            let (idx, inv) = if aig_iv != usize::MAX { (aig_iv >> 1, aig_iv & 1) } else { (usize::MAX, 0) };
+                            let aig_val = if idx == 0 { inv as u8 }
+                                else if idx != usize::MAX && idx <= aig.num_aigpins { state.values[idx] ^ (inv as u8) }
+                                else { 255 };
+                            let net = netlistdb.pin2net[pinid];
+                            let net_name = if net < netlistdb.netnames.len() { format!("{:?}", &netlistdb.netnames[net]) } else { "?".to_string() };
+                            eprintln!("    pin={} {} net={}({}) aig({}:{})=>{} circ={}",
+                                     pinid, &pn[..pn.len().min(50)], net, &net_name[..net_name.len().min(40)],
+                                     idx, inv, aig_val, circ_state[pinid]);
+                        }
+                    }
+                }
+                // Identify key leaf aigpins (including 1008, 1009 found in many leaves)
+                for leaf in [504, 1008, 1009, 18182, 18121, 18185, 18203, 18155, 18132, 18124,
+                             18151, 18153, 18127, 18129, 18179, 18226] {
+                    if leaf > 0 && leaf <= aig.num_aigpins {
+                        let raw = v(leaf);
+                        let np = aigpin_to_netpin[leaf];
+                        let name = if np != usize::MAX { netlistdb.pinnames[np].dbg_fmt_pin() } else { "no-netpin".to_string() };
+                        let driver = format!("{:?}", &aig.drivers[leaf]);
+                        eprintln!("  LEAF [{}] raw={} {} driver={}", leaf, raw, &name[..name.len().min(80)], &driver[..driver.len().min(80)]);
+                    }
+                }
+            }
+            if dbus_cyc == 1 && (cycle <= 7750 || cycle % 1000 == 0) {
+                // Trace NOR4 _28727_ address decoder inputs
+                // _09270_ = aigpin 18129 (inv from aig), _09277_ = aigpin 18140 (inv)
+                // _09280_ = aigpin 18145 (inv), _09305_ = aigpin 18186 (inv)
+                let v = |idx: usize| -> u8 { if idx > 0 && idx <= aig.num_aigpins { state.values[idx] } else { 0 } };
+                // NOR4 _28727_ inputs (from cell dump, these are inverted from the AIG pins)
+                let nor4_a = v(18129) ^ 1; // _09270_ = !aigpin18129
+                let nor4_b = v(18140) ^ 1; // _09277_ = !aigpin18140
+                let nor4_c = v(18145) ^ 1; // _09280_ = !aigpin18145
+                let nor4_d = v(18186) ^ 1; // _09305_ = !aigpin18186
+                let nor4_y = v(18189); // _09306_ = raw aigpin18189
+
+                // Also NOR4 _28755_ inputs for _09346_ (NAND3 input C)
+                let nor4b_a = v(18194); // _09308_
+                let nor4b_b = v(18199) ^ 1; // _09311_ (inverted)
+                let nor4b_c = v(18222) ^ 1; // _09326_ (inverted)
+                let nor4b_d = v(18233) ^ 1; // _09333_ (inverted)
+                let nor4b_y = v(18236); // _09334_
+
+                eprintln!("DBUS c{}: addr=0x{:08X} ack={} | NOR4_28727({},{},{},{})={} NOR4_28755({},{},{},{})={} | NAND({},{},{}) NOR({},{})",
+                         cycle, dbus_addr, sram_ack,
+                         nor4_a, nor4_b, nor4_c, nor4_d, nor4_y,
+                         nor4b_a, nor4b_b, nor4b_c, nor4b_d, nor4b_y,
+                         nand_a, nand_b, nand_c, nor_a, nor_b);
+            }
+        }
+
         // Reconstruct sink__payload value (reset vector)
         let mut sink_val: u32 = 0;
         for (i, opt_pin) in sink_payload.iter().enumerate() {
@@ -2392,6 +3032,78 @@ fn run_programmatic_simulation(
         // 6. Evaluate combinational again to propagate new Q/DO values
         eval_combinational(&mut state, &circ_state);
         update_circ_from_aig(&state, &mut circ_state);
+
+        // Post-final-eval trace: check SRAM ACK chain with latest AIG values
+        if dbus_cyc_pin.map(|p| circ_state[p]).unwrap_or(0) == 1 && (cycle <= 7750 || cycle % 5000 == 0) {
+            let v = |idx: usize| -> u8 { if idx > 0 && idx <= aig.num_aigpins { state.values[idx] } else { 0 } };
+            let dbus_adr26_circ = find_net_pin("dbus__adr[26]").map(|p| circ_state[p]).unwrap_or(255);
+            let dbus_adr26_aig = v(18182);
+            let grant_circ = find_net_pin("wb_arbiter.grant").map(|p| circ_state[p]).unwrap_or(255);
+            let grant_aig = v(504);
+            let nor4_y = v(18189); // _09306_
+            let nand3_a = v(18237); // _09336_ (inverted = !nand2)
+            // NOR4 _28727_ inputs (these are the inverted AIG pins)
+            let nor4_a = v(18129) ^ 1; // _09270_
+            let nor4_b = v(18140) ^ 1; // _09277_
+            let nor4_c = v(18145) ^ 1; // _09280_
+            let nor4_d = v(18186) ^ 1; // _09305_
+            // Trace _09305_ (NOR4 input D) = NAND3(_28726_) of (_09295_, _09301_, _09304_)
+            // From deep trace: aigpin 18186 = AND(!18184, 18185), inverted → _09305_ = !18186
+            // 18184 = AND(!18181, !18183) and 18185 = AND(18168, 18179)
+            // These represent sub-checks of the address comparison
+            let p18184 = v(18184); // AND sub-tree 1
+            let p18185 = v(18185); // AND sub-tree 2
+            let p18168 = v(18168); // deeper
+            let p18179 = v(18179); // deeper
+            // 18168 = AND(18156, 18167) — address comparison sub-tree
+            let p18156 = v(18156);
+            let p18167 = v(18167);
+            // 18156 = AND(18150, !18155)
+            // 18150 = AND(!18147, !18149)
+            // 18147 = AND(!504, 18146) — 504 is grant DFF
+            // 18149 = AND(!18148, ...) or similar
+            let p18150 = v(18150);
+            let p18155 = v(18155);
+            let p18147 = v(18147);
+            let p18149 = v(18149);
+            let p18146 = v(18146);
+            let p504 = v(504); // grant DFF
+            // Deep trace: find what cells these AIG pins correspond to
+            let npi = |idx: usize| -> String {
+                if idx == 0 || idx > aig.num_aigpins { return "const".to_string(); }
+                let np = aigpin_to_netpin[idx];
+                if np != usize::MAX {
+                    let s = netlistdb.pinnames[np].dbg_fmt_pin();
+                    s[..s.len().min(50)].to_string()
+                } else { format!("aig#{}", idx) }
+            };
+            // Print raw AIG values and driver info
+            let driver_info = |idx: usize| -> String {
+                if idx == 0 || idx > aig.num_aigpins { return "const".to_string(); }
+                match &aig.drivers[idx] {
+                    DriverType::AndGate(a, b) => {
+                        let ai = (*a as usize) >> 1; let ainv = (*a & 1) != 0;
+                        let bi = (*b as usize) >> 1; let binv = (*b & 1) != 0;
+                        let av = if ai == 0 { ainv as u8 } else { v(ai) ^ ainv as u8 };
+                        let bv = if bi == 0 { binv as u8 } else { v(bi) ^ binv as u8 };
+                        format!("AND({}{}={}raw{}, {}{}={}raw{})", if ainv {"!"} else {""}, ai, av, v(ai),
+                                if binv {"!"} else {""}, bi, bv, v(bi))
+                    }
+                    DriverType::DFF(c) => {
+                        let cn = format!("{:?}", netlistdb.cellnames[*c]);
+                        format!("DFF({})", &cn[..cn.len().min(40)])
+                    }
+                    d => format!("{:?}", d)
+                }
+            };
+            // When grant=1: the 18149 path is active (AND(grant, 18148))
+            // 18150 = AND(!18147, !18149). grant=1 → 18147=0, so !18147=1. 18149=AND(1,18148).
+            // So 18150 = !18148. If 18148=1 → 18150=0 → blocking.
+            // 18148 is the dbus-side address comparison bit.
+            let p18148 = v(18148);
+            eprintln!("POST-EVAL c{}: grant={} | 18148(dbus_addr_cmp)={} {} | 18146(ibus_addr_cmp)={} | 18152={} 18154={}",
+                     cycle, p504, p18148, driver_info(18148), p18146, v(18152), v(18154));
+        }
 
         // SPI debug: trace raw_tx_data and enframer.cycle DFF values
         if cycle >= 0 && cycle <= 40 {
@@ -2620,6 +3332,11 @@ fn run_programmatic_simulation(
 
         // === TICK END ===
 
+        // Wishbone bus monitor
+        if let Some(ref mut wbm) = wb_monitor {
+            wbm.log_cycle(cycle, &circ_state);
+        }
+
         // UART TX decoding
         if let Some(tx_pin) = uart_tx_pin {
             let tx = circ_state[tx_pin];
@@ -2798,8 +3515,39 @@ fn main() {
         .expect("Failed to build netlist"),
     };
 
+    // Load PDK models if available
+    let pdk_cells_path = args.pdk_cells
+        .clone()
+        .or_else(|| {
+            let default_path = std::path::PathBuf::from("sky130_fd_sc_hd/cells");
+            if default_path.exists() { Some(default_path) } else { None }
+        });
+
+    let pdk_models = if let Some(ref pdk_path) = pdk_cells_path {
+        clilog::info!("Loading PDK cell models from: {}", pdk_path.display());
+        // Collect cell types from the netlist
+        let mut cell_types: Vec<String> = Vec::new();
+        for cellid in 1..netlistdb.num_cells {
+            let celltype = netlistdb.celltypes[cellid].as_str();
+            if gem::sky130::is_sky130_cell(celltype) {
+                let ct = gem::sky130::extract_cell_type(celltype).to_string();
+                if !cell_types.contains(&ct) {
+                    cell_types.push(ct);
+                }
+            }
+        }
+        cell_types.sort();
+        Some(gem::sky130_pdk::load_pdk_models(pdk_path, &cell_types))
+    } else {
+        None
+    };
+
     // Build AIG
-    let aig = AIG::from_netlistdb(&netlistdb);
+    let aig = if let Some(ref pdk) = pdk_models {
+        AIG::from_netlistdb_with_pdk(&netlistdb, pdk)
+    } else {
+        AIG::from_netlistdb(&netlistdb)
+    };
     clilog::info!(
         "AIG: {} pins, {} DFFs, {} SRAMs",
         aig.num_aigpins,
@@ -3018,6 +3766,11 @@ fn main() {
         f
     });
 
+    // Create Wishbone bus monitor if requested
+    let wb_monitor = args.wb_monitor.as_ref().map(|prefix| {
+        WishboneBusMonitor::discover(prefix, &netlistdb)
+    });
+
     // Check for config-based (programmatic) simulation
     if let Some(cfg) = config {
         run_programmatic_simulation(
@@ -3030,6 +3783,7 @@ fn main() {
             &mut sram_cells,
             watchlist_entries,
             trace_file,
+            wb_monitor,
         );
         return;
     }

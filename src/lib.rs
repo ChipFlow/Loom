@@ -6,6 +6,8 @@ pub mod sky130;
 
 pub mod sky130_decomp;
 
+pub mod sky130_pdk;
+
 pub mod aig;
 
 pub mod liberty_parser;

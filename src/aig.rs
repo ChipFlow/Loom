@@ -7,6 +7,7 @@
 use crate::aigpdk::AIGPDK_SRAM_ADDR_WIDTH;
 use crate::sky130::{extract_cell_type, is_sky130_cell};
 use crate::sky130_decomp::{decompose_sky130_cell, is_multi_output_cell, is_sequential_cell, is_tie_cell, CellInputs};
+use crate::sky130_pdk::PdkModels;
 use indexmap::{IndexMap, IndexSet};
 use netlistdb::{Direction, GeneralPinName, NetlistDB};
 use smallvec::SmallVec;
@@ -539,6 +540,7 @@ impl AIG {
         topo_vis: &mut Vec<bool>,
         topo_instack: &mut Vec<bool>,
         start_pinid: usize,
+        pdk_models: Option<&PdkModels>,
     ) {
         let mut work_stack: Vec<WorkItem> = vec![WorkItem::Visit(start_pinid)];
 
@@ -773,7 +775,7 @@ impl AIG {
 
                     // Process SKY130 cells
                     if is_sky130_cell(celltype) {
-                        self.sky130_postprocess(netlistdb, pinid, cellid, celltype);
+                        self.sky130_postprocess(netlistdb, pinid, cellid, celltype, pdk_models);
                         topo_instack[pinid] = false;
                         continue;
                     }
@@ -940,9 +942,9 @@ impl AIG {
         pinid: usize,
         cellid: usize,
         celltype: &str,
+        pdk_models: Option<&PdkModels>,
     ) {
         let cell_type = extract_cell_type(celltype);
-        let _output_pin_name = netlistdb.pinnames[pinid].1.as_str();
 
         // Tie cells and SRAM were already handled in preprocess
         if is_tie_cell(cell_type) || celltype.starts_with("CF_SRAM_") {
@@ -961,8 +963,14 @@ impl AIG {
                 let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
                 let prev = self.pin2aigpin_iv[dep_pinid];
                 match pin_name {
-                    "SET_B" => ap_s_iv = prev ^ 1,
-                    "RESET_B" => ap_r_iv = prev ^ 1,
+                    // SKY130 SET_B and RESET_B are active-low, same convention
+                    // as AIGPDK's S and R pins. No inversion needed - the AIG
+                    // formula OR(Q, NOT pin) / AND(result, pin) already handles
+                    // active-low correctly:
+                    //   RESET_B=0 (reset): AND(Q, 0) = 0  ✓
+                    //   RESET_B=1 (normal): AND(Q, 1) = Q  ✓
+                    "SET_B" => ap_s_iv = prev,
+                    "RESET_B" => ap_r_iv = prev,
                     _ => {}
                 }
             }
@@ -974,7 +982,7 @@ impl AIG {
 
         // Multi-output cells (ha, fa, dfbbp)
         if is_multi_output_cell(cell_type) {
-            self.build_sky130_multi_output_postprocess(netlistdb, pinid, cellid, cell_type);
+            self.build_sky130_multi_output_postprocess(netlistdb, pinid, cellid, cell_type, pdk_models);
             return;
         }
 
@@ -1026,7 +1034,12 @@ impl AIG {
             );
         }
 
-        let decomp = decompose_sky130_cell(cell_type, &inputs);
+        let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
+        let decomp = if let Some(pdk) = pdk_models {
+            crate::sky130_pdk::decompose_with_pdk(cell_type, &inputs, output_pin_name, pdk)
+        } else {
+            decompose_sky130_cell(cell_type, &inputs)
+        };
 
         // Use SmallVec for gate outputs - most cells have ≤5 gates
         let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
@@ -1083,8 +1096,42 @@ impl AIG {
         output_pinid: usize,
         cellid: usize,
         cell_type: &str,
+        pdk_models: Option<&PdkModels>,
     ) {
         let output_pin_name = netlistdb.pinnames[output_pinid].1.as_str();
+
+        // Use PDK models for ha/fa when available (not for dfbbp - that's sequential)
+        if let Some(pdk) = pdk_models {
+            if matches!(cell_type, "ha" | "fa") && pdk.models.contains_key(cell_type) {
+                let mut inputs = CellInputs::new();
+                for ipin in netlistdb.cell2pin.iter_set(cellid) {
+                    if netlistdb.pindirect[ipin] == Direction::I {
+                        let pin_name = netlistdb.pinnames[ipin].1.as_str();
+                        inputs.set_pin(pin_name, self.pin2aigpin_iv[ipin]);
+                    }
+                }
+                let decomp = crate::sky130_pdk::decompose_with_pdk(
+                    cell_type, &inputs, output_pin_name, pdk,
+                );
+                // Build the AIG gates from the decomposition
+                let mut gate_outputs: SmallVec<[usize; 5]> = SmallVec::new();
+                for (a_ref, b_ref) in &decomp.and_gates {
+                    let a_iv = self.resolve_decomp_ref(*a_ref, &gate_outputs);
+                    let b_iv = self.resolve_decomp_ref(*b_ref, &gate_outputs);
+                    let gate_out = self.add_and_gate(a_iv, b_iv);
+                    gate_outputs.push(gate_out >> 1);
+                }
+                let output_iv = if decomp.output_idx < 0 {
+                    let gate_idx = (-decomp.output_idx - 1) as usize;
+                    gate_outputs[gate_idx] << 1
+                } else {
+                    (decomp.output_idx as usize) << 1
+                };
+                let final_iv = if decomp.output_inverted { output_iv ^ 1 } else { output_iv };
+                self.pin2aigpin_iv[output_pinid] = final_iv;
+                return;
+            }
+        }
 
         let mut a_iv = 0usize;
         let mut b_iv = 0usize;
@@ -1202,7 +1249,16 @@ impl AIG {
         }
     }
 
+    /// Build an AIG from a netlistdb, using PDK behavioral models for decomposition.
+    pub fn from_netlistdb_with_pdk(netlistdb: &NetlistDB, pdk_models: &PdkModels) -> AIG {
+        Self::from_netlistdb_impl(netlistdb, Some(pdk_models))
+    }
+
     pub fn from_netlistdb(netlistdb: &NetlistDB) -> AIG {
+        Self::from_netlistdb_impl(netlistdb, None)
+    }
+
+    fn from_netlistdb_impl(netlistdb: &NetlistDB, pdk_models: Option<&PdkModels>) -> AIG {
         let mut aig = AIG {
             num_aigpins: 0,
             pin2aigpin_iv: vec![usize::MAX; netlistdb.num_pins],
@@ -1277,7 +1333,7 @@ impl AIG {
         let mut topo_instack = vec![false; netlistdb.num_pins];
 
         for pinid in 0..netlistdb.num_pins {
-            aig.dfs_netlistdb_build_aig(netlistdb, &mut topo_vis, &mut topo_instack, pinid);
+            aig.dfs_netlistdb_build_aig(netlistdb, &mut topo_vis, &mut topo_instack, pinid, pdk_models);
         }
 
         clilog::info!("AIG DFS build done in {:?}, {} AIG pins created", dfs_start.elapsed(), aig.num_aigpins);
