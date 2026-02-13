@@ -165,6 +165,9 @@ pub struct PeripheralControl {
     pub flash_d_in: u32,
     // Tracked previous output values for edge detection (max 16 monitors)
     pub prev_values: [u32; 16],
+    // Autonomous mode fields
+    pub autonomous_break_tick: u32,       // tick offset where monitor first fired (0 = none, 1-indexed)
+    pub autonomous_ticks_completed: u32,  // counter incremented per autonomous tick
 }
 
 impl Default for PeripheralControl {
@@ -179,6 +182,8 @@ impl Default for PeripheralControl {
             flash_d_out: 0,
             flash_d_in: 0,
             prev_values: [0; 16],
+            autonomous_break_tick: 0,
+            autonomous_ticks_completed: 0,
         }
     }
 }

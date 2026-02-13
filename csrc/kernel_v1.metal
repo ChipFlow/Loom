@@ -432,6 +432,9 @@ struct PeripheralControl {
     u32 flash_d_in;      // 4-bit nibble, CPU writes before signaling back
     // Tracked previous output values for edge detection (max 16 monitors)
     u32 prev_values[16]; // stores previous output bit value per monitor
+    // Autonomous mode fields
+    u32 autonomous_break_tick;       // tick offset where monitor first fired (0 = none, 1-indexed)
+    u32 autonomous_ticks_completed;  // counter incremented per autonomous tick
 };
 
 // ── state_prep: basic variant (no monitors) ──────────────────────────────
@@ -530,6 +533,84 @@ kernel void state_prep_monitored(
             control->monitor_id = m;
             control->tick_number = params.tick_number;
             // Don't break — continue updating prev_values for remaining monitors
+        }
+    }
+}
+
+// ── Autonomous mode: state_prep_autonomous ────────────────────────────────
+//
+// Lightweight kernel for autonomous GPU mode (no CPU round-trip per tick).
+// Replaces state_prep_monitored when the CPU determines flash is idle.
+//
+// Responsibilities:
+//   1. Capture UART TX bit from output state into a ring buffer
+//   2. Monitor peripheral signals for edge changes (same as state_prep_monitored)
+//   3. Record break tick if monitor fires (GPU continues running, CPU handles on completion)
+//
+// Does NOT copy state or apply bit ops (those are done by state_prep).
+// Runs as a single threadgroup dispatch; only thread 0 does work.
+
+struct AutonomousParams {
+    u32 state_size;        // number of u32 words per state slot
+    u32 num_monitors;      // number of peripheral monitors to check
+    u32 uart_tx_position;  // bit position for UART TX in output state (0xFFFFFFFF = no UART)
+    u32 _pad;
+};
+
+kernel void state_prep_autonomous(
+    device u32* states [[buffer(0)]],
+    constant AutonomousParams& params [[buffer(1)]],
+    device PeripheralControl* control [[buffer(2)]],
+    constant MonitorConfig* monitors [[buffer(3)]],
+    device uchar* uart_ring [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0) return;
+
+    u32 state_size = params.state_size;
+    u32 num_monitors = params.num_monitors;
+
+    // Get current tick offset within autonomous batch and increment
+    u32 tick = control->autonomous_ticks_completed;
+    control->autonomous_ticks_completed = tick + 1;
+
+    // Capture UART TX bit from output state into ring buffer
+    if (params.uart_tx_position != 0xFFFFFFFFu) {
+        u32 tx_pos = params.uart_tx_position;
+        u32 tx_word = tx_pos >> 5;
+        u32 tx_bit = tx_pos & 31u;
+        u32 tx_val = (states[state_size + tx_word] >> tx_bit) & 1u;
+        uart_ring[tick] = (uchar)tx_val;
+    }
+
+    // Monitor check — same edge detection as state_prep_monitored.
+    // On first trigger, record break tick (but continue updating prev_values).
+    for (uint m = 0; m < num_monitors && m < 16; m++) {
+        u32 pos = monitors[m].position;
+        u32 word_idx = pos >> 5;
+        u32 bit = (pos & 31u);
+
+        u32 old_val = control->prev_values[m];
+        u32 new_val = (states[state_size + word_idx] >> bit) & 1u;
+
+        // Always update tracked value for next tick
+        control->prev_values[m] = new_val;
+
+        if (old_val == new_val) continue;
+
+        u32 edge = monitors[m].edge_type;
+        bool triggered = false;
+        if (edge == 0) {
+            triggered = true;  // any edge
+        } else if (edge == 1 && old_val == 0 && new_val == 1) {
+            triggered = true;  // rising edge
+        } else if (edge == 2 && old_val == 1 && new_val == 0) {
+            triggered = true;  // falling edge
+        }
+
+        if (triggered && control->autonomous_break_tick == 0) {
+            // Record break at tick+1 (1-indexed so 0 means "no break")
+            control->autonomous_break_tick = tick + 1;
         }
     }
 }

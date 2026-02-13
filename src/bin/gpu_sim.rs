@@ -25,6 +25,9 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use ulib::{AsUPtr, Device};
 
+#[macro_use]
+extern crate objc;
+
 use metal::{Device as MTLDevice, MTLSize, ComputePipelineState, CommandQueue, MTLResourceOptions, SharedEvent};
 
 // ── CLI Arguments ────────────────────────────────────────────────────────────
@@ -70,6 +73,11 @@ struct Args {
     /// Verify GPU results against CPU baseline.
     #[clap(long)]
     check_with_cpu: bool,
+
+    /// Run GPU kernel profiling: isolate each kernel in its own command buffer
+    /// and measure per-kernel GPU execution time.
+    #[clap(long)]
+    gpu_profile: bool,
 }
 
 // ── Simulation Parameters (must match Metal shader) ──────────────────────────
@@ -101,6 +109,29 @@ struct StatePrepParams {
     tick_number: u32,   // current tick number
 }
 
+/// Parameters for the state_prep_autonomous kernel (must match Metal shader).
+#[repr(C)]
+struct AutonomousParams {
+    state_size: u32,        // number of u32 words per state slot
+    num_monitors: u32,      // number of peripheral monitors to check
+    uart_tx_position: u32,  // bit position for UART TX in output state (0xFFFFFFFF = no UART)
+    _pad: u32,
+}
+
+/// Simulation mode for the main loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SimMode {
+    /// Normal mode: GPU signals CPU after each tick for peripheral callbacks.
+    Interactive,
+    /// Autonomous GPU mode: GPU runs K ticks without CPU round-trip.
+    /// UART TX is captured into a ring buffer; monitor break is recorded.
+    Autonomous,
+}
+
+/// Thresholds for autonomous mode.
+const IDLE_THRESHOLD: usize = 16;       // consecutive idle ticks before switching
+const AUTO_BATCH_SIZE: usize = 512;     // ticks per autonomous batch
+
 // ── Metal Simulator ──────────────────────────────────────────────────────────
 
 struct MetalSimulator {
@@ -111,6 +142,8 @@ struct MetalSimulator {
     state_prep_pipeline: ComputePipelineState,
     /// Pipeline state for the state_prep_monitored kernel (with edge detection).
     state_prep_monitored_pipeline: ComputePipelineState,
+    /// Pipeline state for the state_prep_autonomous kernel (autonomous mode).
+    state_prep_autonomous_pipeline: ComputePipelineState,
     /// Pre-allocated params buffers for each stage (shared memory, rewritten each dispatch).
     /// We need one per stage since multi-stage designs encode all stages before commit.
     params_buffers: Vec<metal::Buffer>,
@@ -153,6 +186,13 @@ impl MetalSimulator {
             .new_compute_pipeline_state_with_function(&state_prep_monitored_fn)
             .expect("Failed to create state_prep_monitored pipeline");
 
+        let state_prep_autonomous_fn = library
+            .get_function("state_prep_autonomous", None)
+            .expect("Failed to get state_prep_autonomous function");
+        let state_prep_autonomous_pipeline = device
+            .new_compute_pipeline_state_with_function(&state_prep_autonomous_fn)
+            .expect("Failed to create state_prep_autonomous pipeline");
+
         let command_queue = device.new_command_queue();
 
         // Pre-allocate one params buffer per stage
@@ -173,6 +213,7 @@ impl MetalSimulator {
             pipeline_state,
             state_prep_pipeline,
             state_prep_monitored_pipeline,
+            state_prep_autonomous_pipeline,
             params_buffers,
             shared_event,
             event_counter: std::cell::Cell::new(0),
@@ -318,7 +359,114 @@ impl MetalSimulator {
         encoder.end_encoding();
     }
 
-    /// Encode and commit a batch of N ticks as individual command buffers.
+    /// Encode a state_prep_autonomous dispatch (autonomous mode monitor + UART capture).
+    /// Does NOT copy state or apply bit ops — just checks monitors and captures UART TX.
+    #[inline]
+    fn encode_state_prep_autonomous(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        states_buffer: &metal::Buffer,
+        autonomous_params_buffer: &metal::Buffer,
+        control_buffer: &metal::Buffer,
+        monitors_buffer: &metal::Buffer,
+        uart_ring_buffer: &metal::Buffer,
+    ) {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.state_prep_autonomous_pipeline);
+        encoder.set_buffer(0, Some(states_buffer), 0);
+        encoder.set_buffer(1, Some(autonomous_params_buffer), 0);
+        encoder.set_buffer(2, Some(control_buffer), 0);
+        encoder.set_buffer(3, Some(monitors_buffer), 0);
+        encoder.set_buffer(4, Some(uart_ring_buffer), 0);
+        let tpg = MTLSize::new(256, 1, 1);
+        encoder.dispatch_thread_groups(MTLSize::new(1, 1, 1), tpg);
+        encoder.end_encoding();
+    }
+
+    /// Encode and commit an autonomous batch of K ticks in a single command buffer.
+    ///
+    /// No signal/wait between ticks — the GPU runs all K ticks without CPU intervention.
+    /// A single signal at the end notifies the CPU that the batch is complete.
+    ///
+    /// Each tick encodes:
+    ///   1. state_prep (falling edge ops)
+    ///   2. simulate_v1_stage × num_stages (falling edge)
+    ///   3. state_prep (rising edge ops)
+    ///   4. simulate_v1_stage × num_stages (rising edge)
+    ///   5. state_prep_autonomous (monitor + UART capture)
+    ///
+    /// Returns the event value that signals batch completion.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_and_commit_autonomous_batch(
+        &self,
+        batch_size: usize,
+        num_blocks: usize,
+        num_major_stages: usize,
+        state_size: usize,
+        blocks_start_buffer: &metal::Buffer,
+        blocks_data_buffer: &metal::Buffer,
+        sram_data_buffer: &metal::Buffer,
+        states_buffer: &metal::Buffer,
+        event_buffer_metal: &metal::Buffer,
+        fall_prep_params_buffer: &metal::Buffer,
+        fall_ops_buffer: &metal::Buffer,
+        rise_prep_params_buffer: &metal::Buffer,
+        rise_ops_buffer: &metal::Buffer,
+        autonomous_params_buffer: &metal::Buffer,
+        control_buffer: &metal::Buffer,
+        monitors_buffer: &metal::Buffer,
+        uart_ring_buffer: &metal::Buffer,
+    ) -> u64 {
+        let batch_done = self.event_counter.get() + 1;
+        let cb = self.command_queue.new_command_buffer();
+
+        for _tick_offset in 0..batch_size {
+            // ── Falling edge: state_prep + simulate ──
+            self.encode_state_prep(
+                cb, states_buffer,
+                fall_prep_params_buffer, fall_ops_buffer,
+            );
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(
+                    cb, num_blocks, stage_i,
+                    blocks_start_buffer, blocks_data_buffer,
+                    sram_data_buffer, states_buffer, event_buffer_metal,
+                );
+            }
+
+            // ── Rising edge: state_prep + simulate ──
+            self.encode_state_prep(
+                cb, states_buffer,
+                rise_prep_params_buffer, rise_ops_buffer,
+            );
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(
+                    cb, num_blocks, stage_i,
+                    blocks_start_buffer, blocks_data_buffer,
+                    sram_data_buffer, states_buffer, event_buffer_metal,
+                );
+            }
+
+            // ── Autonomous monitor + UART capture (no signal/wait) ──
+            self.encode_state_prep_autonomous(
+                cb, states_buffer,
+                autonomous_params_buffer,
+                control_buffer, monitors_buffer,
+                uart_ring_buffer,
+            );
+        }
+
+        // Single signal at end of entire batch
+        cb.encode_signal_event(&self.shared_event, batch_done);
+        cb.commit();
+
+        self.event_counter.set(batch_done);
+        batch_done
+    }
+
+    /// Encode and commit a batch of N ticks in a single command buffer.
     ///
     /// Each tick encodes:
     ///   1. state_prep (falling edge ops — copy output→input, set clock=0, negedge flags)
@@ -327,6 +475,9 @@ impl MetalSimulator {
     ///   4. simulate_v1_stage × num_stages (rising edge evaluation)
     ///   5. state_prep_monitored (next tick falling edge prep + MONITOR CHECK)
     ///   6. signal(tick_done) / wait(cpu_done)
+    ///
+    /// All ticks share one command buffer (amortizing CB creation/commit overhead).
+    /// Each tick uses its own monitor params buffer (for correct tick_number).
     ///
     /// Returns base_event_value.
     /// The CPU event loop uses events: base + tick*2 + 1 = tick_done, base + tick*2 + 2 = cpu_done.
@@ -347,24 +498,23 @@ impl MetalSimulator {
         fall_ops_buffer: &metal::Buffer,
         rise_prep_params_buffer: &metal::Buffer,
         rise_ops_buffer: &metal::Buffer,
-        monitor_prep_params_buffer: &metal::Buffer,
+        monitor_prep_params_buffers: &[metal::Buffer],
         control_buffer: &metal::Buffer,
         monitors_buffer: &metal::Buffer,
     ) -> u64 {
         let base_event = self.event_counter.get();
+        let cb = self.command_queue.new_command_buffer();
 
         for tick_offset in 0..batch_size {
             let tick = start_tick + tick_offset;
             let tick_done = base_event + (tick_offset as u64) * 2 + 1;
             let cpu_done = base_event + (tick_offset as u64) * 2 + 2;
 
-            // Update tick_number in the monitored prep params
+            // Update tick_number in this tick's dedicated monitor params buffer
             unsafe {
-                let params = &mut *(monitor_prep_params_buffer.contents() as *mut StatePrepParams);
+                let params = &mut *(monitor_prep_params_buffers[tick_offset].contents() as *mut StatePrepParams);
                 params.tick_number = tick as u32;
             }
-
-            let cb = self.command_queue.new_command_buffer();
 
             // ── Falling edge: state_prep + simulate ──
             self.encode_state_prep(
@@ -398,18 +548,215 @@ impl MetalSimulator {
             // Lightweight: only checks for edges, no copy or bit ops.
             self.encode_state_prep_monitored(
                 cb, states_buffer,
-                monitor_prep_params_buffer,
+                &monitor_prep_params_buffers[tick_offset],
                 control_buffer, monitors_buffer,
             );
 
             cb.encode_signal_event(&self.shared_event, tick_done);
             cb.encode_wait_for_event(&self.shared_event, cpu_done);
-
-            cb.commit();
         }
+
+        cb.commit();
 
         self.event_counter.set(base_event + (batch_size as u64) * 2 + 1);
         base_event
+    }
+
+    /// Run GPU kernel profiling: dispatch each kernel in its own command buffer,
+    /// wait for completion, and measure GPU execution time.
+    ///
+    /// Runs `num_ticks` ticks, measuring per-kernel GPU time.
+    /// Uses Obj-C runtime to access MTLCommandBuffer.GPUStartTime/GPUEndTime.
+    #[allow(clippy::too_many_arguments)]
+    fn profile_gpu_kernels(
+        &self,
+        num_ticks: usize,
+        num_blocks: usize,
+        num_major_stages: usize,
+        state_size: usize,
+        blocks_start_buffer: &metal::Buffer,
+        blocks_data_buffer: &metal::Buffer,
+        sram_data_buffer: &metal::Buffer,
+        states_buffer: &metal::Buffer,
+        event_buffer_metal: &metal::Buffer,
+        fall_prep_params_buffer: &metal::Buffer,
+        fall_ops_buffer: &metal::Buffer,
+        rise_prep_params_buffer: &metal::Buffer,
+        rise_ops_buffer: &metal::Buffer,
+        monitor_prep_params_buffer: &metal::Buffer,
+        control_buffer: &metal::Buffer,
+        monitors_buffer: &metal::Buffer,
+    ) {
+        /// Read GPUStartTime and GPUEndTime from a committed command buffer.
+        /// Returns (start, end) in seconds (CFTimeInterval).
+        #[inline]
+        fn gpu_times(cb: &metal::CommandBufferRef) -> (f64, f64) {
+            unsafe {
+                let obj: *mut objc::runtime::Object = &*(cb as *const _ as *const objc::runtime::Object)
+                    as *const _ as *mut _;
+                let start: f64 = msg_send![obj, GPUStartTime];
+                let end: f64 = msg_send![obj, GPUEndTime];
+                (start, end)
+            }
+        }
+
+        println!("\n=== GPU Kernel Profiling ({} ticks) ===\n", num_ticks);
+
+        // Warmup: 10 ticks
+        for _ in 0..10 {
+            let cb = self.command_queue.new_command_buffer();
+            self.encode_state_prep(cb, states_buffer, fall_prep_params_buffer, fall_ops_buffer);
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(cb, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+            }
+            self.encode_state_prep(cb, states_buffer, rise_prep_params_buffer, rise_ops_buffer);
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(cb, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+            }
+            self.encode_state_prep_monitored(cb, states_buffer, monitor_prep_params_buffer,
+                control_buffer, monitors_buffer);
+            cb.commit();
+            cb.wait_until_completed();
+        }
+
+        // Per-kernel timing accumulators (in seconds)
+        let mut time_state_prep_fall = 0.0f64;
+        let mut time_simulate_fall = 0.0f64;
+        let mut time_state_prep_rise = 0.0f64;
+        let mut time_simulate_rise = 0.0f64;
+        let mut time_monitor = 0.0f64;
+        let mut time_full_tick = 0.0f64;
+
+        // Also measure wall-clock for comparison
+        let wall_start = std::time::Instant::now();
+
+        for tick in 0..num_ticks {
+            // Update tick number in monitor params
+            unsafe {
+                let params = &mut *(monitor_prep_params_buffer.contents() as *mut StatePrepParams);
+                params.tick_number = tick as u32;
+            }
+
+            // 1. state_prep (falling edge) — isolated
+            let cb1 = self.command_queue.new_command_buffer();
+            self.encode_state_prep(cb1, states_buffer, fall_prep_params_buffer, fall_ops_buffer);
+            cb1.commit();
+            cb1.wait_until_completed();
+            let (s, e) = gpu_times(cb1);
+            time_state_prep_fall += e - s;
+
+            // 2. simulate_v1_stage (falling edge) — isolated per stage
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                let cb2 = self.command_queue.new_command_buffer();
+                self.encode_dispatch(cb2, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                cb2.commit();
+                cb2.wait_until_completed();
+                let (s, e) = gpu_times(cb2);
+                time_simulate_fall += e - s;
+            }
+
+            // 3. state_prep (rising edge) — isolated
+            let cb3 = self.command_queue.new_command_buffer();
+            self.encode_state_prep(cb3, states_buffer, rise_prep_params_buffer, rise_ops_buffer);
+            cb3.commit();
+            cb3.wait_until_completed();
+            let (s, e) = gpu_times(cb3);
+            time_state_prep_rise += e - s;
+
+            // 4. simulate_v1_stage (rising edge) — isolated per stage
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                let cb4 = self.command_queue.new_command_buffer();
+                self.encode_dispatch(cb4, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                cb4.commit();
+                cb4.wait_until_completed();
+                let (s, e) = gpu_times(cb4);
+                time_simulate_rise += e - s;
+            }
+
+            // 5. state_prep_monitored — isolated
+            let cb5 = self.command_queue.new_command_buffer();
+            self.encode_state_prep_monitored(cb5, states_buffer, monitor_prep_params_buffer,
+                control_buffer, monitors_buffer);
+            cb5.commit();
+            cb5.wait_until_completed();
+            let (s, e) = gpu_times(cb5);
+            time_monitor += e - s;
+
+            // Also measure a full tick in single CB for comparison
+            let cb_full = self.command_queue.new_command_buffer();
+            self.encode_state_prep(cb_full, states_buffer, fall_prep_params_buffer, fall_ops_buffer);
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(cb_full, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+            }
+            self.encode_state_prep(cb_full, states_buffer, rise_prep_params_buffer, rise_ops_buffer);
+            for stage_i in 0..num_major_stages {
+                self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
+                self.encode_dispatch(cb_full, num_blocks, stage_i, blocks_start_buffer,
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+            }
+            self.encode_state_prep_monitored(cb_full, states_buffer, monitor_prep_params_buffer,
+                control_buffer, monitors_buffer);
+            cb_full.commit();
+            cb_full.wait_until_completed();
+            let (s, e) = gpu_times(cb_full);
+            time_full_tick += e - s;
+
+            // Clear callback flag (we don't actually step flash in profiling mode)
+            unsafe {
+                let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
+                ctrl.needs_callback = 0;
+            }
+        }
+
+        let wall_elapsed = wall_start.elapsed();
+        let n = num_ticks as f64;
+
+        // Report GPU-measured times
+        let total_isolated = time_state_prep_fall + time_simulate_fall
+            + time_state_prep_rise + time_simulate_rise + time_monitor;
+
+        let print_kernel = |name: &str, t: f64| {
+            let us = t / n * 1e6;
+            let pct = if total_isolated > 0.0 { 100.0 * t / total_isolated } else { 0.0 };
+            println!("  {:<32} {:>8.2}μs/tick  {:>5.1}%", name, us, pct);
+        };
+
+        println!("Per-kernel GPU time (isolated command buffers):");
+        print_kernel("state_prep (falling)", time_state_prep_fall);
+        print_kernel("simulate_v1_stage (falling)", time_simulate_fall);
+        print_kernel("state_prep (rising)", time_state_prep_rise);
+        print_kernel("simulate_v1_stage (rising)", time_simulate_rise);
+        print_kernel("state_prep_monitored", time_monitor);
+        println!("  {:<32} {:>8.2}μs/tick",
+            "TOTAL (isolated sum)", total_isolated / n * 1e6);
+        println!();
+        println!("  {:<32} {:>8.2}μs/tick",
+            "Full tick (single CB)", time_full_tick / n * 1e6);
+        println!("  {:<32} {:>8.2}μs/tick",
+            "Wall clock (2× ticks, profiling)", wall_elapsed.as_secs_f64() / n * 1e6);
+        println!();
+
+        // Derived metrics
+        let sim_us = time_simulate_fall / n * 1e6 + time_simulate_rise / n * 1e6;
+        let prep_us = time_state_prep_fall / n * 1e6 + time_state_prep_rise / n * 1e6
+            + time_monitor / n * 1e6;
+        println!("  Simulation kernels total:     {:>8.2}μs/tick  ({:.1}%)",
+            sim_us, 100.0 * (time_simulate_fall + time_simulate_rise) / total_isolated);
+        println!("  State prep + monitor total:   {:>8.2}μs/tick  ({:.1}%)",
+            prep_us, 100.0 * (time_state_prep_fall + time_state_prep_rise + time_monitor) / total_isolated);
+        println!();
+        println!("  CB submission overhead:        {:>8.2}μs/tick (wall - GPU)",
+            (wall_elapsed.as_secs_f64() - total_isolated - time_full_tick) / n * 1e6);
     }
 }
 
@@ -1222,9 +1569,43 @@ fn main() {
     let rise_prep_params_buffer = create_prep_params_buffer(
         &simulator.device, state_size as u32, rise_ops.len() as u32, 0, 0,
     );
-    // Monitor params: no ops (monitor kernel doesn't copy or apply ops), just edge detection
-    let monitor_prep_params_buffer = create_prep_params_buffer(
-        &simulator.device, state_size as u32, 0, num_monitors, 0,
+    // Monitor params: one buffer per tick in the batch (each needs unique tick_number).
+    // No ops (monitor kernel doesn't copy or apply ops), just edge detection.
+    // Allocate for max interactive batch size (32).
+    const MAX_INTERACTIVE_BATCH: usize = 32;
+    let monitor_prep_params_buffers: Vec<metal::Buffer> = (0..MAX_INTERACTIVE_BATCH)
+        .map(|_| create_prep_params_buffer(
+            &simulator.device, state_size as u32, 0, num_monitors, 0,
+        ))
+        .collect();
+
+    // ── Autonomous mode buffers ────────────────────────────────────────────
+
+    // UART TX bit position for autonomous UART capture
+    let uart_tx_position: u32 = if let Some(tx_gpio) = uart_tx_gpio {
+        gpio_map.output_bits.get(&tx_gpio).copied().unwrap_or(0xFFFFFFFF)
+    } else {
+        0xFFFFFFFF
+    };
+
+    // Autonomous params buffer (constant for the duration of autonomous mode)
+    let autonomous_params_buffer = simulator.device.new_buffer(
+        std::mem::size_of::<AutonomousParams>() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    unsafe {
+        std::ptr::write(autonomous_params_buffer.contents() as *mut AutonomousParams, AutonomousParams {
+            state_size: state_size as u32,
+            num_monitors,
+            uart_tx_position,
+            _pad: 0,
+        });
+    }
+
+    // UART TX ring buffer for autonomous mode (1 byte per tick)
+    let uart_ring_buffer = simulator.device.new_buffer(
+        AUTO_BATCH_SIZE as u64,
+        MTLResourceOptions::StorageModeShared,
     );
 
     // Pre-write params for all simulation stages (they don't change between ticks)
@@ -1234,26 +1615,52 @@ fn main() {
 
     clilog::finish!(timer_prep);
 
-    // ── Event-driven simulation loop ─────────────────────────────────────
+    // ── GPU Kernel Profiling (optional) ──────────────────────────────────
+
+    if args.gpu_profile {
+        let profile_ticks = args.max_cycles.unwrap_or(1000).min(5000);
+        simulator.profile_gpu_kernels(
+            profile_ticks,
+            num_blocks,
+            num_major_stages,
+            state_size,
+            &blocks_start_buffer,
+            &blocks_data_buffer,
+            &sram_data_buffer,
+            &states_buffer,
+            &event_buffer_metal,
+            &fall_prep_params_buffer,
+            &fall_ops_buffer,
+            &rise_prep_params_buffer,
+            &rise_ops_buffer,
+            &monitor_prep_params_buffers[0],
+            &control_buffer,
+            &monitors_buffer,
+        );
+
+        // Clean up event buffer
+        unsafe { drop(Box::from_raw(event_buffer_ptr)); }
+        return;
+    }
+
+    // ── Event-driven simulation loop with autonomous GPU mode ────────────
     //
-    // Architecture:
-    //   GPU runs autonomously through batches of ticks. Each tick:
-    //     1. state_prep (falling edge) — GPU copies output→input, sets clock=0
-    //     2. simulate_v1_stage × N — GPU evaluates falling edge logic
-    //     3. state_prep (rising edge) — GPU copies output→input, sets clock=1
-    //     4. simulate_v1_stage × N — GPU evaluates rising edge logic
-    //     5. state_prep_monitored (next fall prep + edge check) — GPU checks monitors
-    //     6. signal(tick_done) → wait(cpu_done) — CPU callback point
+    // Two modes of operation:
     //
-    //   CPU event loop per tick:
-    //     - spin-wait for tick_done
-    //     - read PeripheralControl.needs_callback from shared memory
-    //     - if callback: step flash model, write response, update ops buffers
-    //     - always: step UART from output state
-    //     - signal cpu_done → GPU continues
+    // Interactive mode (per-tick GPU↔CPU round-trip):
+    //   GPU evaluates one tick → signals CPU → CPU steps flash/UART → signals GPU
+    //   Used during reset, flash-active periods, and initial warm-up.
     //
-    // Fast path (idle): ~0.5-1μs (SharedEvent round-trip + 1 shared mem read)
-    // Slow path (flash active): ~3-5μs (+ flash model step + state patch)
+    // Autonomous mode (bulk GPU execution, no per-tick round-trip):
+    //   GPU runs AUTO_BATCH_SIZE ticks without stopping. UART TX is captured
+    //   into a ring buffer. Monitor watches for flash activity; if detected,
+    //   records break tick (GPU continues running with stale data).
+    //   CPU handles rollback + replay if break detected.
+    //   Used during long idle stretches (flash CSN=1).
+    //
+    // Mode transitions:
+    //   Interactive → Autonomous: after IDLE_THRESHOLD consecutive idle ticks
+    //   Autonomous → Interactive: when monitor detects flash activity (break)
 
     let timer_sim = clilog::stimer!("simulation");
     let sim_start = std::time::Instant::now();
@@ -1263,7 +1670,7 @@ fn main() {
     let mut prev_flash_csn: bool = true;
     let mut flash_din: u8 = 0x0F;  // default high = no data
 
-    // Helper: read flash signals from output state (same as before)
+    // Helper: read flash signals from output state
     let read_flash_out = |states: &[u32], state_size: usize| -> (bool, bool, u8) {
         let out = &states[state_size..2 * state_size];
         let clk = config.flash.as_ref().map(|f| {
@@ -1311,212 +1718,428 @@ fn main() {
     let mut prof_gpu_wait: u64 = 0;
     let mut prof_cpu_callback: u64 = 0;
     let mut prof_cpu_uart: u64 = 0;
+    let mut prof_autonomous: u64 = 0;
     let mut callbacks_fired: u64 = 0;
     let mut callbacks_skipped: u64 = 0;
+    let mut autonomous_batches: u64 = 0;
+    let mut autonomous_breaks: u64 = 0;
+    let mut autonomous_ticks_total: u64 = 0;
 
-    // Dynamic batch sizing
+    // Dynamic batch sizing (interactive mode)
     let mut batch_size: usize = 10;
     let mut consecutive_idle_batches: usize = 0;
-    let max_batch_size: usize = 32;
+    let max_batch_size: usize = MAX_INTERACTIVE_BATCH;
     let min_batch_size: usize = 1;
+
+    // Mode switching state
+    let mut sim_mode = SimMode::Interactive;
+    let mut consecutive_idle_ticks: usize = 0;
+    let sram_storage_size = script.sram_storage_size as usize;
 
     let mut tick: usize = 0;
     while tick < max_ticks {
-        // Compute actual batch size (don't exceed max_ticks)
-        let actual_batch = batch_size.min(max_ticks - tick);
-
-        // Check if reset state changes within this batch
-        let batch_crosses_reset = tick < reset_cycles && tick + actual_batch > reset_cycles;
-        let actual_batch = if batch_crosses_reset {
-            // Only batch up to the reset boundary
-            reset_cycles - tick
-        } else {
-            actual_batch
-        };
-
-        // Update reset value for this batch
         let in_reset = tick < reset_cycles;
-        let current_reset_val = if in_reset { reset_val_active } else { reset_val_inactive };
-        update_reset_in_ops(current_reset_val);
 
-        // Update flash_din in ops buffers
-        update_flash_din_all(flash_din);
+        match sim_mode {
+            SimMode::Interactive => {
+                // ── Interactive mode: per-tick GPU↔CPU round-trip ──────────
 
-        // ── Encode batch ────────────────────────────────────────────────
-        let t_encode = std::time::Instant::now();
+                // Compute actual batch size (don't exceed max_ticks)
+                let actual_batch = batch_size.min(max_ticks - tick);
 
-        // Clear control block
-        unsafe {
-            let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
-            ctrl.needs_callback = 0;
-        }
+                // Check if reset state changes within this batch
+                let batch_crosses_reset = tick < reset_cycles && tick + actual_batch > reset_cycles;
+                let actual_batch = if batch_crosses_reset {
+                    reset_cycles - tick
+                } else {
+                    actual_batch
+                };
 
-        let base_event = simulator.encode_and_commit_tick_batch(
-            actual_batch,
-            tick,
-            num_blocks,
-            num_major_stages,
-            state_size,
-            &blocks_start_buffer,
-            &blocks_data_buffer,
-            &sram_data_buffer,
-            &states_buffer,
-            &event_buffer_metal,
-            &fall_prep_params_buffer,
-            &fall_ops_buffer,
-            &rise_prep_params_buffer,
-            &rise_ops_buffer,
-            &monitor_prep_params_buffer,
-            &control_buffer,
-            &monitors_buffer,
-        );
-        prof_batch_encode += t_encode.elapsed().as_nanos() as u64;
+                // Update reset value for this batch
+                let current_reset_val = if in_reset { reset_val_active } else { reset_val_inactive };
+                update_reset_in_ops(current_reset_val);
 
-        // ── CPU event loop for this batch ──────────────────────────────
-        let mut batch_had_callback = false;
+                // Update flash_din in ops buffers
+                update_flash_din_all(flash_din);
 
-        for tick_offset in 0..actual_batch {
-            let current_tick = tick + tick_offset;
-            let tick_done = base_event + (tick_offset as u64) * 2 + 1;
-            let cpu_done = base_event + (tick_offset as u64) * 2 + 2;
+                // ── Encode batch ──────────────────────────────────────────
+                let t_encode = std::time::Instant::now();
 
-            // Wait for GPU to complete this tick
-            let t_wait = std::time::Instant::now();
-            simulator.spin_wait(tick_done);
-            prof_gpu_wait += t_wait.elapsed().as_nanos() as u64;
-
-            // Check control block for peripheral callback
-            let t_cb = std::time::Instant::now();
-            let needs_callback = unsafe {
-                let ctrl = &*(control_buffer.contents() as *const PeripheralControl);
-                ctrl.needs_callback
-            };
-
-            if needs_callback != 0 {
-                callbacks_fired += 1;
-                batch_had_callback = true;
-
-                // Step flash model with current output state
-                if let Some(ref mut fl) = flash {
-                    let (clk, current_csn, current_d_out) = read_flash_out(states, state_size);
-                    let effective_csn = if in_reset { true } else { prev_flash_csn };
-
-                    // Step flash twice (falling + rising edge within this tick)
-                    // The GPU ran both edges; we need to catch up the flash model.
-                    let _din_fall = fl.step(clk, effective_csn, prev_flash_d_out);
-                    let din_rise = fl.step(clk, effective_csn, current_d_out);
-
-                    prev_flash_d_out = current_d_out;
-                    prev_flash_csn = current_csn;
-
-                    flash_din = if in_reset { 0x0F } else { din_rise };
-
-                    if current_tick <= 5 || current_tick == reset_cycles
-                        || current_tick == reset_cycles + 1
-                    {
-                        clilog::info!(
-                            "tick {}: callback flash clk={}, csn={}, d_out={:04b}, din={:04b}",
-                            current_tick, clk, current_csn, current_d_out, flash_din
-                        );
-                    }
-
-                    // Update flash_din bits in the input state for next tick.
-                    // The state_prep_monitored already copied output→input and set
-                    // falling edge bits. We just patch the flash_din bits.
-                    if let Some(d0) = flash_d0_gpio {
-                        set_flash_din(&mut states[..state_size], &gpio_map, d0, flash_din);
-                    }
-
-                    // Update ops buffers for subsequent ticks in this batch
-                    update_flash_din_all(flash_din);
-                }
-
-                // Clear callback flag
+                // Clear control block
                 unsafe {
                     let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
                     ctrl.needs_callback = 0;
                 }
-            } else {
-                callbacks_skipped += 1;
 
-                // Even without callback, step flash model to keep it in sync
-                // (it tracks internal state machine timing)
-                if let Some(ref mut fl) = flash {
-                    let (clk, current_csn, current_d_out) = read_flash_out(states, state_size);
-                    let effective_csn = if in_reset { true } else { prev_flash_csn };
-                    let _din_fall = fl.step(clk, effective_csn, prev_flash_d_out);
-                    let din_rise = fl.step(clk, effective_csn, current_d_out);
-                    prev_flash_d_out = current_d_out;
-                    prev_flash_csn = current_csn;
-                    flash_din = if in_reset { 0x0F } else { din_rise };
-                }
-            }
-            prof_cpu_callback += t_cb.elapsed().as_nanos() as u64;
-
-            // UART: always read TX from output state
-            let t_uart = std::time::Instant::now();
-            if let Some(tx_gpio) = uart_tx_gpio {
-                if let Some(&pos) = gpio_map.output_bits.get(&tx_gpio) {
-                    let tx = read_bit(&states[state_size..2 * state_size], pos);
-                    uart_monitor.step(tx, current_tick);
-                }
-            }
-            prof_cpu_uart += t_uart.elapsed().as_nanos() as u64;
-
-            // Signal GPU to continue with next tick
-            simulator.cpu_signal(cpu_done);
-
-            // Progress logging
-            if current_tick > 0 && current_tick % 100000 == 0 {
-                let elapsed = sim_start.elapsed();
-                let us_per_tick = elapsed.as_micros() as f64 / current_tick as f64;
-                clilog::info!(
-                    "Tick {} / {} ({:.1}μs/tick, batch={}, callbacks={}/{})",
-                    current_tick, max_ticks, us_per_tick, batch_size,
-                    callbacks_fired, callbacks_fired + callbacks_skipped
+                let base_event = simulator.encode_and_commit_tick_batch(
+                    actual_batch,
+                    tick,
+                    num_blocks,
+                    num_major_stages,
+                    state_size,
+                    &blocks_start_buffer,
+                    &blocks_data_buffer,
+                    &sram_data_buffer,
+                    &states_buffer,
+                    &event_buffer_metal,
+                    &fall_prep_params_buffer,
+                    &fall_ops_buffer,
+                    &rise_prep_params_buffer,
+                    &rise_ops_buffer,
+                    &monitor_prep_params_buffers,
+                    &control_buffer,
+                    &monitors_buffer,
                 );
-            }
-            if current_tick == reset_cycles {
-                clilog::info!("Reset released at tick {}", current_tick);
-            }
-        }
+                prof_batch_encode += t_encode.elapsed().as_nanos() as u64;
 
-        tick += actual_batch;
+                // ── CPU event loop for this batch ─────────────────────────
+                let mut batch_had_callback = false;
 
-        // Dynamic batch sizing: grow when idle, shrink when active
-        if batch_had_callback {
-            consecutive_idle_batches = 0;
-            batch_size = (batch_size / 2).max(min_batch_size);
-        } else {
-            consecutive_idle_batches += 1;
-            if consecutive_idle_batches >= 3 {
-                batch_size = (batch_size * 2).min(max_batch_size);
+                for tick_offset in 0..actual_batch {
+                    let current_tick = tick + tick_offset;
+                    let tick_done = base_event + (tick_offset as u64) * 2 + 1;
+                    let cpu_done = base_event + (tick_offset as u64) * 2 + 2;
+
+                    // Wait for GPU to complete this tick
+                    let t_wait = std::time::Instant::now();
+                    simulator.spin_wait(tick_done);
+                    prof_gpu_wait += t_wait.elapsed().as_nanos() as u64;
+
+                    // Check control block for peripheral callback
+                    let t_cb = std::time::Instant::now();
+                    let needs_callback = unsafe {
+                        let ctrl = &*(control_buffer.contents() as *const PeripheralControl);
+                        ctrl.needs_callback
+                    };
+
+                    if needs_callback != 0 {
+                        callbacks_fired += 1;
+                        batch_had_callback = true;
+                        consecutive_idle_ticks = 0;
+
+                        // Step flash model with current output state
+                        if let Some(ref mut fl) = flash {
+                            let (clk, current_csn, current_d_out) = read_flash_out(states, state_size);
+                            let effective_csn = if in_reset { true } else { prev_flash_csn };
+
+                            let _din_fall = fl.step(clk, effective_csn, prev_flash_d_out);
+                            let din_rise = fl.step(clk, effective_csn, current_d_out);
+
+                            prev_flash_d_out = current_d_out;
+                            prev_flash_csn = current_csn;
+
+                            flash_din = if in_reset { 0x0F } else { din_rise };
+
+                            if current_tick <= 5 || current_tick == reset_cycles
+                                || current_tick == reset_cycles + 1
+                            {
+                                clilog::info!(
+                                    "tick {}: callback flash clk={}, csn={}, d_out={:04b}, din={:04b}",
+                                    current_tick, clk, current_csn, current_d_out, flash_din
+                                );
+                            }
+
+                            if let Some(d0) = flash_d0_gpio {
+                                set_flash_din(&mut states[..state_size], &gpio_map, d0, flash_din);
+                            }
+
+                            update_flash_din_all(flash_din);
+                        }
+
+                        // Clear callback flag
+                        unsafe {
+                            let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
+                            ctrl.needs_callback = 0;
+                        }
+                    } else {
+                        callbacks_skipped += 1;
+                        consecutive_idle_ticks += 1;
+
+                        // Even without callback, step flash model to keep it in sync
+                        if let Some(ref mut fl) = flash {
+                            let (clk, current_csn, current_d_out) = read_flash_out(states, state_size);
+                            let effective_csn = if in_reset { true } else { prev_flash_csn };
+                            let _din_fall = fl.step(clk, effective_csn, prev_flash_d_out);
+                            let din_rise = fl.step(clk, effective_csn, current_d_out);
+                            prev_flash_d_out = current_d_out;
+                            prev_flash_csn = current_csn;
+                            flash_din = if in_reset { 0x0F } else { din_rise };
+                        }
+                    }
+                    prof_cpu_callback += t_cb.elapsed().as_nanos() as u64;
+
+                    // UART: always read TX from output state
+                    let t_uart = std::time::Instant::now();
+                    if let Some(tx_gpio) = uart_tx_gpio {
+                        if let Some(&pos) = gpio_map.output_bits.get(&tx_gpio) {
+                            let tx = read_bit(&states[state_size..2 * state_size], pos);
+                            uart_monitor.step(tx, current_tick);
+                        }
+                    }
+                    prof_cpu_uart += t_uart.elapsed().as_nanos() as u64;
+
+                    // Signal GPU to continue with next tick
+                    simulator.cpu_signal(cpu_done);
+
+                    // Progress logging
+                    if current_tick > 0 && current_tick % 100000 == 0 {
+                        let elapsed = sim_start.elapsed();
+                        let us_per_tick = elapsed.as_micros() as f64 / current_tick as f64;
+                        clilog::info!(
+                            "Tick {} / {} ({:.1}μs/tick, mode={:?}, batch={}, callbacks={}/{})",
+                            current_tick, max_ticks, us_per_tick, sim_mode, batch_size,
+                            callbacks_fired, callbacks_fired + callbacks_skipped
+                        );
+                    }
+                    if current_tick == reset_cycles {
+                        clilog::info!("Reset released at tick {}", current_tick);
+                    }
+                }
+
+                tick += actual_batch;
+
+                // Dynamic batch sizing: grow when idle, shrink when active
+                if batch_had_callback {
+                    consecutive_idle_batches = 0;
+                    batch_size = (batch_size / 2).max(min_batch_size);
+                } else {
+                    consecutive_idle_batches += 1;
+                    if consecutive_idle_batches >= 3 {
+                        batch_size = (batch_size * 2).min(max_batch_size);
+                    }
+                }
+
+                // ── Check transition to autonomous mode ───────────────────
+                // Only enter autonomous mode when:
+                // - Enough consecutive idle ticks (no flash callback)
+                // - Not in reset (flash behavior undefined during reset)
+                // - Flash peripheral is configured (otherwise nothing to optimize)
+                if consecutive_idle_ticks >= IDLE_THRESHOLD && !in_reset && config.flash.is_some() {
+                    clilog::debug!("Entering autonomous mode at tick {} (idle for {} ticks)",
+                                   tick, consecutive_idle_ticks);
+                    sim_mode = SimMode::Autonomous;
+                }
+            }
+
+            SimMode::Autonomous => {
+                // ── Autonomous mode: bulk GPU execution ───────────────────
+                let t_auto = std::time::Instant::now();
+
+                let auto_batch = AUTO_BATCH_SIZE.min(max_ticks - tick);
+                // Don't cross reset boundary (shouldn't happen since we only enter
+                // autonomous mode after reset, but be safe)
+                let auto_batch = if tick < reset_cycles {
+                    // Shouldn't be here during reset, switch back
+                    sim_mode = SimMode::Interactive;
+                    consecutive_idle_ticks = 0;
+                    continue;
+                } else {
+                    auto_batch
+                };
+
+                // Snapshot state + SRAM for rollback on break
+                let state_snapshot: Vec<u32> = states[..2 * state_size].to_vec();
+                let sram_snapshot: Vec<u32> = unsafe {
+                    let sram_data: &[u32] = std::slice::from_raw_parts(
+                        sram_data_buffer.contents() as *const u32,
+                        sram_storage_size,
+                    );
+                    sram_data.to_vec()
+                };
+
+                // Ensure flash_din = 0x0F in ops (flash is idle)
+                update_flash_din_all(0x0F);
+                update_reset_in_ops(reset_val_inactive);
+
+                // Reset autonomous control fields
+                unsafe {
+                    let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
+                    ctrl.autonomous_break_tick = 0;
+                    ctrl.autonomous_ticks_completed = 0;
+                    ctrl.needs_callback = 0;
+                }
+
+                // Zero the UART ring buffer
+                unsafe {
+                    std::ptr::write_bytes(uart_ring_buffer.contents() as *mut u8, 0, AUTO_BATCH_SIZE);
+                }
+
+                // Encode and commit autonomous batch
+                let batch_done = simulator.encode_and_commit_autonomous_batch(
+                    auto_batch,
+                    num_blocks,
+                    num_major_stages,
+                    state_size,
+                    &blocks_start_buffer,
+                    &blocks_data_buffer,
+                    &sram_data_buffer,
+                    &states_buffer,
+                    &event_buffer_metal,
+                    &fall_prep_params_buffer,
+                    &fall_ops_buffer,
+                    &rise_prep_params_buffer,
+                    &rise_ops_buffer,
+                    &autonomous_params_buffer,
+                    &control_buffer,
+                    &monitors_buffer,
+                    &uart_ring_buffer,
+                );
+
+                // Wait for entire batch to complete
+                simulator.spin_wait(batch_done);
+
+                // Read results from control block
+                let (break_tick, _ticks_completed) = unsafe {
+                    let ctrl = &*(control_buffer.contents() as *const PeripheralControl);
+                    (ctrl.autonomous_break_tick, ctrl.autonomous_ticks_completed)
+                };
+
+                // Read UART ring buffer
+                let uart_ring: &[u8] = unsafe {
+                    std::slice::from_raw_parts(
+                        uart_ring_buffer.contents() as *const u8,
+                        auto_batch,
+                    )
+                };
+
+                autonomous_batches += 1;
+
+                if break_tick > 0 {
+                    // ── Monitor fired: rollback + replay ──────────────────
+                    autonomous_breaks += 1;
+                    let valid_ticks = (break_tick as usize).min(auto_batch);
+
+                    clilog::debug!("Autonomous break at tick offset {} (abs tick {}), replaying {} valid ticks",
+                                   break_tick, tick + valid_ticks, valid_ticks);
+
+                    // Process UART for valid ticks from the ring buffer
+                    for i in 0..valid_ticks {
+                        uart_monitor.step(uart_ring[i], tick + i);
+                    }
+                    autonomous_ticks_total += valid_ticks as u64;
+
+                    // Restore state + SRAM to pre-batch snapshot
+                    states[..2 * state_size].copy_from_slice(&state_snapshot);
+                    unsafe {
+                        let sram_data: &mut [u32] = std::slice::from_raw_parts_mut(
+                            sram_data_buffer.contents() as *mut u32,
+                            sram_storage_size,
+                        );
+                        sram_data[..sram_storage_size].copy_from_slice(&sram_snapshot);
+                    }
+
+                    // Replay valid ticks to advance state correctly.
+                    // These are all idle ticks (flash CSN=1), so no flash interaction.
+                    if valid_ticks > 0 {
+                        // Reset autonomous control for replay
+                        unsafe {
+                            let ctrl = &mut *(control_buffer.contents() as *mut PeripheralControl);
+                            ctrl.autonomous_break_tick = 0;
+                            ctrl.autonomous_ticks_completed = 0;
+                            ctrl.needs_callback = 0;
+                            // Restore prev_values for correct monitor state
+                            // (snapshot had the correct prev_values from before the batch)
+                        }
+
+                        let _replay_done = simulator.encode_and_commit_autonomous_batch(
+                            valid_ticks,
+                            num_blocks,
+                            num_major_stages,
+                            state_size,
+                            &blocks_start_buffer,
+                            &blocks_data_buffer,
+                            &sram_data_buffer,
+                            &states_buffer,
+                            &event_buffer_metal,
+                            &fall_prep_params_buffer,
+                            &fall_ops_buffer,
+                            &rise_prep_params_buffer,
+                            &rise_ops_buffer,
+                            &autonomous_params_buffer,
+                            &control_buffer,
+                            &monitors_buffer,
+                            &uart_ring_buffer,
+                        );
+                        simulator.spin_wait(_replay_done);
+                    }
+
+                    // Update flash tracking from the replayed state
+                    let (_clk, current_csn, current_d_out) = read_flash_out(states, state_size);
+                    prev_flash_csn = current_csn;
+                    prev_flash_d_out = current_d_out;
+
+                    tick += valid_ticks;
+                    consecutive_idle_ticks = 0;
+                    sim_mode = SimMode::Interactive;
+                    // Reset interactive batch sizing for responsive flash handling
+                    batch_size = min_batch_size;
+                    consecutive_idle_batches = 0;
+                } else {
+                    // ── No break: all ticks completed successfully ────────
+                    // Process all UART entries from ring buffer
+                    for i in 0..auto_batch {
+                        uart_monitor.step(uart_ring[i], tick + i);
+                    }
+                    autonomous_ticks_total += auto_batch as u64;
+
+                    // Update flash tracking from final state
+                    let (_clk, current_csn, current_d_out) = read_flash_out(states, state_size);
+                    prev_flash_csn = current_csn;
+                    prev_flash_d_out = current_d_out;
+                    // flash_din stays 0x0F (idle)
+
+                    tick += auto_batch;
+                    // Stay in autonomous mode
+                }
+
+                prof_autonomous += t_auto.elapsed().as_nanos() as u64;
+
+                // Progress logging
+                if tick > 0 && tick % 100000 < AUTO_BATCH_SIZE {
+                    let elapsed = sim_start.elapsed();
+                    let us_per_tick = elapsed.as_micros() as f64 / tick as f64;
+                    clilog::info!(
+                        "Tick {} / {} ({:.1}μs/tick, mode=Autonomous, auto_batches={}, breaks={})",
+                        tick, max_ticks, us_per_tick,
+                        autonomous_batches, autonomous_breaks
+                    );
+                }
             }
         }
     }
 
     // Print profiling results
-    let total_ns = prof_batch_encode + prof_gpu_wait + prof_cpu_callback + prof_cpu_uart;
+    let total_ns = prof_batch_encode + prof_gpu_wait + prof_cpu_callback + prof_cpu_uart + prof_autonomous;
     let print_prof = |name: &str, ns: u64| {
         let us = ns as f64 / 1000.0 / max_ticks as f64;
         let pct = if total_ns > 0 { 100.0 * ns as f64 / total_ns as f64 } else { 0.0 };
-        println!("  {:<28} {:>8.1}μs/tick  {:>5.1}%", name, us, pct);
+        println!("  {:<32} {:>8.1}μs/tick  {:>5.1}%", name, us, pct);
     };
     println!();
-    println!("=== Profiling Breakdown (Event-Driven) ===");
-    print_prof("Batch encode + commit", prof_batch_encode);
-    print_prof("GPU wait (spin)", prof_gpu_wait);
-    print_prof("CPU callback (flash)", prof_cpu_callback);
-    print_prof("CPU UART monitor", prof_cpu_uart);
-    println!("  {:<28} {:>8.1}μs/tick  100.0%",
+    println!("=== Profiling Breakdown ===");
+    print_prof("Interactive: encode + commit", prof_batch_encode);
+    print_prof("Interactive: GPU wait (spin)", prof_gpu_wait);
+    print_prof("Interactive: CPU callback", prof_cpu_callback);
+    print_prof("Interactive: CPU UART monitor", prof_cpu_uart);
+    print_prof("Autonomous: total", prof_autonomous);
+    println!("  {:<32} {:>8.1}μs/tick  100.0%",
              "TOTAL (instrumented)",
              total_ns as f64 / 1000.0 / max_ticks as f64);
     println!();
-    println!("  Callbacks fired:   {}", callbacks_fired);
-    println!("  Callbacks skipped: {}", callbacks_skipped);
+    println!("  Interactive callbacks fired:   {}", callbacks_fired);
+    println!("  Interactive callbacks skipped: {}", callbacks_skipped);
     if callbacks_fired + callbacks_skipped > 0 {
-        println!("  Callback rate:     {:.1}%",
+        println!("  Interactive callback rate:     {:.1}%",
                  100.0 * callbacks_fired as f64 / (callbacks_fired + callbacks_skipped) as f64);
+    }
+    println!("  Autonomous batches:            {}", autonomous_batches);
+    println!("  Autonomous breaks (rollback):  {}", autonomous_breaks);
+    println!("  Autonomous ticks (valid):      {}", autonomous_ticks_total);
+    if max_ticks > 0 {
+        let interactive_ticks = max_ticks as u64 - autonomous_ticks_total;
+        println!("  Interactive ticks:             {}", interactive_ticks);
+        println!("  Autonomous fraction:           {:.1}%",
+                 100.0 * autonomous_ticks_total as f64 / max_ticks as f64);
     }
 
     let sim_elapsed = sim_start.elapsed();
