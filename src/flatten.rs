@@ -617,8 +617,17 @@ impl FlatteningPart {
                     cur_sram_id += 1;
                 }
                 EndpointGroup::PrimaryOutput(idx_iv) => {
-                    if idx_iv == 0 {
-                        panic!("primary output has zero..??")
+                    if idx_iv <= 1 {
+                        // Output tied to constant (0=false, 1=true) - map to position 0
+                        // (state buffer bit 0 is always 0; for idx_iv=1, the sim won't use
+                        // this since aigpin_iv <= 1 is skipped in GPIO mapping)
+                        clilog::warn!(
+                            PO_CONST_ERR,
+                            "primary output idx_iv={} (tied to constant), skipping",
+                            idx_iv
+                        );
+                        output_map.insert(idx_iv, 0);
+                        continue;
                     }
                     let pos = self.state_start * 32
                         + self.get_or_place_output_with_activation(idx_iv, 1) as u32;
