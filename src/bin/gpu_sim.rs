@@ -1207,6 +1207,10 @@ fn main() {
     };
     let num_monitors = monitors.len() as u32;
     clilog::info!("Peripheral monitors: {} (flash clk/csn edges)", num_monitors);
+    for (i, m) in monitors.iter().enumerate() {
+        clilog::info!("  monitor[{}]: position={}, edge_type={}, word_idx={}, bit={}",
+            i, m.position, m.edge_type, m.position >> 5, m.position & 31);
+    }
 
     let monitors_buffer = create_monitors_buffer(&simulator.device, &monitors);
     let control_buffer = create_control_buffer(&simulator.device);
@@ -1313,7 +1317,7 @@ fn main() {
     // Dynamic batch sizing
     let mut batch_size: usize = 10;
     let mut consecutive_idle_batches: usize = 0;
-    let max_batch_size: usize = 1000;
+    let max_batch_size: usize = 32;
     let min_batch_size: usize = 1;
 
     let mut tick: usize = 0;

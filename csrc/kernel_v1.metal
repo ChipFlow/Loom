@@ -430,6 +430,8 @@ struct PeripheralControl {
     u32 flash_d_out;     // 4-bit nibble in low bits
     // CPU → GPU: peripheral response
     u32 flash_d_in;      // 4-bit nibble, CPU writes before signaling back
+    // Tracked previous output values for edge detection (max 16 monitors)
+    u32 prev_values[16]; // stores previous output bit value per monitor
 };
 
 // ── state_prep: basic variant (no monitors) ──────────────────────────────
@@ -470,8 +472,12 @@ kernel void state_prep(
 // ── state_prep_monitored: lightweight peripheral edge detection ───────────
 //
 // Does NOT copy state or apply bit ops. Only checks for edges in monitored
-// signals by comparing input state (old = previous tick's output) vs output
-// state (new = current tick's output).
+// signals by comparing tracked previous values vs current output state.
+//
+// Uses prev_values[] in PeripheralControl to track the output value from the
+// end of the previous tick. This is necessary because state_prep(rise) copies
+// the falling edge output → input, overwriting the previous tick's output
+// before this kernel runs.
 //
 // The actual copy+ops for the next tick happens in the regular state_prep
 // kernel at the start of the next tick. This avoids double-copy and ensures
@@ -491,20 +497,21 @@ kernel void state_prep_monitored(
     u32 state_size = params.state_size;
     u32 num_monitors = params.num_monitors;
 
-    // Compare input state (old output from previous state_prep copy) vs
-    // output state (current tick's simulation result).
+    // Compare tracked previous values vs current output state.
+    // prev_values[m] stores the output value from the end of the previous tick.
     for (uint m = 0; m < num_monitors && m < 16; m++) {
         u32 pos = monitors[m].position;
         u32 word_idx = pos >> 5;
         u32 bit = (pos & 31u);
 
-        // Old value: from input state (states[0..state_size])
-        // This is the value from the last state_prep copy (rising edge input).
-        u32 old_val = (states[word_idx] >> bit) & 1u;
+        // Old value: from tracked previous output (stored in control block)
+        u32 old_val = control->prev_values[m];
 
-        // New value: from output state (states[state_size..])
-        // This is the latest simulation result.
+        // New value: from current output state (states[state_size..])
         u32 new_val = (states[state_size + word_idx] >> bit) & 1u;
+
+        // Always update tracked value for next tick
+        control->prev_values[m] = new_val;
 
         if (old_val == new_val) continue;
 
@@ -522,7 +529,7 @@ kernel void state_prep_monitored(
             control->needs_callback = 1;
             control->monitor_id = m;
             control->tick_number = params.tick_number;
-            break;
+            // Don't break — continue updating prev_values for remaining monitors
         }
     }
 }

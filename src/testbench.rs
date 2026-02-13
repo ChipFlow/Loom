@@ -163,6 +163,8 @@ pub struct PeripheralControl {
     pub flash_d_out: u32,
     // CPU → GPU: response
     pub flash_d_in: u32,
+    // Tracked previous output values for edge detection (max 16 monitors)
+    pub prev_values: [u32; 16],
 }
 
 impl Default for PeripheralControl {
@@ -176,6 +178,7 @@ impl Default for PeripheralControl {
             flash_csn: 0,
             flash_d_out: 0,
             flash_d_in: 0,
+            prev_values: [0; 16],
         }
     }
 }
