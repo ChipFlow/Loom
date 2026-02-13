@@ -57,6 +57,10 @@ required-features = ["cuda"]
 name = "metal_test"
 required-features = ["metal"]
 
+[[bin]]
+name = "gpu_sim"
+required-features = ["metal"]
+
 [dev-dependencies]
 criterion = "0.5"
 
