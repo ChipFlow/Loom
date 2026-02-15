@@ -248,13 +248,13 @@ jobs:
           # that the netlist parses correctly and the simulator runs.
           #
           # To test with real timing values, run locally with:
-          # cargo run -r --bin timing_sim_cpu -- tests/timing_test/6_final.v \
+          # cargo run -r --bin timing_sim_cpu -- tests/timing_test/minimal_build/6_final.v \
           #   tests/timing_test/6_final_test_input.vcd --clock-period 25000 \
           #   --liberty path/to/sky130_fd_sc_hd__tt_025C_1v80.lib
 
           # Build command arguments (using default timing values)
           ARGS=(
-            tests/timing_test/6_final.v
+            tests/timing_test/minimal_build/6_final.v
             tests/timing_test/6_final_test_input.vcd
             --clock-period 25000
             --max-cycles 10
