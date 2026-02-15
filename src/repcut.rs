@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /// RepCut implementation
 
-use crate::aig::{DriverType, AIG};
+use crate::aig::{DriverType, TopoTraverser, AIG};
 use crate::staging::StagedAIG;
 use indexmap::{IndexMap, IndexSet};
 use cachedhash::CachedHash;
@@ -74,7 +74,9 @@ impl RCHyperGraph {
                     endpoint_pins.push(i);
                 });
             }
-            let order_blk = aig.topo_traverse_generic(
+            let mut traverser = TopoTraverser::new(aig.num_aigpins);
+            let order_blk = traverser.topo_traverse(
+                aig,
                 Some(&endpoint_pins),
                 staged.primary_inputs.as_ref()
             );
@@ -131,7 +133,9 @@ impl RCHyperGraph {
                 endpoint_pins_all.push(i);
             });
         }
-        let order_all = aig.topo_traverse_generic(
+        let mut traverser_all = TopoTraverser::new(aig.num_aigpins);
+        let order_all = traverser_all.topo_traverse(
+            aig,
             Some(&endpoint_pins_all),
             staged.primary_inputs.as_ref()
         );

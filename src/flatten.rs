@@ -8,6 +8,7 @@ use crate::liberty_parser::TimingLibrary;
 use crate::pe::{Partition, BOOMERANG_NUM_STAGES};
 use crate::staging::StagedAIG;
 use indexmap::IndexMap;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use ulib::UVec;
 
@@ -1033,10 +1034,10 @@ fn build_flattened_script_v1(
         // the intermediates for parts being flattened
         let mut flattening_parts: Vec<FlatteningPart> = vec![Default::default(); init_parts.len()];
 
-        // basic index preprocessing for stages
-        for i in 0..init_parts.len() {
-            flattening_parts[i].init_afters_writeouts(aig, staged, &init_parts[i]);
-        }
+        // basic index preprocessing for stages (parallel - each is independent)
+        flattening_parts.par_iter_mut().enumerate().for_each(|(i, fp)| {
+            fp.init_afters_writeouts(aig, staged, &init_parts[i]);
+        });
 
         // allocate output state positions for all srams,
         // in the order of block affinity.
@@ -1074,17 +1075,18 @@ fn build_flattened_script_v1(
         .zip(stages_flattening_parts.iter_mut())
         .zip(parts_in_stages.into_iter().copied())
     {
-        // build script per part. we will later assemble them to blocks.
-        let mut parts_data_split = vec![vec![]; init_parts.len()];
-        for part_id in 0..init_parts.len() {
-            // clilog::debug!("building script for part {}", part_id);
-            parts_data_split[part_id] = flattening_parts[part_id].build_script(
-                aig,
-                &init_parts[part_id],
-                &input_map,
-                &staged_io_map,
-            );
-        }
+        // build script per part in parallel. we will later assemble them to blocks.
+        let parts_data_split: Vec<Vec<u32>> = flattening_parts.par_iter()
+            .enumerate()
+            .map(|(part_id, fp)| {
+                fp.build_script(
+                    aig,
+                    &init_parts[part_id],
+                    &input_map,
+                    &staged_io_map,
+                )
+            })
+            .collect();
 
         for block_id in 0..num_blocks {
             blocks_start.push(blocks_data.len());

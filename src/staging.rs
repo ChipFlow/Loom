@@ -6,7 +6,7 @@
 //! with a limited processing element width.
 
 use indexmap::IndexSet;
-use crate::aig::{AIG, EndpointGroup, DriverType};
+use crate::aig::{AIG, EndpointGroup, DriverType, TopoTraverser};
 
 /// A struct representing the boundaries of a staged AIG.
 pub struct StagedAIG {
@@ -106,7 +106,9 @@ impl StagedAIG {
             });
         }
         assert!(!unrealized_endpoint_nodes.is_empty());
-        let order = aig.topo_traverse_generic(
+        let mut traverser = TopoTraverser::new(aig.num_aigpins);
+        let order = traverser.topo_traverse(
+            aig,
             Some(&unrealized_endpoint_nodes),
             primary_inputs
         );

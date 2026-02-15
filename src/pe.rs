@@ -63,9 +63,12 @@ pub struct Partition {
 fn build_one_boomerang_stage(
     aig: &AIG,
     unrealized_comb_outputs: &mut IndexSet<usize>,
+    unrealized_comb_outputs_dense: &mut Vec<bool>,
     realized_inputs: &mut IndexSet<usize>,
+    realized_inputs_dense: &mut Vec<bool>,
     total_write_outs: &mut usize,
     num_reserved_writeouts: usize,
+    traverser: &mut TopoTraverser,
 ) -> Option<BoomerangStage> {
     let mut hier = Vec::new();
     for i in 0..=BOOMERANG_NUM_STAGES {
@@ -73,28 +76,29 @@ fn build_one_boomerang_stage(
     }
 
     // first discover the (remaining) subgraph to implement.
-    let order = aig.topo_traverse_generic(
-        Some(&unrealized_comb_outputs.iter().copied().collect()),
+    let endpoints_vec: Vec<usize> = unrealized_comb_outputs.iter().copied().collect();
+    let order = traverser.topo_traverse(
+        aig,
+        Some(&endpoints_vec),
         Some(&realized_inputs),
     );
-    let id2order: IndexMap<_, _> = order
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(order_i, i)| (i, order_i))
-        .collect();
+    // Dense id2order: aigpin -> topo order index. usize::MAX = not present.
+    let mut id2order = vec![usize::MAX; aig.num_aigpins + 1];
+    for (order_i, &i) in order.iter().enumerate() {
+        id2order[i] = order_i;
+    }
     let mut level = vec![0; order.len()];
     for (order_i, i) in order.iter().copied().enumerate() {
-        if realized_inputs.contains(&i) {
+        if realized_inputs_dense[i] {
             continue;
         }
         let mut lvli: usize = 0;
         if let DriverType::AndGate(a, b) = aig.drivers[i] {
             if a >= 2 {
-                lvli = lvli.max(level[*id2order.get(&(a >> 1)).unwrap()] + 1);
+                lvli = lvli.max(level[id2order[a >> 1]] + 1);
             }
             if b >= 2 {
-                lvli = lvli.max(level[*id2order.get(&(b >> 1)).unwrap()] + 1);
+                lvli = lvli.max(level[id2order[b >> 1]] + 1);
             }
         }
         level[order_i] = lvli;
@@ -105,9 +109,11 @@ fn build_one_boomerang_stage(
     fn place_bit(
         aig: &AIG,
         hier: &mut Vec<Vec<usize>>,
-        hier_visited_nodes_count: &mut IndexMap<usize, usize>,
+        hier_visited_nodes_count: &mut Vec<usize>,
+        hier_visited_len: &mut usize,
+        hier_active_nodes: &mut Vec<usize>,
         level: &Vec<usize>,
-        id2order: &IndexMap<usize, usize>,
+        id2order: &Vec<usize>,
         hi: usize,
         j: usize,
         nd: usize,
@@ -116,14 +122,20 @@ fn build_one_boomerang_stage(
         if hi == 0 {
             return;
         }
-        *hier_visited_nodes_count.entry(nd).or_default() += 1;
-        let lvlnd = level[*id2order.get(&nd).unwrap()];
+        if hier_visited_nodes_count[nd] == 0 {
+            *hier_visited_len += 1;
+            hier_active_nodes.push(nd);
+        }
+        hier_visited_nodes_count[nd] += 1;
+        let lvlnd = level[id2order[nd]];
         assert!(lvlnd <= hi);
         if lvlnd != hi {
             place_bit(
                 aig,
                 hier,
                 hier_visited_nodes_count,
+                hier_visited_len,
+                hier_active_nodes,
                 level,
                 id2order,
                 hi - 1,
@@ -140,6 +152,8 @@ fn build_one_boomerang_stage(
                 aig,
                 hier,
                 hier_visited_nodes_count,
+                hier_visited_len,
+                hier_active_nodes,
                 level,
                 id2order,
                 hi - 1,
@@ -150,6 +164,8 @@ fn build_one_boomerang_stage(
                 aig,
                 hier,
                 hier_visited_nodes_count,
+                hier_visited_len,
+                hier_active_nodes,
                 level,
                 id2order,
                 hi - 1,
@@ -162,9 +178,11 @@ fn build_one_boomerang_stage(
     fn purge_bit(
         aig: &AIG,
         hier: &mut Vec<Vec<usize>>,
-        hier_visited_nodes_count: &mut IndexMap<usize, usize>,
+        hier_visited_nodes_count: &mut Vec<usize>,
+        hier_visited_len: &mut usize,
+        hier_active_nodes: &mut Vec<usize>,
         level: &Vec<usize>,
-        id2order: &IndexMap<usize, usize>,
+        id2order: &Vec<usize>,
         hi: usize,
         j: usize,
     ) {
@@ -176,16 +194,20 @@ fn build_one_boomerang_stage(
         if hi == 0 {
             return;
         }
-        let hvc = hier_visited_nodes_count.get_mut(&nd).unwrap();
-        *hvc -= 1;
-        if *hvc == 0 {
-            hier_visited_nodes_count.swap_remove(&nd);
+        hier_visited_nodes_count[nd] -= 1;
+        if hier_visited_nodes_count[nd] == 0 {
+            *hier_visited_len -= 1;
+            if let Some(pos) = hier_active_nodes.iter().position(|&x| x == nd) {
+                hier_active_nodes.swap_remove(pos);
+            }
         }
         let hier_hi_len = hier[hi].len();
         purge_bit(
             aig,
             hier,
             hier_visited_nodes_count,
+            hier_visited_len,
+            hier_active_nodes,
             level,
             id2order,
             hi - 1,
@@ -195,6 +217,8 @@ fn build_one_boomerang_stage(
             aig,
             hier,
             hier_visited_nodes_count,
+            hier_visited_len,
+            hier_active_nodes,
             level,
             id2order,
             hi - 1,
@@ -204,7 +228,10 @@ fn build_one_boomerang_stage(
 
     // the nodes that are implemented in the hierarchy.
     // we only count for hierarchy[1 and more], [0] is not counted.
-    let mut hier_visited_nodes_count: IndexMap<usize, usize> = IndexMap::new();
+    // Dense Vec: index by aigpin, value = reference count (0 = not present).
+    let mut hier_visited_nodes_count: Vec<usize> = vec![0; aig.num_aigpins + 1];
+    let mut hier_visited_len: usize = 0;
+    let mut hier_active_nodes: Vec<usize> = Vec::new();
     let mut selected_level = max_level.min(BOOMERANG_NUM_STAGES);
 
     /// compute the maximum number of steps needed from this node
@@ -214,31 +241,31 @@ fn build_one_boomerang_stage(
     /// already be inside the boomerang hierarchy.
     fn compute_reverse_level(
         order: &Vec<usize>,
-        id2order: &IndexMap<usize, usize>,
+        id2order: &Vec<usize>,
         unrealized_comb_outputs: &IndexSet<usize>,
-        realized_inputs: &IndexSet<usize>,
-        hier_visited_nodes_count: &IndexMap<usize, usize>,
+        realized_inputs_dense: &Vec<bool>,
+        hier_visited_nodes_count: &Vec<usize>,
         aig: &AIG,
     ) -> Vec<usize> {
         let mut reverse_level = vec![usize::MAX; order.len()];
         for &i in unrealized_comb_outputs.iter() {
-            reverse_level[*id2order.get(&i).unwrap()] = 0;
+            reverse_level[id2order[i]] = 0;
         }
         for (order_i, i) in order.iter().copied().enumerate().rev() {
-            if realized_inputs.contains(&i) || hier_visited_nodes_count.contains_key(&i) {
+            if realized_inputs_dense[i] || hier_visited_nodes_count[i] > 0 {
                 continue;
             }
             let rlvli = reverse_level[order_i];
             if let DriverType::AndGate(a, b) = aig.drivers[i] {
                 if a >= 2 {
-                    let a = *id2order.get(&(a >> 1)).unwrap();
+                    let a = id2order[a >> 1];
                     let rlvla = &mut reverse_level[a];
                     if *rlvla == usize::MAX || *rlvla < rlvli + 1 {
                         *rlvla = rlvli + 1;
                     }
                 }
                 if b >= 2 {
-                    let b = *id2order.get(&(b >> 1)).unwrap();
+                    let b = id2order[b >> 1];
                     let rlvlb = &mut reverse_level[b];
                     if *rlvlb == usize::MAX || *rlvlb < rlvli + 1 {
                         *rlvlb = rlvli + 1;
@@ -261,23 +288,23 @@ fn build_one_boomerang_stage(
     /// itself an unrealized endpoint.
     fn compute_lvl1_necessary_nodes(
         order: &Vec<usize>,
-        id2order: &IndexMap<usize, usize>,
+        id2order: &Vec<usize>,
         level: &Vec<usize>,
         reverse_level: &Vec<usize>,
         aig: &AIG,
-        unrealized_comb_outputs: &IndexSet<usize>,
-        hier_visited_nodes_count: &IndexMap<usize, usize>,
+        unrealized_comb_outputs_dense: &Vec<bool>,
+        hier_visited_nodes_count: &Vec<usize>,
     ) -> IndexSet<usize> {
         let mut lvl1_necessary_nodes = IndexSet::new();
         for order_i in 0..order.len() {
-            if hier_visited_nodes_count.contains_key(&order[order_i]) {
+            if hier_visited_nodes_count[order[order_i]] > 0 {
                 continue;
             }
             if reverse_level[order_i] == usize::MAX {
                 continue;
             }
             if level[order_i] == 0 {
-                if unrealized_comb_outputs.contains(&order[order_i]) {
+                if unrealized_comb_outputs_dense[order[order_i]] {
                     lvl1_necessary_nodes.insert(order[order_i]);
                 }
                 continue;
@@ -290,14 +317,14 @@ fn build_one_boomerang_stage(
                     _ => panic!(),
                 };
                 if a >= 2
-                    && level[*id2order.get(&(a >> 1)).unwrap()] == 0
-                    && !hier_visited_nodes_count.contains_key(&(a >> 1))
+                    && level[id2order[a >> 1]] == 0
+                    && hier_visited_nodes_count[a >> 1] == 0
                 {
                     lvl1_necessary_nodes.insert(a >> 1);
                 }
                 if b >= 2
-                    && level[*id2order.get(&(b >> 1)).unwrap()] == 0
-                    && !hier_visited_nodes_count.contains_key(&(b >> 1))
+                    && level[id2order[b >> 1]] == 0
+                    && hier_visited_nodes_count[b >> 1] == 0
                 {
                     lvl1_necessary_nodes.insert(b >> 1);
                 }
@@ -310,7 +337,7 @@ fn build_one_boomerang_stage(
         &order,
         &id2order,
         unrealized_comb_outputs,
-        realized_inputs,
+        realized_inputs_dense,
         &hier_visited_nodes_count,
         aig,
     );
@@ -334,7 +361,7 @@ fn build_one_boomerang_stage(
         let mut candidates: Vec<(usize, usize)> = (0..order.len())
             .filter(|&order_i| {
                 level[order_i] == selected_level
-                    && !hier_visited_nodes_count.contains_key(&order[order_i])
+                    && hier_visited_nodes_count[order[order_i]] == 0
                     && reverse_level[order_i] != usize::MAX
             })
             .map(|order_i| (order_i, reverse_level[order_i]))
@@ -364,6 +391,8 @@ fn build_one_boomerang_stage(
             aig,
             &mut hier,
             &mut hier_visited_nodes_count,
+            &mut hier_visited_len,
+            &mut hier_active_nodes,
             &level,
             &id2order,
             selected_level,
@@ -375,7 +404,7 @@ fn build_one_boomerang_stage(
             &order,
             &id2order,
             unrealized_comb_outputs,
-            realized_inputs,
+            realized_inputs_dense,
             &hier_visited_nodes_count,
             aig,
         );
@@ -389,7 +418,7 @@ fn build_one_boomerang_stage(
             &level,
             &reverse_level_upd,
             aig,
-            &unrealized_comb_outputs,
+            unrealized_comb_outputs_dense,
             &hier_visited_nodes_count,
         );
 
@@ -398,10 +427,10 @@ fn build_one_boomerang_stage(
         clilog::trace!(
             "taken one node at level {}, used 1-level space {}, hier visited unique {}, num nodes necessary in lvl1 {}",
             selected_level, num_lvl1_hier_taken,
-            hier_visited_nodes_count.len(), lvl1_necessary_nodes.len()
+            hier_visited_len, lvl1_necessary_nodes.len()
         );
 
-        if lvl1_necessary_nodes.len() + num_lvl1_hier_taken.max(hier_visited_nodes_count.len())
+        if lvl1_necessary_nodes.len() + num_lvl1_hier_taken.max(hier_visited_len)
             >= (1 << (BOOMERANG_NUM_STAGES - 1))
         {
             clilog::trace!("REVERSED the plan due to overflow");
@@ -409,6 +438,8 @@ fn build_one_boomerang_stage(
                 aig,
                 &mut hier,
                 &mut hier_visited_nodes_count,
+                &mut hier_visited_len,
+                &mut hier_active_nodes,
                 &level,
                 &id2order,
                 selected_level,
@@ -429,7 +460,7 @@ fn build_one_boomerang_stage(
             &level,
             &reverse_level,
             aig,
-            &unrealized_comb_outputs,
+            unrealized_comb_outputs_dense,
             &hier_visited_nodes_count,
         );
     }
@@ -445,7 +476,7 @@ fn build_one_boomerang_stage(
     let mut endpoints_untouched = Vec::new();
     let mut endpoints_hier = IndexSet::new();
     for &endpt in unrealized_comb_outputs.iter() {
-        if hier_visited_nodes_count.contains_key(&endpt) {
+        if hier_visited_nodes_count[endpt] > 0 {
             endpoints_hier.insert(endpt);
         } else if last_lvl1_necessary_nodes.contains(&endpt) {
             endpoints_lvl1.push(endpt);
@@ -489,6 +520,8 @@ fn build_one_boomerang_stage(
                     aig,
                     &mut hier,
                     &mut hier_visited_nodes_count,
+                    &mut hier_visited_len,
+                    &mut hier_active_nodes,
                     &level,
                     &id2order,
                     1,
@@ -497,7 +530,7 @@ fn build_one_boomerang_stage(
                 );
                 realized_endpoints.insert(endpt_i);
                 endpt_lvl1_i += 1;
-            } else if unrealized_comb_outputs.contains(&hier[1][j]) {
+            } else if unrealized_comb_outputs_dense[hier[1][j]] {
                 realized_endpoints.insert(hier[1][j]);
             }
         }
@@ -515,7 +548,7 @@ fn build_one_boomerang_stage(
     // clilog::debug!("last_lvl1_necessary: {}, hier visited: {}, realized endpts: {}", last_lvl1_necessary_nodes.len(), hier_visited_nodes_count.len(), realized_endpoints.len());
     let mut hier1_j = 0;
     for &nd in &last_lvl1_necessary_nodes {
-        if hier_visited_nodes_count.contains_key(&nd) || realized_endpoints.contains(&nd) {
+        if hier_visited_nodes_count[nd] > 0 || realized_endpoints.contains(&nd) {
             continue;
         }
         while hier[1][hier1_j] != usize::MAX {
@@ -529,6 +562,8 @@ fn build_one_boomerang_stage(
             aig,
             &mut hier,
             &mut hier_visited_nodes_count,
+            &mut hier_visited_len,
+            &mut hier_active_nodes,
             &level,
             &id2order,
             1,
@@ -573,11 +608,13 @@ fn build_one_boomerang_stage(
         }
     }
 
-    for (&i, _) in &hier_visited_nodes_count {
+    for &i in &hier_active_nodes {
         realized_inputs.insert(i);
+        realized_inputs_dense[i] = true;
     }
     for &i in &realized_endpoints {
         assert!(unrealized_comb_outputs.swap_remove(&i));
+        unrealized_comb_outputs_dense[i] = false;
     }
 
     Some(BoomerangStage { hier, write_outs })
@@ -721,8 +758,19 @@ impl Partition {
             // overflowed writeout
             return None;
         }
+        // Build dense boolean arrays for fast contains() checks in inner loops.
+        let mut unrealized_comb_outputs_dense = vec![false; aig.num_aigpins + 1];
+        for &i in unrealized_comb_outputs.iter() {
+            unrealized_comb_outputs_dense[i] = true;
+        }
+        let mut realized_inputs_dense = vec![false; aig.num_aigpins + 1];
+        for &i in realized_inputs.iter() {
+            realized_inputs_dense[i] = true;
+        }
+
         let mut stages = Vec::<BoomerangStage>::new();
         let mut total_write_outs = 0;
+        let mut traverser = TopoTraverser::new(aig.num_aigpins);
         while !unrealized_comb_outputs.is_empty() {
             // Check cancel flag between stages
             if let Some(flag) = cancel {
@@ -733,9 +781,12 @@ impl Partition {
             let stage = build_one_boomerang_stage(
                 aig,
                 &mut unrealized_comb_outputs,
+                &mut unrealized_comb_outputs_dense,
                 &mut realized_inputs,
+                &mut realized_inputs_dense,
                 &mut total_write_outs,
                 num_reserved_writeouts,
+                &mut traverser,
             )?;
             stages.push(stage);
         }
@@ -768,6 +819,7 @@ pub fn process_partitions(
     aig: &AIG,
     staged: &StagedAIG,
     mut parts: Vec<Vec<usize>>,
+    prebuilt: Option<Vec<Partition>>,
     max_stage_degrad: usize,
 ) -> Option<Vec<Partition>> {
     // Phase 1: Compute node counts and bitsets for each partition using
@@ -786,18 +838,23 @@ pub fn process_partitions(
         })
         .unzip();
 
-    let all_original_parts = parts
-        .par_iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let part = Partition::build_one(aig, staged, v);
-            if part.is_none() {
-                clilog::error!("Partition {} exceeds resource constraint.", i);
-            }
-            part
-        })
-        .collect::<Vec<_>>();
-    let all_original_parts = all_original_parts.into_iter().collect::<Option<Vec<_>>>()?;
+    let all_original_parts = if let Some(prebuilt) = prebuilt {
+        assert_eq!(prebuilt.len(), parts.len(), "prebuilt partitions count mismatch");
+        prebuilt
+    } else {
+        let built = parts
+            .par_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let part = Partition::build_one(aig, staged, v);
+                if part.is_none() {
+                    clilog::error!("Partition {} exceeds resource constraint.", i);
+                }
+                part
+            })
+            .collect::<Vec<_>>();
+        built.into_iter().collect::<Option<Vec<_>>>()?
+    };
     let max_original_nstages = all_original_parts
         .iter()
         .map(|p| p.stages.len())
@@ -1006,5 +1063,5 @@ pub fn process_partitions_from_hgr_parts_file(
         parts.len()
     );
 
-    process_partitions(aig, staged, parts, max_stage_degrad)
+    process_partitions(aig, staged, parts, None, max_stage_degrad)
 }

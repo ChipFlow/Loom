@@ -107,7 +107,7 @@ fn main() {
             r @ _ => format!("{}", r)
         });
 
-        let mut parts_indices_good = Vec::new();
+        let mut parts_good: Vec<(Vec<usize>, Partition)> = Vec::new();
         // always made sure that staged output pins are at fronts.
         let mut unrealized_endpoints = (0..staged.num_endpoint_groups()).collect::<Vec<_>>();
         let mut division = 600;
@@ -130,8 +130,8 @@ fn main() {
             let mut new_unrealized_endpoints = Vec::new();
             for (idx, part_opt) in parts_indices.into_iter().zip(parts_try.into_iter()) {
                 match part_opt {
-                    Some(_part) => {
-                        parts_indices_good.push(idx);
+                    Some(part) => {
+                        parts_good.push((idx, part));
                     }
                     None => {
                         if idx.len() == 1 {
@@ -148,10 +148,11 @@ fn main() {
         }
 
         clilog::info!("interactive partition completed: {} in total. merging started.",
-                      parts_indices_good.len());
+                      parts_good.len());
 
+        let (parts_indices_good, prebuilt): (Vec<_>, Vec<_>) = parts_good.into_iter().unzip();
         let effective_parts = process_partitions(
-            &aig, staged, parts_indices_good, args.max_stage_degrad
+            &aig, staged, parts_indices_good, Some(prebuilt), args.max_stage_degrad
         ).unwrap();
         clilog::info!("after merging: {} parts.", effective_parts.len());
         effective_parts
