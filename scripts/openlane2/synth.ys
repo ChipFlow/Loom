@@ -1,0 +1,22 @@
+read_ilang /design/mcu_soc_sky130.il
+hierarchy -top top
+proc
+flatten
+opt
+rename -top top
+
+# Map memories to CF_SRAM_1024x32 macros
+memory_libmap -lib /sram/sky130_memory.map
+read_verilog -lib /sram/CF_SRAM_1024x32_stub.v
+techmap -map /sram/sky130_memory.v
+# Map any remaining small memories to FFs
+memory_map
+
+synth -top top
+dfflibmap -liberty /root/.volare/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+abc -liberty /root/.volare/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+opt_clean -purge
+splitnets
+opt_clean -purge
+stat -liberty /root/.volare/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+write_verilog -noattr -noexpr -nohex -nodec /design/top_synth.v
