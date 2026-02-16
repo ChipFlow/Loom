@@ -63,87 +63,106 @@ impl LeafPinProvider for SKY130LeafPins {
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 2-input AND: A, B -> X
+            // Low-power isolation buffers: A, SLEEP/SLEEP_B -> X
+            t if t.starts_with("lpflow_isobufsrc") => match pin {
+                "A" | "SLEEP" => Direction::I,
+                "X" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+            t if t.starts_with("lpflow_inputiso") => match pin {
+                "A" | "SLEEP_B" => Direction::I,
+                "X" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
+            // 2-input AND: A, B -> X (and2b has A_N or B_N)
             t if t.starts_with("and2") => match pin {
-                "A" | "B" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 3-input AND: A, B, C -> X
+            // 3-input AND: A, B, C -> X (and3b has _N variants)
             t if t.starts_with("and3") => match pin {
-                "A" | "B" | "C" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 4-input AND: A, B, C, D -> X
+            // 4-input AND: A, B, C, D -> X (and4b/and4bb have _N variants)
             t if t.starts_with("and4") => match pin {
-                "A" | "B" | "C" | "D" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" | "D" | "D_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 2-input OR: A, B -> X
+            // 2-input OR: A, B -> X (or2b has _N variants)
             t if t.starts_with("or2") => match pin {
-                "A" | "B" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
             // 3-input OR: A, B, C -> X (or3b has C_N instead of C)
             t if t.starts_with("or3") => match pin {
-                "A" | "B" | "C" | "C_N" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 4-input OR: A, B, C, D -> X
+            // 4-input OR: A, B, C, D -> X (or4b/or4bb have _N variants)
             t if t.starts_with("or4") => match pin {
-                "A" | "B" | "C" | "D" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" | "D" | "D_N" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 2-input NAND: A, B -> Y
+            // 2-input NAND: A, B -> Y (nand2b has A_N or B_N)
             t if t.starts_with("nand2") => match pin {
-                "A" | "B" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" => Direction::I,
                 "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 3-input NAND: A, B, C -> Y (nand3b has A_N instead of A)
+            // 3-input NAND: A, B, C -> Y (nand3b has A_N)
             t if t.starts_with("nand3") => match pin {
-                "A" | "A_N" | "B" | "C" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" => Direction::I,
                 "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 4-input NAND: A, B, C, D -> Y
+            // 4-input NAND: A, B, C, D -> Y (nand4b/nand4bb have _N variants)
             t if t.starts_with("nand4") => match pin {
-                "A" | "B" | "C" | "D" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" | "D" | "D_N" => Direction::I,
                 "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 2-input NOR: A, B -> Y
+            // 2-input NOR: A, B -> Y (nor2b has A_N or B_N)
             t if t.starts_with("nor2") => match pin {
-                "A" | "B" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" => Direction::I,
                 "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 3-input NOR: A, B, C -> Y (nor3b has C_N instead of C)
+            // 3-input NOR: A, B, C -> Y (nor3b has C_N)
             t if t.starts_with("nor3") => match pin {
-                "A" | "B" | "C" | "C_N" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" => Direction::I,
                 "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // 4-input NOR: A, B, C, D -> Y
+            // 4-input NOR: A, B, C, D -> Y (nor4b/nor4bb have _N variants)
             t if t.starts_with("nor4") => match pin {
-                "A" | "B" | "C" | "D" => Direction::I,
+                "A" | "A_N" | "B" | "B_N" | "C" | "C_N" | "D" | "D_N" => Direction::I,
                 "Y" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
+            // Majority gate: A, B, C -> X
+            t if t.starts_with("maj3") => match pin {
+                "A" | "B" | "C" => Direction::I,
+                "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
@@ -154,10 +173,24 @@ impl LeafPinProvider for SKY130LeafPins {
                 _ => unknown_pin(macro_name, pin_name),
             },
 
+            // 3-input XOR: A, B, C -> X
+            t if t.starts_with("xor3") => match pin {
+                "A" | "B" | "C" => Direction::I,
+                "X" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
             // 2-input XNOR: A, B -> Y
             t if t.starts_with("xnor2") => match pin {
                 "A" | "B" => Direction::I,
                 "Y" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
+            // 3-input XNOR: A, B, C -> X
+            t if t.starts_with("xnor3") => match pin {
+                "A" | "B" | "C" => Direction::I,
+                "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
 
@@ -263,6 +296,13 @@ impl LeafPinProvider for SKY130LeafPins {
             // a221oi: Y = !((A1 & A2) | (B1 & B2) | C1)
             t if t.starts_with("a221") => match pin {
                 "A1" | "A2" | "B1" | "B2" | "C1" => Direction::I,
+                "X" | "Y" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
+            // a222oi: Y = !((A1 & A2) | (B1 & B2) | (C1 & C2))
+            t if t.starts_with("a222") => match pin {
+                "A1" | "A2" | "B1" | "B2" | "C1" | "C2" => Direction::I,
                 "X" | "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
@@ -374,6 +414,13 @@ impl LeafPinProvider for SKY130LeafPins {
             // o31ai: Y = !((A1 | A2 | A3) & B1)
             t if t.starts_with("o31") => match pin {
                 "A1" | "A2" | "A3" | "B1" => Direction::I,
+                "X" | "Y" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
+            // o32ai: Y = !((A1 | A2 | A3) & (B1 | B2))
+            t if t.starts_with("o32") => match pin {
+                "A1" | "A2" | "A3" | "B1" | "B2" => Direction::I,
                 "X" | "Y" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },

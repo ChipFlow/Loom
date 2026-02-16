@@ -5,7 +5,7 @@
     "reset_cycles": 10,
     "num_cycles": 500000,
     "clock_period_ps": 40000,
-    "netlist_path": "tests/mcu_soc/build/6_final.v",
+    "netlist_path": "tests/mcu_soc/build/gatelevel.gv",
     "flash": {
         "clk_gpio": 0,
         "csn_gpio": 1,
@@ -17,5 +17,29 @@
         "tx_gpio": 25,
         "rx_gpio": 26,
         "baud_rate": 115200
+    },
+    "constant_inputs": {
+        "41": 1
+    },
+    "port_mapping": {
+        "inputs": {
+            "38": "io$clk$i",
+            "40": "io$rst_n$i",
+            "41": "io$soc_cpu_jtag_trst$i",
+            "2": "io$soc_flash_d$i[0]",
+            "3": "io$soc_flash_d$i[1]",
+            "4": "io$soc_flash_d$i[2]",
+            "5": "io$soc_flash_d$i[3]",
+            "26": "io$soc_uart_0_rx$i"
+        },
+        "outputs": {
+            "0": "io$soc_flash_clk$o",
+            "1": "io$soc_flash_csn$o",
+            "2": "io$soc_flash_d$o[0]",
+            "3": "io$soc_flash_d$o[1]",
+            "4": "io$soc_flash_d$o[2]",
+            "5": "io$soc_flash_d$o[3]",
+            "25": "io$soc_uart_0_tx$o"
+        }
     }
 }

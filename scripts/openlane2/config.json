@@ -1,15 +1,17 @@
 {
     "DESIGN_NAME": "top",
-    "VERILOG_FILES": "dir::*.v",
-    "CLOCK_PORT": "clk",
+    "VERILOG_FILES": ["/design/top_synth.v"],
+    "CLOCK_PORT": "\\io$clk$i",
     "CLOCK_PERIOD": 40.0,
     "PDK": "sky130A",
     "FP_SIZING": "absolute",
-    "DIE_AREA": "0 0 3000 3000",
-    "FP_CORE_UTIL": 30,
-    "PL_TARGET_DENSITY": 0.35,
-    "GRT_ADJUSTMENT": 0.3,
-    "SYNTH_STRATEGY": "AREA 0",
+    "DIE_AREA": [0, 0, 4000, 4000],
+    "FP_CORE_UTIL": 25,
+    "PL_TARGET_DENSITY_PCT": 30,
+    "GRT_ADJUSTMENT": 0.25,
+    "RUN_LINTER": false,
+    "SYNTH_ELABORATE_ONLY": true,
+    "SYNTH_READ_BLACKBOX_LIB": true,
     "meta": {
         "version": 2
     }

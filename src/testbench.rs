@@ -6,6 +6,7 @@
 //! and watchlist types used by both `timing_sim_cpu` and `gpu_sim`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -211,6 +212,14 @@ pub struct TestbenchConfig {
     pub events_reference: Option<String>,
     /// Timing simulation configuration for post-layout SDF back-annotation.
     pub timing: Option<TimingSimConfig>,
+    /// Maps GPIO indices to actual port names in the netlist.
+    /// Required for designs that don't use gpio_in[N]/gpio_out[N] naming
+    /// (e.g. ChipFlow designs with io$signal$i / io$signal$o naming).
+    pub port_mapping: Option<PortMapping>,
+    /// Constant input values: GPIO index → value (0 or 1).
+    /// These are driven every tick on both clock edges.
+    #[serde(default)]
+    pub constant_inputs: HashMap<String, u8>,
 }
 
 /// Configuration for post-layout timing simulation with SDF back-annotation.
@@ -229,6 +238,20 @@ pub struct TimingSimConfig {
 
 fn default_sdf_corner() -> String {
     "typ".to_string()
+}
+
+/// Maps GPIO indices to netlist port names for designs with non-standard naming.
+///
+/// Keys are GPIO index strings ("0", "1", etc.), values are port names
+/// as they appear in the netlist (matching `dbg_fmt_pin()` output).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PortMapping {
+    /// GPIO index → input port name (external signals entering the design)
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
+    /// GPIO index → output port name (signals driven by the design)
+    #[serde(default)]
+    pub outputs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

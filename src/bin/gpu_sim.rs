@@ -16,8 +16,9 @@ use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
 use gem::flatten::FlattenedScriptV1;
 use gem::staging::build_staged_aigs;
 use gem::pe::Partition;
-use gem::testbench::{CppSpiFlash, TestbenchConfig};
+use gem::testbench::{CppSpiFlash, PortMapping, TestbenchConfig};
 use netlistdb::{GeneralPinName, NetlistDB};
+use indexmap::IndexSet;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -906,25 +907,45 @@ fn clear_bit(state: &mut [u32], pos: u32) {
 }
 
 /// Build GPIO-to-state-buffer mapping from AIG + FlattenedScript.
+///
+/// When `port_mapping` is provided, maps GPIO indices to port names explicitly
+/// (for designs like ChipFlow that use named ports instead of gpio_in[N]/gpio_out[N]).
+/// Falls back to parsing gpio_in[N]/gpio_out[N] from pin names when no mapping given.
 fn build_gpio_mapping(
     aig: &AIG,
     netlistdb: &NetlistDB,
     script: &FlattenedScriptV1,
+    port_mapping: Option<&PortMapping>,
 ) -> GpioMapping {
     let mut input_bits: HashMap<usize, u32> = HashMap::new();
     let mut output_bits: HashMap<usize, u32> = HashMap::new();
     let mut posedge_flag_bits: Vec<u32> = Vec::new();
     let mut negedge_flag_bits: Vec<u32> = Vec::new();
 
-    // Map input ports (gpio_in) → state buffer positions
+    // Build reverse lookup: port_name → gpio_index for port_mapping mode
+    let input_name_to_gpio: HashMap<String, usize> = port_mapping
+        .map(|pm| pm.inputs.iter()
+            .filter_map(|(k, v)| k.parse::<usize>().ok().map(|idx| (v.clone(), idx)))
+            .collect())
+        .unwrap_or_default();
+    let output_name_to_gpio: HashMap<String, usize> = port_mapping
+        .map(|pm| pm.outputs.iter()
+            .filter_map(|(k, v)| k.parse::<usize>().ok().map(|idx| (v.clone(), idx)))
+            .collect())
+        .unwrap_or_default();
+
+    // Map input ports → state buffer positions
     for (aigpin_idx, driv) in aig.drivers.iter().enumerate() {
         match driv {
             DriverType::InputPort(pinid) => {
                 let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
-                // Parse gpio_in[N] from the pin name
-                if let Some(gpio_idx) = parse_gpio_index(&pin_name, "gpio_in") {
+                // Try port_mapping first, then fall back to gpio_in[N] parsing
+                let gpio_idx = input_name_to_gpio.get(&pin_name).copied()
+                    .or_else(|| parse_gpio_index(&pin_name, "gpio_in"));
+                if let Some(gpio_idx) = gpio_idx {
                     if let Some(&pos) = script.input_map.get(&aigpin_idx) {
                         input_bits.insert(gpio_idx, pos);
+                        clilog::debug!("input[{}] = pin '{}' → state pos {}", gpio_idx, pin_name, pos);
                     }
                 }
             }
@@ -935,7 +956,6 @@ fn build_gpio_mapping(
                     } else {
                         negedge_flag_bits.push(pos);
                     }
-                    // Also check if this is associated with a GPIO
                     let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
                     clilog::debug!("ClockFlag aigpin={} pin={} negedge={} pos={}",
                                    aigpin_idx, pin_name, is_negedge, pos);
@@ -945,31 +965,32 @@ fn build_gpio_mapping(
         }
     }
 
-    // Map output ports (gpio_out) → state buffer positions
-    // Search by name across all cell-0 pins (direction conventions vary by netlist)
+    // Map output ports → state buffer positions
     for i in netlistdb.cell2pin.iter_set(0) {
         let pin_name = netlistdb.pinnames[i].dbg_fmt_pin();
-        if let Some(gpio_idx) = parse_gpio_index(&pin_name, "gpio_out") {
+        // Try port_mapping first, then fall back to gpio_out[N] parsing
+        let gpio_idx = output_name_to_gpio.get(&pin_name).copied()
+            .or_else(|| parse_gpio_index(&pin_name, "gpio_out"));
+        if let Some(gpio_idx) = gpio_idx {
             let aigpin_iv = aig.pin2aigpin_iv[i];
             if aigpin_iv == usize::MAX {
-                clilog::info!("gpio_out[{}] pin {} has no AIG connection (usize::MAX)", gpio_idx, i);
+                clilog::info!("output[{}] pin '{}' has no AIG connection (usize::MAX)", gpio_idx, pin_name);
                 continue;
             }
             if aigpin_iv <= 1 {
-                clilog::info!("gpio_out[{}] pin {} is constant (aigpin_iv={})", gpio_idx, i, aigpin_iv);
+                clilog::info!("output[{}] pin '{}' is constant (aigpin_iv={})", gpio_idx, pin_name, aigpin_iv);
                 continue;
             }
-            // output_map is keyed by idx_iv (with inversion bit), same as pin2aigpin_iv
             if let Some(&pos) = script.output_map.get(&aigpin_iv) {
                 output_bits.insert(gpio_idx, pos);
+                clilog::debug!("output[{}] = pin '{}' → state pos {}", gpio_idx, pin_name, pos);
             } else if let Some(&pos) = script.output_map.get(&(aigpin_iv ^ 1)) {
-                // Try with flipped inversion bit
                 output_bits.insert(gpio_idx, pos);
-                clilog::debug!("gpio_out[{}] found with flipped inv bit, aigpin_iv={}→{}",
-                              gpio_idx, aigpin_iv, aigpin_iv ^ 1);
+                clilog::debug!("output[{}] = pin '{}' → state pos {} (flipped inv)",
+                              gpio_idx, pin_name, pos);
             } else {
-                clilog::info!("gpio_out[{}] pin {} aigpin_iv={} (aigpin={}) not in output_map (dir={:?})",
-                              gpio_idx, i, aigpin_iv, aigpin_iv >> 1, netlistdb.pindirect[i]);
+                clilog::info!("output[{}] pin '{}' aigpin_iv={} (aigpin={}) not in output_map (dir={:?})",
+                              gpio_idx, pin_name, aigpin_iv, aigpin_iv >> 1, netlistdb.pindirect[i]);
             }
         }
     }
@@ -1137,6 +1158,7 @@ fn build_falling_edge_ops(
     clock_gpio: usize,
     reset_gpio: usize,
     reset_val: u8,
+    constant_inputs: &HashMap<String, u8>,
 ) -> Vec<BitOp> {
     let mut ops = Vec::new();
     // Clock = 0
@@ -1151,6 +1173,14 @@ fn build_falling_edge_ops(
     for &pos in &gpio_map.posedge_flag_bits {
         ops.push(BitOp { position: pos, value: 0 });
     }
+    // Constant inputs
+    for (gpio_str, val) in constant_inputs {
+        if let Ok(gpio_idx) = gpio_str.parse::<usize>() {
+            if let Some(&pos) = gpio_map.input_bits.get(&gpio_idx) {
+                ops.push(BitOp { position: pos, value: *val as u32 });
+            }
+        }
+    }
     ops
 }
 
@@ -1162,6 +1192,7 @@ fn build_rising_edge_ops(
     clock_gpio: usize,
     reset_gpio: usize,
     reset_val: u8,
+    constant_inputs: &HashMap<String, u8>,
 ) -> Vec<BitOp> {
     let mut ops = Vec::new();
     // Clock = 1
@@ -1175,6 +1206,14 @@ fn build_rising_edge_ops(
     // Negedge flag = 0
     for &pos in &gpio_map.negedge_flag_bits {
         ops.push(BitOp { position: pos, value: 0 });
+    }
+    // Constant inputs
+    for (gpio_str, val) in constant_inputs {
+        if let Ok(gpio_idx) = gpio_str.parse::<usize>() {
+            if let Some(&pos) = gpio_map.input_bits.get(&gpio_idx) {
+                ops.push(BitOp { position: pos, value: *val as u32 });
+            }
+        }
     }
     ops
 }
@@ -1224,6 +1263,180 @@ fn create_ops_buffer(device: &metal::Device, ops: &[BitOp]) -> metal::Buffer {
 
 // ── CPU baseline for verification ────────────────────────────────────────────
 
+/// Direct AIG evaluator: evaluates all AIG pins by traversing the AND-gate
+/// tree directly, bypassing the boomerang/FlattenedScript entirely.
+/// Returns a map from AIG pin → value (0 or 1).
+///
+/// This is used to diagnose whether the AIG construction is correct
+/// (if direct eval matches FlattenedScript → bug is in AIG; if they differ → bug in flattening).
+fn eval_aig_direct(
+    aig: &AIG,
+    input_state: &[u32],
+    script: &FlattenedScriptV1,
+) -> Vec<u8> {
+    let mut pin_values = vec![0u8; aig.num_aigpins + 1];
+    // pin 0 = constant 0 (Tie0)
+
+    // Initialize all primary inputs from input_state using input_map
+    for (&aigpin, &pos) in &script.input_map {
+        let word = (pos / 32) as usize;
+        let bit = pos & 31;
+        if word < input_state.len() {
+            pin_values[aigpin] = ((input_state[word] >> bit) & 1) as u8;
+        }
+    }
+
+    // Topological traversal using topo_traverse_generic
+    // endpoints=None means traverse ALL AIG pins
+    // is_primary_input = set of pins that are inputs (InputPort, InputClockFlag, DFF Q, SRAM)
+    let primary_input_set: indexmap::IndexSet<usize> = script.input_map.keys().copied().collect();
+    let order = aig.topo_traverse_generic(None, Some(&primary_input_set));
+
+    // Evaluate each AND gate in topological order
+    for &pin in &order {
+        if primary_input_set.contains(&pin) {
+            // Already initialized from input_state
+            continue;
+        }
+        if let DriverType::AndGate(a_iv, b_iv) = aig.drivers[pin] {
+            let a_pin = a_iv >> 1;
+            let a_inv = (a_iv & 1) as u8;
+            let b_pin = b_iv >> 1;
+            let b_inv = (b_iv & 1) as u8;
+            let a_val = if a_pin == 0 { 0 } else { pin_values[a_pin] ^ a_inv };
+            let b_val = if b_pin == 0 { 0 } else { pin_values[b_pin] ^ b_inv };
+            pin_values[pin] = a_val & b_val;
+        }
+        // Non-AndGate, non-primary-input pins (shouldn't happen in traversal) stay 0
+    }
+
+    pin_values
+}
+
+/// Compare direct AIG evaluation with FlattenedScript output at a given tick.
+/// Prints diagnostic information about any mismatches.
+fn compare_aig_vs_flattened(
+    aig: &AIG,
+    input_state: &[u32],
+    output_state: &[u32],
+    script: &FlattenedScriptV1,
+    state_size: usize,
+    tick: usize,
+    netlistdb: Option<&NetlistDB>,
+) {
+    let pin_values = eval_aig_direct(aig, input_state, script);
+
+    // Compare DFF D inputs: direct AIG eval vs FlattenedScript output
+    let mut dff_mismatch_count = 0;
+    let mut dff_match_count = 0;
+    let mut dff_en_active_count = 0;
+    let mut dff_d_ones_direct = 0;
+    let mut dff_d_ones_flat = 0;
+    let mut first_mismatches: Vec<String> = Vec::new();
+
+    for (_cellid, dff) in aig.dffs.iter() {
+        let d_pin = dff.d_iv >> 1;
+        let d_inv = (dff.d_iv & 1) as u8;
+        let en_pin = dff.en_iv >> 1;
+        let en_inv = (dff.en_iv & 1) as u8;
+
+        // Direct AIG evaluation
+        let d_val_direct = if d_pin == 0 { 0 } else { pin_values[d_pin] ^ d_inv };
+        let en_val_direct = if en_pin == 0 { 0 } else { pin_values[en_pin] ^ en_inv };
+
+        if en_val_direct != 0 {
+            dff_en_active_count += 1;
+        }
+        if d_val_direct != 0 {
+            dff_d_ones_direct += 1;
+        }
+
+        // FlattenedScript result: read from output_state
+        if let Some(&pos) = script.output_map.get(&dff.d_iv) {
+            let word = (pos / 32) as usize;
+            let bit = pos & 31;
+            let flat_val = if word < state_size {
+                ((output_state[word] >> bit) & 1) as u8
+            } else {
+                0
+            };
+            if flat_val != 0 {
+                dff_d_ones_flat += 1;
+            }
+
+            if d_val_direct != flat_val {
+                dff_mismatch_count += 1;
+                if first_mismatches.len() < 10 {
+                    first_mismatches.push(format!(
+                        "DFF d_iv={} pos={} en={}: direct={} flat={} (d_pin={} en_pin={} en_val={})",
+                        dff.d_iv, pos, dff.en_iv, d_val_direct, flat_val, d_pin, en_pin, en_val_direct
+                    ));
+                }
+            } else {
+                dff_match_count += 1;
+            }
+        }
+    }
+
+    // Also compare primary outputs
+    let mut po_mismatch_count = 0;
+    for (&aigpin_iv, &pos) in &script.output_map {
+        let pin = aigpin_iv >> 1;
+        let inv = (aigpin_iv & 1) as u8;
+        let direct_val = if pin == 0 { 0u8 } else { pin_values[pin] ^ inv };
+
+        let word = (pos / 32) as usize;
+        let bit = pos & 31;
+        let flat_val = if word < state_size {
+            ((output_state[word] >> bit) & 1) as u8
+        } else {
+            0
+        };
+
+        if direct_val != flat_val {
+            po_mismatch_count += 1;
+        }
+    }
+
+    eprintln!("=== AIG vs FlattenedScript comparison at tick {} ===", tick);
+    eprintln!("  DFFs: {} match, {} MISMATCH (out of {} total)",
+        dff_match_count, dff_mismatch_count, aig.dffs.len());
+    eprintln!("  DFF en_active={}, d_ones_direct={}, d_ones_flat={}",
+        dff_en_active_count, dff_d_ones_direct, dff_d_ones_flat);
+    eprintln!("  All output_map entries: {} mismatches", po_mismatch_count);
+    for m in &first_mismatches {
+        eprintln!("  MISMATCH: {}", m);
+    }
+
+    // Also check: how many DFF Q values are 1 in the input state?
+    let mut q_ones = 0;
+    let mut q_hash: u64 = 0;
+    let mut q_one_entries: Vec<(usize, u32, String)> = Vec::new(); // (cellid, pos, name)
+    for (&cellid, dff) in aig.dffs.iter() {
+        if let Some(&pos) = script.input_map.get(&dff.q) {
+            let word = (pos / 32) as usize;
+            let bit = pos & 31;
+            if word < input_state.len() && ((input_state[word] >> bit) & 1) != 0 {
+                q_ones += 1;
+                let name = if let Some(ndb) = netlistdb {
+                    format!("{:?}", ndb.cellnames[cellid])
+                } else {
+                    format!("cell_{}", cellid)
+                };
+                q_one_entries.push((cellid, pos, name));
+                q_hash = q_hash.wrapping_mul(6364136223846793005).wrapping_add(pos as u64);
+            }
+        }
+    }
+    q_one_entries.sort_by_key(|&(cellid, _, _)| cellid);
+    eprintln!("  DFF Q values = 1 in input_state: {}/{} (hash=0x{:016X})", q_ones, aig.dffs.len(), q_hash);
+    if q_ones <= 100 {
+        for (cellid, pos, name) in &q_one_entries {
+            eprintln!("  Q=1: cell {} pos={} = {}", cellid, pos, name);
+        }
+    }
+}
+
 /// CPU prototype partition executor (from metal_test.rs).
 /// Used for --check-with-cpu verification.
 fn simulate_block_v1(
@@ -1231,6 +1444,25 @@ fn simulate_block_v1(
     input_state: &[u32],
     output_state: &mut [u32],
     sram_data: &mut [u32],
+) {
+    simulate_block_v1_inner(script, input_state, output_state, sram_data, false);
+}
+
+fn simulate_block_v1_diag(
+    script: &[u32],
+    input_state: &[u32],
+    output_state: &mut [u32],
+    sram_data: &mut [u32],
+) {
+    simulate_block_v1_inner(script, input_state, output_state, sram_data, true);
+}
+
+fn simulate_block_v1_inner(
+    script: &[u32],
+    input_state: &[u32],
+    output_state: &mut [u32],
+    sram_data: &mut [u32],
+    diag: bool,
 ) {
     use gem::aigpdk::AIGPDK_SRAM_SIZE;
     let mut script_pi = 0;
@@ -1403,6 +1635,39 @@ fn simulate_block_v1(
             clken_perm[i] ^= script[script_pi + i * 4];
             writeouts[i] ^= script[script_pi + i * 4 + 2];
         }
+
+        if diag {
+            // Count non-zero clken_perm bits across all DFF positions
+            let clken_nonzero: usize = clken_perm[..num_ios as usize].iter()
+                .map(|c| c.count_ones() as usize).sum();
+            let clken_set0_all_ones: usize = (0..num_ios as usize)
+                .filter(|&i| script[script_pi + i * 4 + 1] == u32::MAX).count();
+            let clken_set0_zero: usize = (0..num_ios as usize)
+                .filter(|&i| script[script_pi + i * 4 + 1] == 0).count();
+            let changed_bits: usize = (0..num_ios as usize).map(|i| {
+                let old_wo = input_state[(io_offset as usize + i)];
+                let clken = clken_perm[i];
+                let wo = (old_wo & !clken) | (writeouts[i] & clken);
+                (old_wo ^ wo).count_ones() as usize
+            }).sum();
+            eprintln!("  DIAG partition: num_ios={}, io_offset={}, clken_nonzero_bits={}, set0_all={}, set0_zero={}, changed_bits={}",
+                num_ios, io_offset, clken_nonzero, clken_set0_all_ones, clken_set0_zero, changed_bits);
+            // Show first few positions with non-zero clken_perm
+            let mut shown = 0;
+            for i in 0..num_ios as usize {
+                if clken_perm[i] != 0 && shown < 3 {
+                    let set0 = script[script_pi + i * 4 + 1];
+                    let inv = script[script_pi + i * 4];
+                    eprintln!("    clken_perm[{}]=0x{:08X} (set0=0x{:08X}, inv=0x{:08X}, writeout=0x{:08X})",
+                        i, clken_perm[i], set0, inv, writeouts[i]);
+                    shown += 1;
+                }
+            }
+            // Also show posedge flag in input_state
+            eprintln!("    input_state[0]=0x{:08X} (bit0=posedge_flag={})",
+                input_state[0], input_state[0] & 1);
+        }
+
         script_pi += 256 * 4;
 
         for i in 0..num_ios {
@@ -1543,7 +1808,7 @@ fn main() {
 
     // ── Build GPIO mapping ───────────────────────────────────────────────
 
-    let gpio_map = build_gpio_mapping(&aig, &netlistdb, &script);
+    let gpio_map = build_gpio_mapping(&aig, &netlistdb, &script, config.port_mapping.as_ref());
 
     // Verify we found the expected GPIO pins
     let clock_gpio = config.clock_gpio;
@@ -1570,6 +1835,26 @@ fn main() {
             if gpio_map.output_bits.contains_key(&gpio) {
                 clilog::info!("Flash D{} output GPIO {} -> state pos {}", i, gpio, gpio_map.output_bits[&gpio]);
             }
+        }
+    }
+
+    // ── Diagnostic: resolve key internal signals for debugging ──────────
+
+    let diag_signals = [
+        "fetch_enable",
+        "ibus__cyc",
+        "ibus__stb",
+        "dbus__cyc",
+        "spiflash",
+        "flash_clk",
+        "flash_csn",
+    ];
+    for sig in &diag_signals {
+        let pos = resolve_signal_pos(&aig, &netlistdb, &script, sig);
+        if pos != 0xFFFFFFFF {
+            clilog::info!("Diagnostic signal '{}' → output state pos {}", sig, pos);
+        } else {
+            clilog::debug!("Diagnostic signal '{}' not found in output_map", sig);
         }
     }
 
@@ -1710,10 +1995,10 @@ fn main() {
 
     // Build initial falling/rising edge BitOp arrays (no flash_din — handled by GPU)
     let fall_ops = build_falling_edge_ops(
-        &gpio_map, clock_gpio, reset_gpio, reset_val_active,
+        &gpio_map, clock_gpio, reset_gpio, reset_val_active, &config.constant_inputs,
     );
     let rise_ops = build_rising_edge_ops(
-        &gpio_map, clock_gpio, reset_gpio, reset_val_active,
+        &gpio_map, clock_gpio, reset_gpio, reset_val_active, &config.constant_inputs,
     );
     let fall_ops_len = fall_ops.len();
     let rise_ops_len = rise_ops.len();
@@ -2002,6 +2287,8 @@ fn main() {
     let mut cpu_check_mismatches: usize = 0;
     let cpu_check_max_ticks = if args.check_with_cpu { 500 } else { 0 };
 
+    let mut post_reset_state_snapshot: Option<Vec<u32>> = None;
+
     let mut tick: usize = 0;
     while tick < max_ticks {
         let batch = if args.check_with_cpu && tick < cpu_check_max_ticks {
@@ -2201,19 +2488,44 @@ fn main() {
             }
 
             // CPU simulate(rise): run all partitions
+            let use_diag = tick == reset_cycles; // first tick after reset release
+            if use_diag {
+                eprintln!("=== DIAG: Rising-edge simulate at tick {} (first post-reset) ===", tick);
+                eprintln!("  input_state[0]=0x{:08X} (bit0=posedge={})", cpu_states[0], cpu_states[0] & 1);
+            }
             for stage_i in 0..num_major_stages {
                 for block_i in 0..num_blocks {
                     let start = script.blocks_start[stage_i * num_blocks + block_i];
                     let end = script.blocks_start[stage_i * num_blocks + block_i + 1];
                     if start == end { continue; }
                     let (input_half, output_half) = cpu_states.split_at_mut(state_size);
-                    simulate_block_v1(
-                        &script.blocks_data[start..end],
-                        input_half,
-                        output_half,
-                        &mut cpu_sram,
-                    );
+                    if use_diag && block_i < 3 {
+                        eprintln!("  Block {}/{} (stage {}): script range {}..{} ({} words)",
+                            block_i, num_blocks, stage_i, start, end, end - start);
+                        simulate_block_v1_diag(
+                            &script.blocks_data[start..end],
+                            input_half,
+                            output_half,
+                            &mut cpu_sram,
+                        );
+                    } else {
+                        simulate_block_v1(
+                            &script.blocks_data[start..end],
+                            input_half,
+                            output_half,
+                            &mut cpu_sram,
+                        );
+                    }
                 }
+            }
+
+            // Direct AIG evaluation comparison at first few post-reset ticks
+            if tick >= reset_cycles && tick <= reset_cycles + 5 {
+                let (input_half, output_half) = cpu_states.split_at(state_size);
+                compare_aig_vs_flattened(
+                    &aig, input_half, output_half, &script, state_size, tick,
+                    Some(&netlistdb),
+                );
             }
 
             // Compare GPU input with CPU input (should match after state_prep+flash_din)
@@ -2283,6 +2595,22 @@ fn main() {
             } else if tick <= reset_cycles + 5 || tick % 50 == 0 {
                 eprintln!("CHECK-WITH-CPU tick {}: OK (state_size={}, sram_size={})",
                     tick, state_size, script.sram_storage_size);
+            }
+
+            // Per-tick output state change tracking
+            if tick >= reset_cycles.saturating_sub(2) && tick <= reset_cycles + 15 {
+                let gpu_output = &gpu_states[state_size..2*state_size];
+                let changed_words: usize = gpu_output.iter().zip(cpu_output.iter())
+                    .filter(|(a, b)| a != b).count();
+                let output_bits_set: usize = gpu_output.iter()
+                    .map(|w| w.count_ones() as usize).sum();
+                let changed_from_prev: usize = if let Some(ref snap) = post_reset_state_snapshot {
+                    gpu_output.iter().zip(snap.iter())
+                        .map(|(a, b)| (a ^ b).count_ones() as usize).sum()
+                } else { 0 };
+                eprintln!("TICK-TRACE {}: output_bits_set={}, changed_from_prev={}",
+                    tick, output_bits_set, changed_from_prev);
+                post_reset_state_snapshot = Some(gpu_output.to_vec());
             }
         }
 
@@ -2450,6 +2778,13 @@ fn main() {
         }
         if tick >= reset_cycles && tick - batch < reset_cycles {
             clilog::info!("Reset released at tick {}", reset_cycles);
+            // Snapshot output state just after reset for change detection
+            if post_reset_state_snapshot.is_none() {
+                let st = unsafe {
+                    std::slice::from_raw_parts(states_buffer.contents() as *const u32, 2 * state_size)
+                };
+                post_reset_state_snapshot = Some(st[state_size..2*state_size].to_vec());
+            }
         }
     }
 
@@ -2473,6 +2808,41 @@ fn main() {
 
     let sim_elapsed = sim_start.elapsed();
     clilog::finish!(timer_sim);
+
+    // ── State buffer diagnostics ─────────────────────────────────────────
+
+    unsafe {
+        let st = std::slice::from_raw_parts(states_buffer.contents() as *const u32, 2 * state_size);
+        let input_state = &st[..state_size];
+        let output_state = &st[state_size..2*state_size];
+        let in_nonzero = input_state.iter().filter(|&&w| w != 0).count();
+        let out_nonzero = output_state.iter().filter(|&&w| w != 0).count();
+        let in_popcount: u32 = input_state.iter().map(|w| w.count_ones()).sum();
+        let out_popcount: u32 = output_state.iter().map(|w| w.count_ones()).sum();
+        println!();
+        println!("=== State Buffer Diagnostics ===");
+        println!("State size: {} words ({} bits)", state_size, state_size * 32);
+        println!("Input state:  {} non-zero words, {} bits set", in_nonzero, in_popcount);
+        println!("Output state: {} non-zero words, {} bits set", out_nonzero, out_popcount);
+        // Compare with post-reset snapshot if available
+        if let Some(ref snapshot) = post_reset_state_snapshot {
+            let mut changed_words = 0;
+            let mut changed_bits = 0u32;
+            for (i, (&cur, &snap)) in output_state.iter().zip(snapshot.iter()).enumerate() {
+                let diff = cur ^ snap;
+                if diff != 0 {
+                    changed_words += 1;
+                    changed_bits += diff.count_ones();
+                    if changed_words <= 10 {
+                        println!("  CHANGED output[{}]: 0x{:08X} → 0x{:08X} (diff=0x{:08X})",
+                            i, snap, cur, diff);
+                    }
+                }
+            }
+            println!("Output state changes since tick {}: {} words, {} bits changed",
+                config.reset_cycles + 1, changed_words, changed_bits);
+        }
+    }
 
     // ── Check GPU flash state for errors ─────────────────────────────────
 

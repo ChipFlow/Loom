@@ -1337,8 +1337,10 @@ fn run_programmatic_simulation(
     clilog::info!("Programmatic simulation: clock_gpio={}, reset_gpio={}, reset_active_high={}",
                   config.clock_gpio, config.reset_gpio, config.reset_active_high);
 
-    // Find GPIO pins
+    // Find GPIO pins (with port_mapping fallback for ChipFlow-style port names)
+    let port_mapping = config.port_mapping.as_ref();
     let find_gpio_in = |idx: usize| -> Option<usize> {
+        // First try standard gpio_in[N] naming
         let gpio_name = format!("gpio_in[{}]", idx);
         for pinid in 0..netlistdb.num_pins {
             if netlistdb.pin2cell[pinid] == 0 {
@@ -1348,16 +1350,45 @@ fn run_programmatic_simulation(
                 }
             }
         }
+        // Fall back to port_mapping if available
+        if let Some(pm) = port_mapping {
+            let key = idx.to_string();
+            if let Some(mapped_name) = pm.inputs.get(&key) {
+                for pinid in 0..netlistdb.num_pins {
+                    if netlistdb.pin2cell[pinid] == 0 {
+                        let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                        if pin_name.contains(mapped_name) {
+                            return Some(pinid);
+                        }
+                    }
+                }
+            }
+        }
         None
     };
 
     let find_gpio_out = |idx: usize| -> Option<usize> {
+        // First try standard gpio_out[N] naming
         let gpio_name = format!("gpio_out[{}]", idx);
         for pinid in 0..netlistdb.num_pins {
             if netlistdb.pin2cell[pinid] == 0 {
                 let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
                 if pin_name.contains(&gpio_name) || pin_name.ends_with(&format!("gpio_out:{}", idx)) {
                     return Some(pinid);
+                }
+            }
+        }
+        // Fall back to port_mapping if available
+        if let Some(pm) = port_mapping {
+            let key = idx.to_string();
+            if let Some(mapped_name) = pm.outputs.get(&key) {
+                for pinid in 0..netlistdb.num_pins {
+                    if netlistdb.pin2cell[pinid] == 0 {
+                        let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                        if pin_name.contains(mapped_name) {
+                            return Some(pinid);
+                        }
+                    }
                 }
             }
         }
@@ -1370,6 +1401,18 @@ fn run_programmatic_simulation(
 
     clilog::info!("Clock input pin: {} (gpio_in[{}])", clock_pin, config.clock_gpio);
     clilog::info!("Reset input pin: {} (gpio_in[{}])", reset_pin, config.reset_gpio);
+
+    // Resolve constant inputs
+    let constant_input_pins: Vec<(usize, u8)> = config.constant_inputs.iter()
+        .filter_map(|(gpio_str, &val)| {
+            gpio_str.parse::<usize>().ok().and_then(|gpio_idx| {
+                find_gpio_in(gpio_idx).map(|pin| {
+                    clilog::info!("Constant input: gpio[{}] -> pin {} = {}", gpio_idx, pin, val);
+                    (pin, val)
+                })
+            })
+        })
+        .collect();
 
     // Initialize flash model (using C++ model from chipflow-lib)
     let mut flash: Option<CppSpiFlash> = if let Some(ref flash_cfg) = config.flash {
@@ -1419,6 +1462,21 @@ fn run_programmatic_simulation(
                       flash_clk_out, flash_csn_out, flash_d_out, flash_d_in);
         clilog::info!("Flash OEB pins: clk_oeb={:?}, csn_oeb={:?}",
                       flash_clk_oeb, flash_csn_oeb);
+        // Check AIG mappings for d_in pins — if they have entries, update_circ_from_aig will overwrite them
+        for (i, opt_pin) in flash_d_in.iter().enumerate() {
+            if let Some(pin) = opt_pin {
+                let aigpin_iv = aig.pin2aigpin_iv.get(*pin).copied().unwrap_or(usize::MAX);
+                let has_aig = aigpin_iv != usize::MAX;
+                let driver = if has_aig {
+                    let idx = aigpin_iv >> 1;
+                    let inv = (aigpin_iv & 1) != 0;
+                    format!("aigpin={} inv={} driver={:?}", idx, inv, aig.drivers.get(idx))
+                } else {
+                    "NO AIG MAPPING".to_string()
+                };
+                clilog::info!("  flash_d_in[{}] pin={}: {}", i, pin, driver);
+            }
+        }
     }
 
     // UART TX monitoring
@@ -1701,6 +1759,10 @@ fn run_programmatic_simulation(
     let reset_inactive_val = if config.reset_active_high { 0 } else { 1 };
 
     circ_state[reset_pin] = reset_active_val;
+    // Apply constant inputs
+    for &(pin, val) in &constant_input_pins {
+        circ_state[pin] = val;
+    }
     clilog::info!("Reset: setting gpio_in[{}] = {} (reset active)", config.reset_gpio, reset_active_val);
 
     // Initial evaluation (like CXXRTL's initial agent.step())
@@ -1781,8 +1843,8 @@ fn run_programmatic_simulation(
                     "Q" => pinid_q = pinid,
                     "CLK" => pinid_clk = pinid,
                     "DE" => pinid_de = pinid,
-                    "RESET_B" => pinid_reset_b = pinid,
-                    "SET_B" => pinid_set_b = pinid,
+                    "RESET_B" | "R" => pinid_reset_b = pinid,
+                    "SET_B" | "S" => pinid_set_b = pinid,
                     _ => {}
                 }
             }
@@ -1791,6 +1853,38 @@ fn run_programmatic_simulation(
             }
         }
     }
+    // Build debug signal tracker: map cell names to Q pin IDs for key signals
+    let debug_signals: Vec<(&str, usize)> = {
+        let target_cells = [
+            ("_286237_", "ibus_fsm"),          // soc.cpu.ibus_adapt.fsm_state
+            ("_286613_", "dbus_fsm"),          // soc.cpu.dbus_adapt.fsm_state
+            ("_304372_", "fl_fsm0"),           // soc.spiflash.ctrl.fsm_state[0]
+            ("_304373_", "fl_fsm1"),           // soc.spiflash.ctrl.fsm_state[1]
+            ("_304374_", "fl_fsm2"),           // soc.spiflash.ctrl.fsm_state[2]
+            ("_304375_", "fl_fsm3"),           // soc.spiflash.ctrl.fsm_state[3]
+            ("_287134_", "cpu_fsm0"),          // cpu controller FSM state[0]
+            ("_287135_", "cpu_fsm1"),          // cpu controller FSM state[1]
+            ("_287136_", "cpu_fsm2"),          // cpu controller FSM state[2]
+            ("_304353_", "fl_ack"),            // soc.spiflash.ctrl.wb_bus__ack
+            ("_303438_", "sram_ack"),          // soc.sram.wb_bus__ack
+            ("_290639_", "rst"),               // rst_n_sync.rst
+            ("_290640_", "rst_stg0"),          // rst_n_sync.stage0
+            ("_304354_", "dcnt0"),             // soc.spiflash.ctrl.i_data_count[0]
+            ("_304355_", "dcnt1"),             // soc.spiflash.ctrl.i_data_count[1]
+            ("_304356_", "dcnt2"),             // soc.spiflash.ctrl.i_data_count[2]
+        ];
+        let mut signals = Vec::new();
+        for &(_cellid, _pinid_d, pinid_q, _, _, _, _) in &dff_list {
+            let cell_name = format!("{:?}", netlistdb.cellnames[_cellid]);
+            for &(target, label) in &target_cells {
+                if cell_name.contains(target) {
+                    signals.push((label, pinid_q));
+                }
+            }
+        }
+        signals
+    };
+
     // Diagnostic: check how many DFFs are on the system clock vs other clocks
     let mut dffs_on_sysclk = 0usize;
     let mut dffs_off_sysclk = 0usize;
@@ -1881,6 +1975,7 @@ fn run_programmatic_simulation(
     let mut prev_flash_d_out: u8 = 0;
     let mut prev_flash_csn: bool = true;
 
+    let mut dff_prev_q: HashMap<usize, u8> = HashMap::new();
     for cycle in 0..max_cycles {
         // Apply reset polarity from config
         // reset_active_high=true: gpio=1 during reset, gpio=0 during run
@@ -1896,6 +1991,10 @@ fn run_programmatic_simulation(
                          if is_reset { "RESET" } else { "RUN" });
         }
         circ_state[reset_pin] = new_reset;
+        // Apply constant inputs every cycle
+        for &(pin, val) in &constant_input_pins {
+            circ_state[pin] = val;
+        }
 
         // === TICK START (matches CXXRTL tick lambda) ===
         //
@@ -1944,7 +2043,7 @@ fn run_programmatic_simulation(
                     }
                 }
             }
-            (clk, current_csn, current_d_out)
+            (clk, current_csn, current_d_out, d_in)
         };
 
         // 1. Clock LOW (falling edge)
@@ -1958,15 +2057,7 @@ fn run_programmatic_simulation(
         // Pass in_reset flag to prevent spurious flash activity during reset
         let in_reset = cycle < reset_cycles;
         if let Some(ref mut fl) = flash {
-            let (clk, csn, d_out) = step_flash(fl, &mut circ_state, in_reset, &mut prev_flash_d_out, &mut prev_flash_csn);
-            // Debug: show flash control signals periodically
-            let clk_oeb = flash_clk_oeb.map(|p| circ_state[p]).unwrap_or(255);
-            let csn_oeb = flash_csn_oeb.map(|p| circ_state[p]).unwrap_or(255);
-            if cycle <= 5 || cycle == reset_cycles || cycle == reset_cycles + 1 || cycle == reset_cycles + 10
-               || cycle == reset_cycles + 100 || cycle == reset_cycles + 1000 {
-                clilog::info!("cycle {}: flash clk={}, csn={}, d_out={:04b}, clk_oeb={}, csn_oeb={}",
-                             cycle, clk, csn, d_out, clk_oeb, csn_oeb);
-            }
+            step_flash(fl, &mut circ_state, in_reset, &mut prev_flash_d_out, &mut prev_flash_csn);
         }
 
         // 3. Capture DFF CLK, D, and DE states BEFORE setting clock HIGH.
@@ -2003,6 +2094,11 @@ fn run_programmatic_simulation(
             let prev_clk = dff_prev_clk[i];
 
             // Check async reset (active low) - always applies regardless of clock
+            // Both AIGPDK and SKY130 .lib define standard behavior:
+            //   AIGPDK: clear="(!R)", preset="(!S)"  → R=0 clears Q=0, S=0 sets Q=1
+            //   SKY130: RESET_B=0 → Q=0, SET_B=0 → Q=1
+            // Note: AIGPDK's aigpdk.v has a bug (internal double-inversion swaps R/S),
+            // but the .lib is correct and is what the synthesis tool used.
             if pinid_reset_b != usize::MAX && circ_state[pinid_reset_b] == 0 {
                 if circ_state[pinid_q] != 0 {
                     circ_state[pinid_q] = 0;
@@ -2030,8 +2126,60 @@ fn run_programmatic_simulation(
             }
         }
 
-        // Log DFF latch stats for first few cycles
-        if cycle <= 5 || (cycle == 10) {
+        // Count DFF Q value changes from previous cycle
+        let mut dff_q_changed = 0usize;
+        let mut changed_names: Vec<String> = Vec::new();
+        for &(cellid, _, pinid_q, _, _, _, _) in &dff_list {
+            let curr_q = circ_state[pinid_q];
+            let prev_q = dff_prev_q.get(&pinid_q).copied().unwrap_or(0);
+            if curr_q != prev_q {
+                dff_q_changed += 1;
+                if cycle >= 10 && cycle <= 20 && changed_names.len() < 30 {
+                    let cell_name = format!("{:?}", netlistdb.cellnames[cellid]);
+                    changed_names.push(format!("{}({}→{})", &cell_name[..cell_name.len().min(60)], prev_q, curr_q));
+                }
+            }
+        }
+        for &(_, _, pinid_q, _, _, _, _) in &dff_list {
+            dff_prev_q.insert(pinid_q, circ_state[pinid_q]);
+        }
+        if cycle % 10000 == 0 {
+            clilog::info!("cycle {}: dff_q_changed={}", cycle, dff_q_changed);
+        }
+        if !changed_names.is_empty() {
+            clilog::info!("  changed: {}", changed_names.join(", "));
+        }
+        // Dump DFF Q=1 positions for cross-simulator comparison
+        if cycle >= 10 && cycle <= 15 {
+            let mut q_ones = 0usize;
+            let mut q_one_cells: Vec<(usize, String)> = Vec::new();
+            for &(cellid, _, pinid_q, _, _, _, _) in &dff_list {
+                if circ_state[pinid_q] != 0 {
+                    q_ones += 1;
+                    let cell_name = format!("{:?}", netlistdb.cellnames[cellid]);
+                    q_one_cells.push((cellid, cell_name));
+                }
+            }
+            q_one_cells.sort_by_key(|&(id, _)| id);
+            clilog::info!("cycle {} Q=1 count: {}/{}", cycle, q_ones, dff_list.len());
+            if q_ones <= 100 {
+                for (cellid, name) in &q_one_cells {
+                    clilog::info!("  Q=1: cell {} = {}", cellid, name);
+                }
+            }
+        }
+        // Debug: print key signal values every cycle in the critical window
+        if cycle <= 20 || cycle % 10000 == 0 {
+            let vals: Vec<String> = debug_signals.iter()
+                .map(|&(label, pinid)| format!("{}={}", label, circ_state[pinid]))
+                .collect();
+            if !vals.is_empty() {
+                clilog::info!("cycle {} signals: {}", cycle, vals.join(" "));
+            }
+        }
+
+        // Log DFF latch stats for first few cycles and around reset release
+        if cycle <= 5 || (cycle >= 10 && cycle <= 15) || cycle == 20 || cycle == 50 || cycle == 100 {
             let dffs_no_edge = dff_list.len() - dffs_latched - dffs_in_reset;
             clilog::info!("cycle {}: dffs_latched={}, dffs_in_reset={}, no_edge={}",
                          cycle, dffs_latched, dffs_in_reset, dffs_no_edge);
@@ -2191,8 +2339,9 @@ fn run_programmatic_simulation(
         }
 
         // Progress logging
-        if cycle % 100000 == 0 && cycle > 0 {
-            clilog::info!("Cycle {} / {}", cycle, max_cycles);
+        if cycle % 10000 == 0 && cycle > 0 {
+            let tx_val = uart_tx_pin.map(|p| circ_state[p]).unwrap_or(255);
+            clilog::info!("Cycle {} / {} (uart_tx={}, uart_events={})", cycle, max_cycles, tx_val, uart_events.len());
         }
     }
 
@@ -2241,17 +2390,15 @@ fn main() {
         None
     };
 
-    // Determine netlist path from config or command line
-    let netlist_path = if let Some(ref cfg) = config {
+    // Determine netlist path: CLI positional arg overrides config
+    let netlist_path = if let Some(ref path) = args.netlist_verilog {
+        path.clone()
+    } else if let Some(ref cfg) = config {
         if let Some(ref path) = cfg.netlist_path {
             PathBuf::from(path)
-        } else if let Some(ref path) = args.netlist_verilog {
-            path.clone()
         } else {
             panic!("No netlist path provided (need --config with netlist_path or positional argument)");
         }
-    } else if let Some(ref path) = args.netlist_verilog {
-        path.clone()
     } else {
         panic!("No netlist path provided");
     };

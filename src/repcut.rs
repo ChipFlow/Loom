@@ -166,7 +166,7 @@ impl RCHyperGraph {
             staged.get_endpoint_group(aig, endpt_i).for_each_input(|i| {
                 tot += node_weights[i] / (num_fanouts_to_endpt[i] as f32)
             });
-            (tot + 0.5) as u64
+            ((tot + 0.5) as u64).max(1)
         }).collect();
 
         // println!("clusters: {:#?}, endpoint_weights: {:#?}", clusters, endpoint_weights);
@@ -224,7 +224,7 @@ impl RCHyperGraph {
         }
         
         let ctx = mt_kahypar::Context::builder()
-            .preset(mt_kahypar::Preset::Deterministic)
+            .preset(mt_kahypar::Preset::LargeK)
             .k(num_parts as i32)
             .epsilon(0.2)
             .objective(mt_kahypar::Objective::Soed)

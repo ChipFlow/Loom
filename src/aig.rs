@@ -492,6 +492,7 @@ impl AIG {
                 || (is_sky130_cell(celltype) && {
                     let ct = extract_cell_type(celltype);
                     ct.starts_with("buf") || ct.starts_with("clkbuf") || ct.starts_with("clkdlybuf")
+                        || ct.starts_with("lpflow_isobufsrc") || ct.starts_with("lpflow_inputiso")
                 });
 
             if !is_inv && !is_buf && celltype != "CKLNQD" {
@@ -776,6 +777,10 @@ impl AIG {
                                 _ => {}
                             }
                         }
+                        // AIGPDK DFFSR .lib says: clear="(!R)", preset="(!S)"
+                        // i.e. R=0 → Q=0 (clear), S=0 → Q=1 (preset)
+                        // Same active-low semantics as SKY130 RESET_B/SET_B.
+                        //   Q = AND(OR(Q_state, !S), R)
                         q_out = self.add_and_gate(q_out ^ 1, ap_s_iv) ^ 1;
                         q_out = self.add_and_gate(q_out, ap_r_iv);
                         self.pin2aigpin_iv[pinid] = q_out;
@@ -1171,8 +1176,8 @@ impl AIG {
                     let pin_name = netlistdb.pinnames[dep_pinid].1.as_str();
                     let prev = self.pin2aigpin_iv[dep_pinid];
                     match pin_name {
-                        "SET_B" => ap_s_iv = prev ^ 1,
-                        "RESET_B" => ap_r_iv = prev ^ 1,
+                        "SET_B" => ap_s_iv = prev,
+                        "RESET_B" => ap_r_iv = prev,
                         _ => {}
                     }
                 }
@@ -1395,6 +1400,11 @@ impl AIG {
                 }
                 let mut d_in = ap_d_iv;
 
+                // AIGPDK DFFSR .lib says: clear="(!R)", preset="(!S)"
+                // i.e. R=0 → Q=0 (clear), S=0 → Q=1 (preset)
+                // Same active-low semantics as SKY130 RESET_B/SET_B:
+                //   d_in = AND(OR(D, !S), R)
+                //   en_iv = OR(posedge, !R, !S)  (latch whenever R or S is active)
                 d_in = aig.add_and_gate(d_in ^ 1, ap_s_iv) ^ 1;
                 ap_clken_iv = aig.add_and_gate(ap_clken_iv ^ 1, ap_s_iv) ^ 1;
                 d_in = aig.add_and_gate(d_in, ap_r_iv);
@@ -1409,16 +1419,16 @@ impl AIG {
                 let mut ap_d_iv = 0;
                 let mut ap_clken_iv = 0;
                 let mut ap_enable_iv = 1; // For edfxtp (data enable)
-                let mut ap_s_iv = 1; // Active-high set (converted from active-low SET_B)
-                let mut ap_r_iv = 1; // Active-high reset (converted from active-low RESET_B)
+                let mut ap_s_iv = 1; // Default: no set (SET_B=1, inactive)
+                let mut ap_r_iv = 1; // Default: no reset (RESET_B=1, inactive)
 
                 for pinid in netlistdb.cell2pin.iter_set(cellid) {
                     let pin_iv = aig.pin2aigpin_iv[pinid];
                     match netlistdb.pinnames[pinid].1.as_str() {
                         "D" => ap_d_iv = pin_iv,
                         "DE" => ap_enable_iv = pin_iv, // Data enable for edfxtp
-                        "SET_B" => ap_s_iv = pin_iv ^ 1, // Convert active-low to active-high
-                        "RESET_B" => ap_r_iv = pin_iv ^ 1, // Convert active-low to active-high
+                        "SET_B" => ap_s_iv = pin_iv, // Active-low: AND/OR formulas handle it directly
+                        "RESET_B" => ap_r_iv = pin_iv, // Active-low: AND(d, RESET_B) → RESET_B=0 forces d=0
                         "CLK" => {
                             ap_clken_iv =
                                 aig.trace_clock_pin(netlistdb, pinid, false, false).unwrap()
@@ -1625,6 +1635,49 @@ impl AIG {
                     dp_clken_iv,
                     display.args_iv.len()
                 );
+            }
+        }
+
+        // Validate AIG: check for bad operand values
+        for (i, driver) in aig.drivers.iter().enumerate() {
+            if let DriverType::AndGate(a, b) = *driver {
+                if (a >> 1) > aig.num_aigpins {
+                    panic!("AIG validation: AND gate at pin {} has bad operand a={} (a>>1={}, num_aigpins={})", i, a, a >> 1, aig.num_aigpins);
+                }
+                if (b >> 1) > aig.num_aigpins {
+                    panic!("AIG validation: AND gate at pin {} has bad operand b={} (b>>1={}, num_aigpins={})", i, b, b >> 1, aig.num_aigpins);
+                }
+            }
+        }
+        // Validate DFF d_iv and en_iv
+        for (cellid, dff) in &aig.dffs {
+            if (dff.d_iv >> 1) > aig.num_aigpins {
+                use netlistdb::GeneralHierName;
+                let cell_name = netlistdb.cellnames[*cellid].dbg_fmt_hier();
+                panic!("AIG validation: DFF {} ({}) has bad d_iv={} (d_iv>>1={})", cellid, cell_name, dff.d_iv, dff.d_iv >> 1);
+            }
+            if (dff.en_iv >> 1) > aig.num_aigpins {
+                use netlistdb::GeneralHierName;
+                let cell_name = netlistdb.cellnames[*cellid].dbg_fmt_hier();
+                panic!("AIG validation: DFF {} ({}) has bad en_iv={} (en_iv>>1={})", cellid, cell_name, dff.en_iv, dff.en_iv >> 1);
+            }
+        }
+        // Validate primary_outputs
+        for &po_iv in &aig.primary_outputs {
+            if (po_iv >> 1) > aig.num_aigpins {
+                // Find which pin has this value
+                for pinid in 0..netlistdb.num_pins {
+                    if aig.pin2aigpin_iv[pinid] == po_iv {
+                        use netlistdb::GeneralHierName;
+                        let pin_name = netlistdb.pinnames[pinid].dbg_fmt_pin();
+                        let cellid = netlistdb.pin2cell[pinid];
+                        let cell_name = netlistdb.cellnames[cellid].dbg_fmt_hier();
+                        let cell_type = &netlistdb.celltypes[cellid];
+                        let dir = netlistdb.pindirect[pinid];
+                        panic!("AIG validation: primary output has bad value iv={} from pin {} (cell {} type={}, dir={:?})", po_iv, pin_name, cell_name, cell_type, dir);
+                    }
+                }
+                panic!("AIG validation: primary output has bad value iv={} (iv>>1={}) - could not find source pin", po_iv, po_iv >> 1);
             }
         }
 
