@@ -5,7 +5,7 @@
     "reset_cycles": 10,
     "num_cycles": 500000,
     "clock_period_ps": 40000,
-    "netlist_path": "tests/mcu_soc/build/gatelevel.gv",
+    "netlist_path": "tests/mcu_soc/build/top_synth.v",
     "flash": {
         "clk_gpio": 0,
         "csn_gpio": 1,
