@@ -46,6 +46,69 @@ def extract_pin_index(pin_entry, process: str) -> int:
         raise ValueError(f"Unknown pin format: {pin_entry} (type={type(pin_entry)})")
 
 
+def _build_port_mapping(
+    pins_lock: dict, process: str
+) -> tuple[dict[str, str], dict[str, str], dict[str, int]]:
+    """Build port_mapping (inputs/outputs) and constant_inputs from pins.lock.
+
+    Returns (input_map, output_map, constant_inputs) where maps are
+    {gpio_index_str: port_name}.
+
+    Port naming convention (ChipFlow harness):
+      - Bringup pins: io$<name>$i  (e.g. io$clk$i, io$rst_n$i)
+      - SoC signals:  io$soc_<port_name>$<dir>[bit] where dir is i/o
+    """
+    ports = pins_lock["port_map"]["ports"]
+    soc = ports["soc"]
+    core = ports["_core"]["bringup_pins"]
+
+    input_map: dict[str, str] = {}
+    output_map: dict[str, str] = {}
+    constant_inputs: dict[str, int] = {}
+
+    # Bringup pins (clk, rst_n) — always inputs
+    for name, pin_info in core.items():
+        if pin_info.get("type") in ("power",):
+            continue
+        pins = pin_info.get("pins", [])
+        if len(pins) == 1:
+            gpio = extract_pin_index(pins[0], process)
+            input_map[str(gpio)] = f"io${name}$i"
+
+    # SoC peripheral signals
+    def _add_signal(port_name: str, iomodel: dict, pins: list) -> None:
+        direction = iomodel.get("direction", "i")
+        width = iomodel.get("width", 1)
+        assert len(pins) == width, (
+            f"{port_name}: expected {width} pins, got {len(pins)}"
+        )
+        for bit, pin_entry in enumerate(pins):
+            gpio = extract_pin_index(pin_entry, process)
+            suffix = f"[{bit}]" if width > 1 else ""
+            gpio_str = str(gpio)
+            if direction in ("i", "io"):
+                input_map[gpio_str] = f"io${port_name}$i{suffix}"
+            if direction in ("o", "io"):
+                output_map[gpio_str] = f"io${port_name}$o{suffix}"
+
+    for periph_name, periph in sorted(soc.items()):
+        if not isinstance(periph, dict):
+            continue
+        for signal_name, signal_info in sorted(periph.items()):
+            if not isinstance(signal_info, dict) or "iomodel" not in signal_info:
+                continue
+            port_name = signal_info.get("port_name", f"{periph_name}_{signal_name}")
+            _add_signal(port_name, signal_info["iomodel"], signal_info["pins"])
+            # JTAG TRST should be held high (keeps TAP controller inactive)
+            if signal_name == "trst":
+                for pin_entry in signal_info["pins"]:
+                    gpio = extract_pin_index(pin_entry, process)
+                    constant_inputs[str(gpio)] = 1
+                    log.info(f"Constant input: gpio {gpio} = 1 (JTAG TRST)")
+
+    return input_map, output_map, constant_inputs
+
+
 def gen_sim_config(
     pins_lock: dict,
     *,
@@ -58,6 +121,7 @@ def gen_sim_config(
     reset_cycles: int = 10,
     output_events: str | None = None,
     events_reference: str | None = None,
+    port_mapping: bool = False,
 ) -> dict:
     """Generate sim_config.json content from pins.lock data."""
     process = pins_lock.get("process", "unknown")
@@ -138,6 +202,21 @@ def gen_sim_config(
     if events_reference:
         config["events_reference"] = events_reference
 
+    # Port mapping for named-port designs (e.g. ChipFlow io$signal$dir)
+    if port_mapping:
+        input_map, output_map, const_inputs = _build_port_mapping(
+            pins_lock, process
+        )
+        config["port_mapping"] = {
+            "inputs": input_map,
+            "outputs": output_map,
+        }
+        if const_inputs:
+            config["constant_inputs"] = const_inputs
+        log.info(f"Port mapping: {len(input_map)} inputs, "
+                 f"{len(output_map)} outputs, "
+                 f"{len(const_inputs)} constants")
+
     log.info(f"Process: {process}")
     log.info(f"Clock: gpio {clock_gpio}")
     log.info(f"Reset: gpio {reset_gpio} (active_high={reset_active_high})")
@@ -172,6 +251,9 @@ def main() -> int:
                         help="Path to write output events JSON")
     parser.add_argument("--events-reference", type=str, default=None,
                         help="Path to reference events JSON for verification")
+    parser.add_argument("--port-mapping", action="store_true",
+                        help="Generate port_mapping for named-port designs "
+                        "(ChipFlow io$signal$dir convention)")
 
     args = parser.parse_args()
 
@@ -188,6 +270,7 @@ def main() -> int:
         num_cycles=args.num_cycles,
         output_events=args.output_events,
         events_reference=args.events_reference,
+        port_mapping=args.port_mapping,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

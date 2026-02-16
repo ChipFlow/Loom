@@ -193,6 +193,142 @@ jobs:
           name: benchmark-results
           path: benchmark_results.txt
 
+  # Build mcu_soc design from source, synthesize to sky130, and run GPU simulation
+  mcu-soc-metal:
+    name: MCU SoC Metal Simulation
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM (for OpenMP support)
+        run: |
+          brew install llvm
+          echo "CC=/opt/homebrew/opt/llvm/bin/clang" >> $GITHUB_ENV
+          echo "CXX=/opt/homebrew/opt/llvm/bin/clang++" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-mcu-soc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mcu-soc-
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-mcu-soc-${{ hashFiles('designs/mcu_soc_sky130/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-mcu-soc-
+
+      - name: Cache SKY130 PDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: sky130-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+          restore-keys: |
+            sky130-pdk-
+
+      - name: Install volare and download SKY130 PDK
+        run: |
+          uv tool install volare
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Generate RTLIL and firmware from design source
+        run: |
+          cd designs/mcu_soc_sky130
+          uv sync
+          uv run chipflow silicon submit --dry-run
+          uv run chipflow software
+          # Verify outputs
+          test -f build/mcu_soc_sky130.il || { echo "RTLIL not generated"; exit 1; }
+          test -f build/software/software.bin || { echo "Firmware not generated"; exit 1; }
+
+      - name: Run SKY130 synthesis (yowasp-yosys)
+        timeout-minutes: 10
+        run: |
+          mkdir -p tests/mcu_soc/build
+          uv run scripts/local_synth.py designs/mcu_soc_sky130 tests/mcu_soc/build/
+          # Verify SRAM macros are preserved
+          SRAM_COUNT=$(grep -c CF_SRAM_1024x32 tests/mcu_soc/build/top_synth.v || true)
+          echo "CF_SRAM_1024x32 instances: $SRAM_COUNT"
+          if [ "$SRAM_COUNT" -eq 0 ]; then
+            echo "ERROR: No SRAM macros found - synthesis may have flattened them"
+            exit 1
+          fi
+
+      - name: Generate sim_config.json
+        run: |
+          python3 scripts/gen_sim_config.py \
+            designs/mcu_soc_sky130/pins.lock tests/mcu_soc/ \
+            --netlist tests/mcu_soc/build/top_synth.v \
+            --firmware designs/mcu_soc_sky130/build/software/software.bin \
+            --port-mapping
+
+      - name: Compile gemparts
+        timeout-minutes: 10
+        run: |
+          cargo run --release --features metal --bin cut_map_interactive -- \
+            tests/mcu_soc/build/top_synth.v tests/mcu_soc/build/result_sky130.gemparts \
+            --top-module top
+
+      - name: Run GPU simulation (100K ticks)
+        timeout-minutes: 5
+        run: |
+          cargo run --release --features metal --bin gpu_sim -- \
+            --config tests/mcu_soc/sim_config.json --top-module top \
+            --max-cycles 100000 \
+            tests/mcu_soc/build/top_synth.v tests/mcu_soc/build/result_sky130.gemparts \
+            2>&1 | tee gpu_sim_output.txt
+
+      - name: Verify UART boot output
+        run: |
+          if grep -q "nyaa" gpu_sim_output.txt; then
+            echo "MCU SoC booted successfully - UART output detected"
+          else
+            echo "ERROR: Expected UART output 'nyaa' not found"
+            echo "--- Last 50 lines of simulation output ---"
+            tail -50 gpu_sim_output.txt
+            exit 1
+          fi
+
+      - name: Report simulation results
+        if: always()
+        run: |
+          {
+            echo "## MCU SoC Metal Simulation"
+            echo "\`\`\`"
+            tail -20 gpu_sim_output.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mcu-soc-results
+          path: |
+            gpu_sim_output.txt
+            tests/mcu_soc/sim_config.json
+            tests/mcu_soc/build/top_synth.v
+
   # Run SKY130 post-layout timing simulation
   sky130-timing:
     name: SKY130 Timing Simulation

@@ -6,8 +6,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "amaranth[builtin-yosys]>=0.5.4,<0.6",
     "amaranth-soc",
-    "chipflow-lib",
-    "chipflow-digital-ip",
+    "chipflow-lib @ git+https://github.com/chipflow/chipflow-lib",
+    "chipflow-digital-ip @ git+https://github.com/chipflow/chipflow-digital-ip",
     "ziglang>=0.11.0",
 ]
 
