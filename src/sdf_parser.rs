@@ -234,6 +234,9 @@ impl<'a> Tokenizer<'a> {
             }
             _ => {
                 // Unquoted token (keyword, number, identifier)
+                // SDF uses backslash to escape special characters in identifiers
+                // (e.g., inst\$top\.soc → inst$top.soc). We strip escapes here
+                // so that instance paths match the unescaped names from netlistdb.
                 let start = self.pos;
                 while self.pos < self.input.len() {
                     let c = self.input[self.pos];
@@ -242,7 +245,12 @@ impl<'a> Tokenizer<'a> {
                     }
                     self.pos += 1;
                 }
-                let s = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("").to_string();
+                let raw = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("");
+                let s = if raw.contains('\\') {
+                    raw.replace('\\', "")
+                } else {
+                    raw.to_string()
+                };
                 Some(Token::Str(s))
             }
         }
@@ -631,15 +639,19 @@ impl<'a> SdfParser<'a> {
             };
             let val_str = parts[idx].trim();
             if val_str.is_empty() {
-                // Empty slot in triple - use typ if available, else 0
-                let fallback = parts[1].trim();
-                if fallback.is_empty() {
+                // Empty slot in triple — common in OpenSTA output (min::max with no typ).
+                // Fall back to any non-empty slot: try all three positions.
+                let fallback = parts.iter()
+                    .map(|p| p.trim())
+                    .find(|p| !p.is_empty());
+                if let Some(fb) = fallback {
+                    let val: f64 = fb.parse().map_err(|_| {
+                        SdfParseError::Syntax(format!("invalid delay triple '{}'", s), self.tokenizer.pos)
+                    })?;
+                    return Ok((val * timescale_ps).round() as u64);
+                } else {
                     return Ok(0);
                 }
-                let val: f64 = fallback.parse().map_err(|_| {
-                    SdfParseError::Syntax(format!("invalid delay triple '{}'", s), self.tokenizer.pos)
-                })?;
-                return Ok((val * timescale_ps).round() as u64);
             }
             let val: f64 = val_str.parse().map_err(|_| {
                 SdfParseError::Syntax(format!("invalid delay number '{}' in triple '{}'", val_str, s), self.tokenizer.pos)
@@ -697,7 +709,8 @@ impl<'a> SdfParser<'a> {
     ) -> Result<SdfTimingCheck, SdfParseError> {
         // (SETUP data_pin (posedge CLK) value)
         // (HOLD data_pin (posedge CLK) value)
-        let data_pin = self.read_str()?;
+        // Data pin may also have edge spec: (posedge D) or just D
+        let data_pin = self.read_pin_spec()?;
 
         // Clock edge spec
         let clock_edge = self.read_pin_spec()?;
@@ -749,14 +762,18 @@ impl<'a> SdfParser<'a> {
             };
             let val_str = parts[idx].trim();
             if val_str.is_empty() {
-                let fallback = parts[1].trim();
-                if fallback.is_empty() {
+                // Empty slot — fall back to any non-empty slot (OpenSTA min::max format)
+                let fallback = parts.iter()
+                    .map(|p| p.trim())
+                    .find(|p| !p.is_empty());
+                if let Some(fb) = fallback {
+                    let val: f64 = fb.parse().map_err(|_| {
+                        SdfParseError::Syntax(format!("invalid delay triple '{}'", s), self.tokenizer.pos)
+                    })?;
+                    return Ok((val * timescale_ps).round() as i64);
+                } else {
                     return Ok(0);
                 }
-                let val: f64 = fallback.parse().map_err(|_| {
-                    SdfParseError::Syntax(format!("invalid delay triple '{}'", s), self.tokenizer.pos)
-                })?;
-                return Ok((val * timescale_ps).round() as i64);
             }
             let val: f64 = val_str.parse().map_err(|_| {
                 SdfParseError::Syntax(format!("invalid number '{}' in triple '{}'", val_str, s), self.tokenizer.pos)
@@ -875,6 +892,37 @@ mod tests {
         assert_eq!(i0_min.iopaths[0].delay.fall_ps, 30);
         assert_eq!(i0_typ.iopaths[0].delay.fall_ps, 40);
         assert_eq!(i0_max.iopaths[0].delay.fall_ps, 55);
+    }
+
+    #[test]
+    fn test_edge_qualified_timingcheck() {
+        // OpenSTA outputs edge specifiers on both data and clock pins:
+        // (SETUP (posedge D) (posedge CLK) (0.056::0.057))
+        let sdf = r#"(DELAYFILE
+            (SDFVERSION "3.0")
+            (DESIGN "test")
+            (TIMESCALE 1ns)
+            (CELL (CELLTYPE "sky130_fd_sc_hd__dfxtp_1")
+                (INSTANCE dff0)
+                (TIMINGCHECK
+                    (HOLD (posedge D) (posedge CLK) (-0.033::-0.034))
+                    (HOLD (negedge D) (posedge CLK) (-0.051::-0.053))
+                    (SETUP (posedge D) (posedge CLK) (0.056::0.057))
+                    (SETUP (negedge D) (posedge CLK) (0.082::0.083))
+                )
+            )
+        )"#;
+        let parsed = SdfFile::parse_str(sdf, SdfCorner::Typ).unwrap();
+        let cell = parsed.get_cell("dff0").unwrap();
+        assert_eq!(cell.timing_checks.len(), 4);
+
+        // Verify edge-qualified data pins are parsed correctly
+        let setups: Vec<_> = cell.timing_checks.iter()
+            .filter(|c| c.check_type == TimingCheckType::Setup)
+            .collect();
+        assert_eq!(setups.len(), 2);
+        assert_eq!(setups[0].data_pin, "D");
+        assert_eq!(setups[0].clock_edge, "CLK");
     }
 
     #[test]

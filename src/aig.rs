@@ -247,11 +247,13 @@ pub struct AIG {
 
     // === SDF Back-Annotation Support ===
 
-    /// Maps AIG pin index → (netlistdb cell_id, cell_type, output_pin_name).
-    /// Only populated for the "output" AIG pin of each decomposed cell.
-    /// Internal AND gates from multi-gate decompositions get None.
-    /// Index 0 is Tie0 (None). Populated during AIG construction from netlistdb.
-    pub aigpin_cell_origin: Vec<Option<(usize, String, String)>>,
+    /// Maps AIG pin index → list of (netlistdb cell_id, cell_type, output_pin_name).
+    /// Accumulated: inverters sharing an AIG pin (via invert-bit reuse) push
+    /// their origins rather than overwriting. During SDF loading, delays from
+    /// all origins are summed (they form a serial chain, not parallel paths).
+    /// Internal AND gates from multi-gate decompositions get empty Vec (zero delay).
+    /// Index 0 is Tie0 (empty). Populated during AIG construction from netlistdb.
+    pub aigpin_cell_origins: Vec<Vec<(usize, String, String)>>,
 }
 
 impl Default for AIG {
@@ -276,7 +278,7 @@ impl Default for AIG {
             hold_slacks: Vec::new(),
             dff_timing: None,
             clock_period_ps: 1000, // Default 1ns clock period
-            aigpin_cell_origin: Vec::new(),
+            aigpin_cell_origins: Vec::new(),
         }
     }
 }
@@ -285,7 +287,7 @@ impl AIG {
     fn add_aigpin(&mut self, driver: DriverType) -> usize {
         self.num_aigpins += 1;
         self.drivers.push(driver);
-        self.aigpin_cell_origin.push(None);
+        self.aigpin_cell_origins.push(Vec::new());
         self.num_aigpins
     }
 
@@ -629,7 +631,7 @@ impl AIG {
                         // Pre-create DFF Q output
                         let q = self.add_aigpin(DriverType::DFF(cellid));
                         // Record cell origin for DFF Q output (for SDF CLK→Q delay)
-                        self.aigpin_cell_origin[q] = Some((
+                        self.aigpin_cell_origins[q].push((
                             cellid,
                             celltype.to_string(),
                             "Q".to_string(),
@@ -665,7 +667,7 @@ impl AIG {
                         self.pin2aigpin_iv[pinid] = o << 1;
                         assert_eq!(netlistdb.pinnames[pinid].1.as_str(), "PORT_R_RD_DATA");
                         // Record cell origin for SRAM data output
-                        self.aigpin_cell_origin[o] = Some((
+                        self.aigpin_cell_origins[o].push((
                             cellid,
                             celltype.to_string(),
                             "PORT_R_RD_DATA".to_string(),
@@ -939,7 +941,7 @@ impl AIG {
             self.pin2aigpin_iv[pinid] = o << 1;
             assert_eq!(output_pin_name, "DO", "Expected DO output pin for CF_SRAM");
             // Record cell origin for SRAM data output
-            self.aigpin_cell_origin[o] = Some((
+            self.aigpin_cell_origins[o].push((
                 cellid,
                 celltype.to_string(),
                 output_pin_name.to_string(),
@@ -954,7 +956,7 @@ impl AIG {
         if is_sequential_cell(cell_type) {
             let q = self.add_aigpin(DriverType::DFF(cellid));
             // Record cell origin for DFF Q output (for SDF CLK→Q delay)
-            self.aigpin_cell_origin[q] = Some((
+            self.aigpin_cell_origins[q].push((
                 cellid,
                 cell_type.to_string(),
                 "Q".to_string(),
@@ -1125,9 +1127,9 @@ impl AIG {
         // The full IOPATH delay goes on the output AIG pin only;
         // internal AND gates from multi-gate decompositions keep None (zero delay).
         let output_aigpin = final_iv >> 1;
-        if output_aigpin > 0 && output_aigpin < self.aigpin_cell_origin.len() {
+        if output_aigpin > 0 && output_aigpin < self.aigpin_cell_origins.len() {
             let output_pin_name = netlistdb.pinnames[pinid].1.as_str();
-            self.aigpin_cell_origin[output_aigpin] = Some((
+            self.aigpin_cell_origins[output_aigpin].push((
                 cellid,
                 cell_type.to_string(),
                 output_pin_name.to_string(),
@@ -1213,8 +1215,8 @@ impl AIG {
 
         // Record cell origin for SDF back-annotation
         let output_aigpin = final_iv >> 1;
-        if output_aigpin > 0 && output_aigpin < self.aigpin_cell_origin.len() {
-            self.aigpin_cell_origin[output_aigpin] = Some((
+        if output_aigpin > 0 && output_aigpin < self.aigpin_cell_origins.len() {
+            self.aigpin_cell_origins[output_aigpin].push((
                 cellid,
                 cell_type.to_string(),
                 output_pin_name.to_string(),
@@ -1294,7 +1296,7 @@ impl AIG {
             num_aigpins: 0,
             pin2aigpin_iv: vec![usize::MAX; netlistdb.num_pins],
             drivers: vec![DriverType::Tie0],
-            aigpin_cell_origin: vec![None], // Tie0 has no cell origin
+            aigpin_cell_origins: vec![Vec::new()], // Tie0 has no cell origin
             ..Default::default()
         };
 
@@ -2198,93 +2200,99 @@ mod sdf_integration_tests {
     // === Test 1: Cell origin population ===
 
     #[test]
-    fn test_cell_origin_length() {
+    fn test_cell_origins_length() {
         let (_netlistdb, aig) = load_inv_chain_aig();
         assert_eq!(
-            aig.aigpin_cell_origin.len(),
+            aig.aigpin_cell_origins.len(),
             aig.num_aigpins + 1,
-            "aigpin_cell_origin should have num_aigpins + 1 entries (index 0 = Tie0)"
+            "aigpin_cell_origins should have num_aigpins + 1 entries (index 0 = Tie0)"
         );
     }
 
     #[test]
-    fn test_cell_origin_tie0_is_none() {
+    fn test_cell_origin_tie0_is_empty() {
         let (_netlistdb, aig) = load_inv_chain_aig();
         assert!(
-            aig.aigpin_cell_origin[0].is_none(),
-            "Index 0 (Tie0) must have no cell origin"
+            aig.aigpin_cell_origins[0].is_empty(),
+            "Index 0 (Tie0) must have no cell origins"
         );
     }
 
     #[test]
-    fn test_cell_origin_count_and_overwrite() {
+    fn test_cell_origins_accumulated() {
         let (_netlistdb, aig) = load_inv_chain_aig();
 
-        // In AIG, inverters (NOT gates) don't create new AIG pins — they reuse
-        // the input pin with a flipped invert bit. So the 16-inverter chain
-        // collapses: each inverter's cell_origin overwrites the previous one
-        // at the same AIG pin. Only the LAST writer's cell_origin survives.
-        //
+        // With accumulated origins, inverters no longer overwrite — they push.
         // For inv_chain: dff_in.Q → i0 → ... → i15 → dff_out.D
-        // The DFF Q outputs get unique AIG pins. But dff_in.Q's cell_origin
-        // is overwritten by i15 (last inverter sharing that AIG pin).
-        // dff_out.Q is a primary output and nothing overwrites it.
-        let non_none_count = aig.aigpin_cell_origin.iter()
-            .filter(|o| o.is_some())
+        // The shared AIG pin (dff_in.Q / inverter chain) accumulates:
+        //   1 DFF origin (dff_in CLK→Q) + 16 inverter origins = 17 entries.
+        // dff_out.Q gets its own AIG pin with 1 entry.
+        let non_empty_count = aig.aigpin_cell_origins.iter()
+            .filter(|o| !o.is_empty())
             .count();
 
-        // Only 2 surviving cell origins: dff_out (DFF Q) and i15 (last inverter)
+        // 2 AIG pins with non-empty origins: shared chain pin + dff_out
         assert_eq!(
-            non_none_count, 2,
-            "Expected 2 surviving cell origins (dff_out + i15), got {}",
-            non_none_count
+            non_empty_count, 2,
+            "Expected 2 AIG pins with cell origins (chain pin + dff_out), got {}",
+            non_empty_count
         );
+
+        // The shared pin should have 17 entries (1 DFF + 16 inverters)
+        let chain_pin = aig.aigpin_cell_origins.iter()
+            .find(|origins| origins.len() > 1)
+            .expect("Should have a pin with multiple origins (the inverter chain)");
+        assert_eq!(chain_pin.len(), 17,
+            "Shared chain pin should have 17 origins (1 DFF + 16 inverters), got {}",
+            chain_pin.len());
     }
 
     #[test]
     fn test_cell_origin_dff_output_pin() {
         let (netlistdb, aig) = load_inv_chain_aig();
 
-        // Find DFF cell origins — only dff_out should survive (dff_in is overwritten)
-        let dff_origins: Vec<_> = aig.aigpin_cell_origin.iter()
+        // Both DFFs should now be present (dff_in is no longer overwritten)
+        let dff_origins: Vec<_> = aig.aigpin_cell_origins.iter()
             .enumerate()
-            .filter_map(|(i, o)| o.as_ref().map(|(cid, ct, pin)| (i, *cid, ct.clone(), pin.clone())))
+            .flat_map(|(i, origins)| origins.iter().map(move |(cid, ct, pin)| (i, *cid, ct.clone(), pin.clone())))
             .filter(|(_, _, ct, _)| ct == "dfxtp")
             .collect();
 
-        assert_eq!(dff_origins.len(), 1,
-            "Expected 1 surviving DFF cell origin (dff_out; dff_in is overwritten by i15)");
+        assert_eq!(dff_origins.len(), 2,
+            "Expected 2 DFF cell origins (dff_in + dff_out), got {}", dff_origins.len());
 
-        let (ref _aigpin, ref cellid, ref _cell_type, ref output_pin_name) = dff_origins[0];
-        assert_eq!(output_pin_name, "Q", "DFF output pin must be Q");
-        assert!(
-            netlistdb.celltypes[*cellid].contains("dfxtp"),
-            "Cell {} should be dfxtp type, got {}",
-            cellid, netlistdb.celltypes[*cellid]
-        );
+        for (ref _aigpin, ref cellid, ref _cell_type, ref output_pin_name) in &dff_origins {
+            assert_eq!(output_pin_name, "Q", "DFF output pin must be Q");
+            assert!(
+                netlistdb.celltypes[*cellid].contains("dfxtp"),
+                "Cell {} should be dfxtp type, got {}",
+                cellid, netlistdb.celltypes[*cellid]
+            );
+        }
     }
 
     #[test]
-    fn test_cell_origin_last_inverter_survives() {
+    fn test_all_inverters_present() {
         let (netlistdb, aig) = load_inv_chain_aig();
 
-        // The last inverter in the chain (i15) should have its cell_origin survive
-        let inv_origins: Vec<_> = aig.aigpin_cell_origin.iter()
+        // All 16 inverters should now have their origins accumulated (not just the last one)
+        let inv_origins: Vec<_> = aig.aigpin_cell_origins.iter()
             .enumerate()
-            .filter_map(|(i, o)| o.as_ref().map(|(cid, ct, pin)| (i, *cid, ct.clone(), pin.clone())))
+            .flat_map(|(i, origins)| origins.iter().map(move |(cid, ct, pin)| (i, *cid, ct.clone(), pin.clone())))
             .filter(|(_, _, ct, _)| ct == "inv")
             .collect();
 
-        assert_eq!(inv_origins.len(), 1,
-            "Expected 1 surviving inverter cell origin (i15, the last in the chain)");
+        assert_eq!(inv_origins.len(), 16,
+            "Expected 16 inverter cell origins (all inverters in chain), got {}", inv_origins.len());
 
-        let (ref _aigpin, ref cellid, ref _cell_type, ref output_pin_name) = inv_origins[0];
-        assert_eq!(output_pin_name, "Y", "Inverter output pin must be Y");
-        assert!(
-            netlistdb.celltypes[*cellid].contains("inv"),
-            "Cell {} should be inv type, got {}",
-            cellid, netlistdb.celltypes[*cellid]
-        );
+        for (ref _aigpin, ref cellid, ref _cell_type, ref output_pin_name) in &inv_origins {
+            assert_eq!(output_pin_name, "Y", "Inverter output pin must be Y");
+            assert!(
+                netlistdb.celltypes[*cellid].contains("inv"),
+                "Cell {} should be inv type, got {}",
+                cellid, netlistdb.celltypes[*cellid]
+            );
+        }
     }
 
     #[test]

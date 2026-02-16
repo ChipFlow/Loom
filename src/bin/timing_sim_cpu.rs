@@ -952,7 +952,7 @@ impl TimingState {
     /// Initialize delays from AIG driver types.
     ///
     /// For SKY130 designs with cell decomposition, AND gates that are internal
-    /// to a multi-gate decomposition (no `aigpin_cell_origin`) get zero delay.
+    /// to a multi-gate decomposition (no `aigpin_cell_origins`) get zero delay.
     /// Only the output AND gate of a real cell gets the Liberty delay.
     /// This prevents false hold violations from artificially low uniform delays.
     fn init_delays(&mut self, aig: &AIG, lib: &TimingLibrary) {
@@ -960,15 +960,15 @@ impl TimingState {
         let dff_timing = lib.dff_timing();
         let sram_timing = lib.sram_timing();
 
-        let has_cell_origin = !aig.aigpin_cell_origin.is_empty();
+        let has_cell_origins = !aig.aigpin_cell_origins.is_empty();
 
         for i in 1..=aig.num_aigpins {
             let delay = match &aig.drivers[i] {
                 DriverType::AndGate(_, _) => {
-                    if has_cell_origin {
+                    if has_cell_origins {
                         // With cell origin tracking: only real cell outputs get delay,
                         // internal decomposition AND gates get zero.
-                        if i < aig.aigpin_cell_origin.len() && aig.aigpin_cell_origin[i].is_some() {
+                        if i < aig.aigpin_cell_origins.len() && !aig.aigpin_cell_origins[i].is_empty() {
                             PackedDelay::from_u64(and_delay.0, and_delay.1)
                         } else {
                             PackedDelay::default() // Internal decomposition gate
@@ -1077,37 +1077,40 @@ impl TimingState {
         let mut unmatched = 0usize;
 
         for aigpin in 1..=aig.num_aigpins {
-            let delay = if let Some((cellid, _cell_type, output_pin_name)) =
-                &aig.aigpin_cell_origin[aigpin]
-            {
-                if let Some(sdf_path) = cellid_to_path.get(cellid) {
-                    if let Some(sdf_cell) = sdf.get_cell(sdf_path) {
-                        let iopath = sdf_cell.iopaths.iter()
-                            .find(|p| p.output_pin == *output_pin_name)
-                            .or_else(|| sdf_cell.iopaths.first());
-                        if let Some(iopath) = iopath {
-                            matched += 1;
-                            // Add wire delay (max across input wires) to cell delay
-                            let wire = wire_delays_per_cell.get(cellid);
-                            let rise = iopath.delay.rise_ps + wire.map_or(0, |w| w.rise_ps);
-                            let fall = iopath.delay.fall_ps + wire.map_or(0, |w| w.fall_ps);
-                            PackedDelay::from_u64(rise, fall)
-                        } else {
-                            unmatched += 1;
-                            self.liberty_fallback_delay(&aig.drivers[aigpin], and_delay, &dff_timing, &sram_timing)
-                        }
-                    } else {
-                        unmatched += 1;
-                        if debug {
+            let origins = &aig.aigpin_cell_origins[aigpin];
+            let delay = if !origins.is_empty() {
+                // Sum delays from all origins (serial chain via invert-bit reuse)
+                let mut total_rise: u64 = 0;
+                let mut total_fall: u64 = 0;
+                let mut any_matched = false;
+
+                for (cellid, _cell_type, output_pin_name) in origins {
+                    if let Some(sdf_path) = cellid_to_path.get(cellid) {
+                        if let Some(sdf_cell) = sdf.get_cell(sdf_path) {
+                            let iopath = sdf_cell.iopaths.iter()
+                                .find(|p| p.output_pin == *output_pin_name)
+                                .or_else(|| sdf_cell.iopaths.first());
+                            if let Some(iopath) = iopath {
+                                any_matched = true;
+                                let wire = wire_delays_per_cell.get(cellid);
+                                total_rise += iopath.delay.rise_ps + wire.map_or(0, |w| w.rise_ps);
+                                total_fall += iopath.delay.fall_ps + wire.map_or(0, |w| w.fall_ps);
+                            }
+                        } else if debug {
                             clilog::debug!("SDF: no match for instance '{}'", sdf_path);
                         }
-                        self.liberty_fallback_delay(&aig.drivers[aigpin], and_delay, &dff_timing, &sram_timing)
                     }
+                }
+
+                if any_matched {
+                    matched += 1;
+                    PackedDelay::from_u64(total_rise, total_fall)
                 } else {
-                    PackedDelay::default()
+                    unmatched += 1;
+                    self.liberty_fallback_delay(&aig.drivers[aigpin], and_delay, &dff_timing, &sram_timing)
                 }
             } else {
-                // No cell origin — internal decomposition gate or input
+                // No cell origins — internal decomposition gate or input
                 match &aig.drivers[aigpin] {
                     DriverType::AndGate(_, _) => PackedDelay::default(),
                     DriverType::InputPort(_) | DriverType::InputClockFlag(_, _) | DriverType::Tie0 => {

@@ -13,6 +13,12 @@ gem_output*.vcd
 *.vvp
 *.gemparts
 
+# Generated SDF (from gen_sdf.sh)
+minimal_build/6_final.sdf
+
+# GPU simulation event output
+gpu_events.json
+
 # Exception: keep tracked test files
 !dff_test.vcd
 !dff_test.gemparts
