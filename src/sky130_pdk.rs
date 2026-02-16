@@ -147,11 +147,23 @@ pub struct DecompResult {
 }
 
 /// Check if a cell type is a sequential element (DFF or latch).
+///
+/// SKY130 sequential cell prefixes:
+/// - `df*`: D flip-flops (dfxtp, dfrtp, dfrbp, dfstp, dfbbp, dfbbn, dfxbp, dfrtn, dfsbp)
+/// - `dl*`: latches and clock-gating latches (dlxtp, dlxbn, dlxbp, dlxtn, dlrbn, dlrbp, dlrtn, dlrtp, dlclkp)
+/// - `sdf*`: scan D flip-flops (sdfxtp, sdfxbp, sdfrbp, sdfrtp, sdfrtn, sdfbbp, sdfbbn, sdfsbp, sdfstp)
+/// - `sdl*`: scan clock-gating latches (sdlclkp)
+/// - `edf*`: enable D flip-flops (edfxtp, edfxbp)
+/// - `sedf*`: scan enable D flip-flops (sedfxtp, sedfxbp)
+/// - `lpflow_inputisolatch`: low-power isolation latch
 pub fn is_sequential_cell(cell_type: &str) -> bool {
-    matches!(
-        cell_type,
-        "dfxtp" | "dfrtp" | "dfrbp" | "dfstp" | "dfbbp" | "edfxtp" | "sdfxtp" | "dlxtp" | "dlat"
-    )
+    cell_type.starts_with("df")
+        || cell_type.starts_with("dl")
+        || cell_type.starts_with("sdf")
+        || cell_type.starts_with("sdl")
+        || cell_type.starts_with("edf")
+        || cell_type.starts_with("sedf")
+        || cell_type == "lpflow_inputisolatch"
 }
 
 /// Check if a cell is a tie cell (constant generator).
