@@ -70,7 +70,7 @@ impl LeafPinProvider for SKY130LeafPins {
                 _ => unknown_pin(macro_name, pin_name),
             },
             t if t.starts_with("lpflow_inputiso") => match pin {
-                "A" | "SLEEP_B" => Direction::I,
+                "A" | "SLEEP" | "SLEEP_B" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
             },
@@ -459,13 +459,13 @@ impl LeafPinProvider for SKY130LeafPins {
                 if macro_name.starts_with("CF_SRAM_") {
                     match pin {
                         // Control inputs
-                        "WLBI" | "CLKin" | "EN" | "R_WB" | "SM" | "TM" => Direction::I,
+                        "WLBI" | "WLOFF" | "CLKin" | "EN" | "R_WB" | "SM" | "TM" => Direction::I,
                         "ScanInDR" | "ScanInDL" | "ScanInCC" => Direction::I,
                         "vpwrpc" | "vpwrac" => Direction::I,
                         // Data/address inputs
                         "AD" | "BEN" | "DI" => Direction::I,
-                        // Data output
-                        "DO" => Direction::O,
+                        // Data/scan outputs
+                        "DO" | "ScanOutCC" => Direction::O,
                         _ => unknown_pin(macro_name, pin_name),
                     }
                 } else {

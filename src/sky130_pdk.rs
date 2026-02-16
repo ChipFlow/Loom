@@ -49,6 +49,8 @@ pub struct CellInputs {
     pub cin: usize,
     pub set_b: usize,
     pub reset_b: usize,
+    pub sleep: usize,
+    pub sleep_b: usize,
 }
 
 impl CellInputs {
@@ -83,6 +85,8 @@ impl CellInputs {
             cin: usize::MAX,
             set_b: usize::MAX,
             reset_b: usize::MAX,
+            sleep: usize::MAX,
+            sleep_b: usize::MAX,
         }
     }
 
@@ -117,6 +121,8 @@ impl CellInputs {
             "CIN" => self.cin = value,
             "SET_B" => self.set_b = value,
             "RESET_B" => self.reset_b = value,
+            "SLEEP" => self.sleep = value,
+            "SLEEP_B" => self.sleep_b = value,
             _ => return false,
         }
         true
@@ -960,6 +966,8 @@ fn get_cell_input_by_name(inputs: &CellInputs, name: &str) -> usize {
         "CIN" => inputs.cin,
         "SET_B" => inputs.set_b,
         "RESET_B" => inputs.reset_b,
+        "SLEEP" => inputs.sleep,
+        "SLEEP_B" => inputs.sleep_b,
         _ => usize::MAX,
     }
 }
@@ -1522,6 +1530,7 @@ mod tests {
             "D", "D_N", "D1",
             "S", "S0", "S1", "CIN",
             "SET_B", "RESET_B",
+            "SLEEP", "SLEEP_B",
         ];
         model.inputs.iter().all(|name| supported.contains(&name.as_str()))
     }
