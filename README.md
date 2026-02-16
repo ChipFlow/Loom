@@ -85,7 +85,7 @@ cargo run -r --features cuda --bin cuda_test -- design.gv design.gemparts input.
 
 ## Documentation
 
-Browse the full documentation at [chipflow.github.io/Loom](https://chipflow.github.io/Loom/) or build it locally with [mdbook](https://rust-lang.github.io/mdBook/):
+Browse the full documentation [online](https://chipflow.github.io/Loom/) or build it locally with [mdbook](https://rust-lang.github.io/mdBook/):
 
 ```sh
 mdbook serve   # opens at http://localhost:3000

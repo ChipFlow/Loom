@@ -196,7 +196,6 @@ jobs:
           name: benchmark-results
           path: benchmark_results.txt
 
-<<<<<<< HEAD
   # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
   mcu-soc-synth:
     name: MCU SoC Synthesis + P&R
