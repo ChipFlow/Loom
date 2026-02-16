@@ -1445,7 +1445,7 @@ impl FlattenedScriptV1 {
     /// Load timing from an SDF file with per-instance back-annotated delays.
     ///
     /// This replaces the uniform Liberty-based delays with per-instance IOPATH
-    /// delays from post-layout SDF. Uses `aigpin_cell_origin` to map SDF instances
+    /// delays from post-layout SDF. Uses `aigpin_cell_origins` to map SDF instances
     /// to AIG pins. For pins with multiple origins (e.g., an inverter chain sharing
     /// an AIG pin via invert-bit reuse), delays are summed since they form a serial chain.
     ///
@@ -1519,8 +1519,8 @@ impl FlattenedScriptV1 {
         let lib_sram_timing = liberty_fallback.and_then(|lib| lib.sram_timing());
 
         for aigpin in 1..=aig.num_aigpins {
-            let origin = &aig.aigpin_cell_origin[aigpin];
-            let delay = if let Some((cellid, _cell_type, output_pin_name)) = origin {
+            let origin = &aig.aigpin_cell_origins[aigpin];
+            let delay = if let Some((cellid, _cell_type, output_pin_name)) = origin.first() {
                 // This AIG pin has a cell origin — look up its delay.
                 let mut total_rise: u64 = 0;
                 let mut total_fall: u64 = 0;
@@ -1767,7 +1767,7 @@ mod sdf_delay_tests {
         // Find the AIG pin that has the dff_out origin
         let dff_out_cellid = *sdf_path_to_cellid.get("dff_out").unwrap();
         let dff_out_aigpin = (1..=aig.num_aigpins)
-            .find(|&ap| aig.aigpin_cell_origin[ap].iter().any(|(cid, _, _)| *cid == dff_out_cellid))
+            .find(|&ap| aig.aigpin_cell_origins[ap].iter().any(|(cid, _, _)| *cid == dff_out_cellid))
             .expect("dff_out should have a cell origin entry");
 
         let dff_out_delay = &script.gate_delays[dff_out_aigpin];
@@ -1797,7 +1797,7 @@ mod sdf_delay_tests {
         script.load_timing_from_sdf(&aig, &netlistdb, &sdf, 10000, None, false);
 
         for aigpin in 1..=aig.num_aigpins {
-            if aig.aigpin_cell_origin[aigpin].is_none() {
+            if aig.aigpin_cell_origins[aigpin].is_empty() {
                 let delay = &script.gate_delays[aigpin];
                 assert_eq!(
                     delay.rise_ps, 0,
@@ -1819,7 +1819,7 @@ mod sdf_delay_tests {
     // accumulation doesn't apply. Disabled until the type is reconciled.
 
     #[test]
-    #[ignore = "requires multi-origin aigpin_cell_origins (Vec<Vec<...>>) not yet available"]
+    #[ignore = "requires multi-origin aigpin_cell_originss (Vec<Vec<...>>) not yet available"]
     fn test_accumulated_delay_analytical() {
         // Verify accumulated delay matches hand-computed SDF sum.
         // SDF typ corner values (middle of min:typ:max triples):
@@ -1861,7 +1861,7 @@ mod sdf_delay_tests {
 
         // Find the chain pin (has 17 origins: 1 DFF + 16 inverters)
         let chain_aigpin = (1..=aig.num_aigpins)
-            .find(|&ap| aig.aigpin_cell_origin[ap].len() == 17)
+            .find(|&ap| aig.aigpin_cell_origins[ap].len() == 17)
             .expect("Should have a pin with 17 origins (1 DFF + 16 inverters)");
 
         let chain_delay = &script.gate_delays[chain_aigpin];
@@ -1873,7 +1873,7 @@ mod sdf_delay_tests {
             chain_delay.fall_ps);
 
         // Verify each inverter's individual contribution by checking origins
-        let origins = &aig.aigpin_cell_origin[chain_aigpin];
+        let origins = &aig.aigpin_cell_origins[chain_aigpin];
         assert_eq!(origins.len(), 17);
 
         // First origin should be the DFF
@@ -1894,7 +1894,7 @@ mod sdf_delay_tests {
             .map(|(&cid, _)| cid)
             .expect("dff_out should exist");
         let dff_out_aigpin = (1..=aig.num_aigpins)
-            .find(|&ap| aig.aigpin_cell_origin[ap].iter().any(|(cid, _, _)| *cid == dff_out_cellid))
+            .find(|&ap| aig.aigpin_cell_origins[ap].iter().any(|(cid, _, _)| *cid == dff_out_cellid))
             .expect("dff_out should have a cell origin");
 
         let dff_out_delay = &script.gate_delays[dff_out_aigpin];
