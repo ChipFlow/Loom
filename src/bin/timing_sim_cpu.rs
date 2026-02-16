@@ -1031,6 +1031,28 @@ impl TimingState {
             cellid_to_path.insert(cellid, sdf_path);
         }
 
+        // Build wire delay map from INTERCONNECT entries
+        let mut sdf_path_to_cellid: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (&cellid, path) in &cellid_to_path {
+            sdf_path_to_cellid.insert(path.as_str(), cellid);
+        }
+        let mut wire_delays_per_cell: std::collections::HashMap<usize, gem::sdf_parser::SdfDelay> =
+            std::collections::HashMap::new();
+        for cell in &sdf.cells {
+            for ic in &cell.interconnects {
+                if let Some(dot_pos) = ic.dest.rfind('.') {
+                    let dest_inst = &ic.dest[..dot_pos];
+                    if let Some(&dest_cellid) = sdf_path_to_cellid.get(dest_inst) {
+                        let entry = wire_delays_per_cell
+                            .entry(dest_cellid)
+                            .or_insert(gem::sdf_parser::SdfDelay { rise_ps: 0, fall_ps: 0 });
+                        entry.rise_ps = entry.rise_ps.max(ic.delay.rise_ps);
+                        entry.fall_ps = entry.fall_ps.max(ic.delay.fall_ps);
+                    }
+                }
+            }
+        }
+
         let mut matched = 0usize;
         let mut unmatched = 0usize;
 
@@ -1045,7 +1067,11 @@ impl TimingState {
                             .or_else(|| sdf_cell.iopaths.first());
                         if let Some(iopath) = iopath {
                             matched += 1;
-                            PackedDelay::from_u64(iopath.delay.rise_ps, iopath.delay.fall_ps)
+                            // Add wire delay (max across input wires) to cell delay
+                            let wire = wire_delays_per_cell.get(cellid);
+                            let rise = iopath.delay.rise_ps + wire.map_or(0, |w| w.rise_ps);
+                            let fall = iopath.delay.fall_ps + wire.map_or(0, |w| w.fall_ps);
+                            PackedDelay::from_u64(rise, fall)
                         } else {
                             unmatched += 1;
                             self.liberty_fallback_delay(&aig.drivers[aigpin], and_delay, &dff_timing, &sram_timing)

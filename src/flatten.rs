@@ -1351,6 +1351,34 @@ impl FlattenedScriptV1 {
             cellid_to_sdf_path.insert(cellid, sdf_path);
         }
 
+        // Build reverse map: SDF path → cellid for efficient lookup
+        let mut sdf_path_to_cellid: HashMap<&str, usize> = HashMap::new();
+        for (&cellid, path) in &cellid_to_sdf_path {
+            sdf_path_to_cellid.insert(path.as_str(), cellid);
+        }
+
+        // Phase 2: Build wire delay map from INTERCONNECT entries.
+        // For each dest instance, collect max wire delay across all input pins.
+        // Key: (dest_cellid) → max SdfDelay across all input wires.
+        let mut wire_delays_per_cell: HashMap<usize, crate::sdf_parser::SdfDelay> = HashMap::new();
+        for cell in &sdf.cells {
+            for ic in &cell.interconnects {
+                // INTERCONNECT dest format: "instance.pin" or "instance.subinst.pin"
+                // Extract the dest instance (everything before the last '.')
+                if let Some(dot_pos) = ic.dest.rfind('.') {
+                    let dest_inst = &ic.dest[..dot_pos];
+                    if let Some(&dest_cellid) = sdf_path_to_cellid.get(dest_inst) {
+                        let entry = wire_delays_per_cell
+                            .entry(dest_cellid)
+                            .or_insert(crate::sdf_parser::SdfDelay { rise_ps: 0, fall_ps: 0 });
+                        entry.rise_ps = entry.rise_ps.max(ic.delay.rise_ps);
+                        entry.fall_ps = entry.fall_ps.max(ic.delay.fall_ps);
+                    }
+                }
+            }
+        }
+        let num_wire_delays = wire_delays_per_cell.len();
+
         // Initialize gate delays
         self.gate_delays = vec![PackedDelay::default(); aig.num_aigpins + 1];
 
@@ -1377,12 +1405,19 @@ impl FlattenedScriptV1 {
                         let iopath = sdf_cell.iopaths.iter().find(|p| p.output_pin == *output_pin_name);
                         if let Some(iopath) = iopath {
                             matched += 1;
-                            PackedDelay::from_u64(iopath.delay.rise_ps, iopath.delay.fall_ps)
+                            // Add wire delay (max across input wires) to cell delay
+                            let wire = wire_delays_per_cell.get(cellid);
+                            let rise = iopath.delay.rise_ps + wire.map_or(0, |w| w.rise_ps);
+                            let fall = iopath.delay.fall_ps + wire.map_or(0, |w| w.fall_ps);
+                            PackedDelay::from_u64(rise, fall)
                         } else if !sdf_cell.iopaths.is_empty() {
                             // Cell found but no matching output pin — use first IOPATH
                             matched += 1;
                             let first = &sdf_cell.iopaths[0];
-                            PackedDelay::from_u64(first.delay.rise_ps, first.delay.fall_ps)
+                            let wire = wire_delays_per_cell.get(cellid);
+                            let rise = first.delay.rise_ps + wire.map_or(0, |w| w.rise_ps);
+                            let fall = first.delay.fall_ps + wire.map_or(0, |w| w.fall_ps);
+                            PackedDelay::from_u64(rise, fall)
                         } else {
                             // Cell found but no IOPATHs (shouldn't happen)
                             unmatched += 1;
@@ -1493,8 +1528,8 @@ impl FlattenedScriptV1 {
         self.timing_enabled = true;
 
         clilog::info!(
-            "Loaded SDF timing: {} matched, {} unmatched ({} Liberty fallback), {} DFF constraints, clock={}ps",
-            matched, unmatched, fallback_count, self.dff_constraints.len(), clock_period_ps
+            "Loaded SDF timing: {} matched, {} unmatched ({} Liberty fallback), {} wire delays, {} DFF constraints, clock={}ps",
+            matched, unmatched, fallback_count, num_wire_delays, self.dff_constraints.len(), clock_period_ps
         );
 
         if debug && !unmatched_instances.is_empty() {
