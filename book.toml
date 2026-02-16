@@ -1,0 +1,8 @@
+[book]
+title = "Loom Documentation"
+authors = ["ChipFlow"]
+src = "docs"
+
+[output.html]
+default-theme = "light"
+git-repository-url = "https://github.com/ChipFlow/Loom"

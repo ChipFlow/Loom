@@ -107,8 +107,8 @@ Download and install the Rust toolchain. This is as simple as a one-liner in you
 
 Clone Loom along with its dependencies.
 ``` sh
-git clone https://github.com/ChipFlow/GEM.git
-cd GEM
+git clone https://github.com/ChipFlow/Loom.git
+cd Loom
 git submodule update --init --recursive
 ```
 
@@ -174,7 +174,7 @@ cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/r
 cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
 ```
 
-Use slash separators (`/`) for hierarchical paths, not dots. See [docs/troubleshooting-vcd.md](docs/troubleshooting-vcd.md) for details.
+Use slash separators (`/`) for hierarchical paths, not dots. See [troubleshooting-vcd.md](troubleshooting-vcd.md) for details.
 
 The simulated output ports value will be stored in `output.vcd`.
 

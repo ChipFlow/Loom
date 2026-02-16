@@ -393,6 +393,55 @@ jobs:
             gpu_sim_output.txt
             tests/mcu_soc/sim_config.json
 
+  # Build documentation (cargo doc + mdbook)
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
+      - name: Build cargo docs
+        run: cargo doc --no-deps --lib
+
+      - name: Install mdbook
+        run: |
+          mkdir -p ~/.cargo/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/latest/download/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C ~/.cargo/bin
+
+      - name: Build mdbook
+        run: mdbook build
+
+      - name: Prepare Pages site
+        run: |
+          cp -r target/doc book/api
+          touch book/.nojekyll
+
+      - name: Deploy to gh-pages branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./book
+
   # Run SKY130 post-layout timing simulation
   sky130-timing:
     name: SKY130 Timing Simulation

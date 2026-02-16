@@ -1,12 +1,14 @@
-# GEM Documentation
+# Loom Documentation
 
-This directory contains documentation for GEM (GPU-accelerated Emulator-inspired RTL simulation).
+Welcome to the documentation for Loom, a GPU-accelerated RTL logic simulator.
+
+Use the sidebar to navigate between topics, or start with the [Getting Started](usage.md) guide.
 
 ## Documents
 
 ### Core Documentation
 
-- **[simulation-architecture.md](simulation-architecture.md)**: Detailed explanation of GEM's internal architecture
+- **[Simulation Architecture](simulation-architecture.md)**: Detailed explanation of Loom's internal architecture
   - Pipeline stages (NetlistDB → AIG → StagedAIG → Partitions → FlattenedScript → GPU)
   - Data structures and representations
   - VCD input/output format requirements
@@ -14,9 +16,12 @@ This directory contains documentation for GEM (GPU-accelerated Emulator-inspired
   - Performance characteristics
   - Known issues and limitations
 
+- **[Timing Simulation](timing-simulation.md)**: CPU-based timing simulation with Liberty/SDF delays
+- **[Timing Violations](timing-violations.md)**: GPU-side setup/hold violation detection
+
 ### Troubleshooting Guides
 
-- **[troubleshooting-vcd.md](troubleshooting-vcd.md)**: Debugging VCD input issues
+- **[Troubleshooting VCD](troubleshooting-vcd.md)**: Debugging VCD input issues
   - VCD hierarchy requirements
   - Signal naming and matching
   - Solutions for flat VCD generation
@@ -27,7 +32,7 @@ This directory contains documentation for GEM (GPU-accelerated Emulator-inspired
 
 ### VCD Input Requirements (Critical!)
 
-GEM expects VCD signals at **absolute top-level** (no module hierarchy):
+Loom expects VCD signals at **absolute top-level** (no module hierarchy):
 
 ```verilog
 // ✓ Correct testbench
@@ -58,7 +63,7 @@ grep '\$scope\|\$var' input.vcd | head -20
 
 ### Key Statistics
 
-When running GEM, look for these diagnostic outputs:
+When running Loom, look for these diagnostic outputs:
 
 ```
 netlist has X pins, Y aig pins, Z and gates        # AIG complexity
@@ -69,18 +74,18 @@ WARN (GATESIM_VCDI_MISSING_PI) ...                 # VCD issues!
 
 ## Investigation Methodology
 
-This documentation was created through systematic investigation of GEM's behavior:
+This documentation was created through systematic investigation of Loom's behavior:
 
 1. **Source Code Analysis**: Examined `src/aig.rs`, `src/flatten.rs`, `src/staging.rs`
 2. **Debug Tracing**: Used `RUST_LOG=debug` to capture internal state
 3. **Test Case Development**: Created minimal reproducible examples
-4. **Comparative Testing**: Compared GEM vs iverilog outputs
+4. **Comparative Testing**: Compared Loom vs iverilog outputs
 5. **Third-Party Validation**: Tested with real-world examples (sva-playground)
 
 ## Known Issues Documented
 
 1. **VCD Hierarchy Mismatch** (CRITICAL):
-   - GEM expects flat VCD hierarchy
+   - Loom expects flat VCD hierarchy
    - Most testbenches generate hierarchical VCDs
    - See troubleshooting-vcd.md for solutions
 
@@ -90,7 +95,7 @@ This documentation was created through systematic investigation of GEM's behavio
    - May be related to synthesis optimization or reset handling
 
 3. **Format String Preservation**:
-   - Yosys may not preserve `gem_format` attributes
+   - Yosys may not preserve format attributes
    - Display messages show placeholders
    - Extract format strings from pre-synthesis JSON as workaround
 
@@ -123,5 +128,5 @@ When adding documentation:
 
 ---
 
-**Last Updated**: 2025-01-08
-**Maintained By**: NVIDIA GEM Team + Community Contributions
+**Last Updated**: 2026-02-16
+**Maintained By**: ChipFlow + Community Contributions

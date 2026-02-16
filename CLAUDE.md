@@ -18,9 +18,14 @@ Requires Rust toolchain (via rustup.rs) and either CUDA or Metal support.
 # Initialize submodules (required first time)
 git submodule update --init --recursive
 
+# --- Unified CLI (no GPU features needed for mapping) ---
+
+# Build and run mapping tool
+cargo run -r --bin loom -- map --help
+
 # --- Metal (macOS) ---
 
-# Build and run mapping tool (compiles design to .gemparts)
+# Build and run mapping tool (legacy name, equivalent to `loom map`)
 cargo run -r --features metal --bin cut_map_interactive -- --help
 
 # Build and run Metal simulator
@@ -28,7 +33,7 @@ cargo run -r --features metal --bin metal_test -- --help
 
 # --- CUDA (Linux/NVIDIA) ---
 
-# Build and run mapping tool
+# Build and run mapping tool (legacy name, equivalent to `loom map`)
 cargo run -r --features cuda --bin cut_map_interactive -- --help
 
 # Build and run CUDA simulator
@@ -39,7 +44,7 @@ cargo run -r --features cuda --bin cuda_test -- --help
 
 1. **Memory synthesis** (Yosys): Map memories using `memlib_yosys.txt` → outputs `memory_mapped.v`
 2. **Logic synthesis** (DC or Yosys): Synthesize to `aigpdk.lib` cells → outputs `gatelevel.gv`
-3. **GEM mapping**: `cut_map_interactive gatelevel.gv result.gemparts`
+3. **Loom mapping**: `loom map gatelevel.gv result.gemparts` (or `cut_map_interactive` for backward compat)
 4. **Simulation**: `cuda_test` (NVIDIA) or `metal_test` (macOS) with `gatelevel.gv result.gemparts input.vcd output.vcd NUM_BLOCKS`
 
 Set `NUM_BLOCKS` to 2× the number of GPU streaming multiprocessors (SMs) for CUDA, or 1 for Metal.
@@ -68,7 +73,8 @@ NetlistDB (Verilog) → AIG → StagedAIG → Partitions → FlattenedScript →
 
 ### Binary Tools (`src/bin/`)
 
-- **`cut_map_interactive.rs`**: Main compilation tool - partitions design iteratively until all endpoints map successfully
+- **`loom.rs`**: Unified CLI entry point — `loom map` (partition mapping) and `loom sim` (stub, points to platform binaries)
+- **`cut_map_interactive.rs`**: Legacy mapping tool (equivalent to `loom map`), kept for backward compatibility
 - **`cuda_test.rs`**: CUDA simulator - runs GPU simulation with VCD I/O
 - **`metal_test.rs`**: Metal simulator - runs GPU simulation on macOS with VCD I/O
 - **`gpu_sim.rs`**: GPU co-simulation binary
