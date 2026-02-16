@@ -1716,6 +1716,9 @@ fn main() {
     clilog::enable_timer("gpu_sim");
     clilog::enable_timer("gem");
     clilog::set_max_print_count(clilog::Level::Warn, "NL_SV_LIT", 1);
+    eprintln!("WARNING: gpu_sim is deprecated. Use `loom cosim` instead:");
+    eprintln!("  cargo run -r --features metal --bin loom -- cosim ...");
+    eprintln!();
 
     let args = <Args as clap::Parser>::parse();
     clilog::info!("gpu_sim args:\n{:#?}", args);

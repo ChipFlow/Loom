@@ -784,6 +784,9 @@ fn main() {
     clilog::enable_timer("metal_test");
     clilog::enable_timer("gem");
     clilog::set_max_print_count(clilog::Level::Warn, "NL_SV_LIT", 1);
+    eprintln!("WARNING: metal_test is deprecated. Use `loom sim` instead:");
+    eprintln!("  cargo run -r --features metal --bin loom -- sim ...");
+    eprintln!();
     let args = <SimulatorArgs as clap::Parser>::parse();
     clilog::info!("Simulator args:\n{:#?}", args);
 

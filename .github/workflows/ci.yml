@@ -75,13 +75,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-metal-
 
-      - name: Build metal_test
-        run: cargo build --release --features metal --bin metal_test
+      - name: Build loom (Metal)
+        run: cargo build --release --features metal --bin loom
 
       - name: Run Metal simulation (timing test)
         run: |
           # Capture timing output
-          time (cargo run --release --features metal --bin metal_test -- \
+          time (cargo run --release --features metal --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
             tests/timing_test/dff_test.gemparts \
             tests/timing_test/dff_test.vcd \
@@ -123,6 +123,61 @@ jobs:
           path: |
             tests/timing_test/ci_output.vcd
             metal_timing.txt
+
+  # Build and run CUDA simulation on NVIDIA GPU
+  cuda:
+    name: CUDA Tests
+    runs-on: [self-hosted, nvidia-runner-1]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cuda-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cuda-
+
+      - name: Build loom (CUDA)
+        run: cargo build --release --features cuda --bin loom
+
+      - name: Run CUDA simulation (timing test)
+        run: |
+          time (cargo run --release --features cuda --bin loom -- sim \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test.gemparts \
+            tests/timing_test/dff_test.vcd \
+            tests/timing_test/ci_cuda_output.vcd \
+            1) 2>&1 | tee cuda_timing.txt
+
+      - name: Report CUDA performance
+        run: |
+          {
+            echo "## CUDA Simulation Performance"
+            echo "\`\`\`"
+            cat cuda_timing.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CUDA artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuda-outputs
+          path: |
+            tests/timing_test/ci_cuda_output.vcd
+            cuda_timing.txt
 
   # Check formatting and clippy
   # Note: Currently set to warn-only due to existing issues in codebase

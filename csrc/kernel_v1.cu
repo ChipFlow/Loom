@@ -13,6 +13,7 @@
     }                                                         \
   } while (0)
 
+// Original function without timing support (backward compatible).
 extern "C"
 void simulate_v1_noninteractive_simple_scan_cuda(
   usize num_blocks,
@@ -27,6 +28,34 @@ void simulate_v1_noninteractive_simple_scan_cuda(
 {
   const u32 *timing_constraints = nullptr;
   EventBuffer *event_buffer = nullptr;
+  void *arg_ptrs[10] = {
+    (void *)&num_blocks, (void *)&num_major_stages,
+    (void *)&blocks_start, (void *)&blocks_data,
+    (void *)&sram_data, (void *)&num_cycles, (void *)&state_size,
+    (void *)&states_noninteractive,
+    (void *)&timing_constraints, (void *)&event_buffer
+  };
+  checkCudaErrors(cudaLaunchCooperativeKernel(
+    (void *)simulate_v1_noninteractive_simple_scan, num_blocks, 256,
+    arg_ptrs, 0, (cudaStream_t)0
+    ));
+}
+
+// Extended function with timing constraints and event buffer support.
+extern "C"
+void simulate_v1_noninteractive_timed_cuda(
+  usize num_blocks,
+  usize num_major_stages,
+  const usize *blocks_start,
+  const u32 *blocks_data,
+  u32 *sram_data,
+  usize num_cycles,
+  usize state_size,
+  u32 *states_noninteractive,
+  const u32 *timing_constraints,
+  EventBuffer *event_buffer
+  )
+{
   void *arg_ptrs[10] = {
     (void *)&num_blocks, (void *)&num_major_stages,
     (void *)&blocks_start, (void *)&blocks_data,

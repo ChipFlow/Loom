@@ -59,3 +59,5 @@ pub mod display;
 pub mod testbench;
 
 pub mod sdf_parser;
+
+pub mod sim;

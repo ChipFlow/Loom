@@ -25,13 +25,13 @@ The goal is GPU-accelerated gate-level simulation with real cell timing — a fi
 | Gate delay computation | Done — per-AIG-pin delays from Liberty |
 | SDF back-annotation | Done — post-layout delays from SDF files |
 | CPU timing simulation | Done — arrival time propagation with setup/hold checking |
-| GPU timing simulation | Done — setup/hold violation detection on GPU |
+| GPU timing simulation | Done — setup/hold violation detection on GPU (Metal + CUDA) |
 | SKY130 timing test suite | Done — post-P&R test circuits with SDF |
+| Unified `loom sim` CLI | Done — timing constraints wired to both Metal and CUDA kernels |
 
 Next steps:
 1. Timing-aware bit packing for improved GPU utilization
 2. Multi-clock domain support
-3. Unified `loom sim` subcommand (sim logic currently in platform-specific binaries)
 
 ## Quick Start
 
@@ -46,7 +46,7 @@ git submodule update --init --recursive
 ### Build (Metal - macOS)
 
 ```sh
-cargo build -r --features metal --bin metal_test
+cargo build -r --features metal --bin loom
 ```
 
 ### Build (CUDA - Linux)
@@ -54,7 +54,7 @@ cargo build -r --features metal --bin metal_test
 Requires CUDA toolkit installed.
 
 ```sh
-cargo build -r --features cuda --bin cuda_test
+cargo build -r --features cuda --bin loom
 ```
 
 ## Usage
@@ -75,10 +75,14 @@ cargo run -r --features metal --bin cut_map_interactive -- design.gv design.gemp
 
 ```sh
 # Metal (macOS) - use NUM_BLOCKS=1
-cargo run -r --features metal --bin metal_test -- design.gv design.gemparts input.vcd output.vcd 1
+cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1
 
 # CUDA (Linux) - set NUM_BLOCKS to 2x your GPU's SM count
-cargo run -r --features cuda --bin cuda_test -- design.gv design.gemparts input.vcd output.vcd NUM_BLOCKS
+cargo run -r --features cuda --bin loom -- sim design.gv design.gemparts input.vcd output.vcd NUM_BLOCKS
+
+# With SDF timing back-annotation:
+cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1 \
+  --sdf design.sdf --sdf-corner typ
 ```
 
 **See [docs/usage.md](./docs/usage.md) for full documentation** including synthesis preparation, VCD scope handling, and troubleshooting.
