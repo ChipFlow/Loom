@@ -176,6 +176,10 @@ uv run netlist-graph drivers tests/timing_test/minimal_build/6_final.v "spiflash
 uv run netlist-graph path tests/timing_test/minimal_build/6_final.v "gpio_in[40]" "ibus__cyc"
 ```
 
+### Timing Violation Detection
+
+See `docs/timing-violations.md` for the full guide on enabling GPU-side setup/hold violation checks, interpreting violation reports, and tracing violations back to source signals using `netlist_graph`.
+
 ### Timing Simulation with Signal Tracing
 
 ```bash

@@ -611,6 +611,31 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_violations_same_cycle() {
+        // Two setup violations at the same cycle number.
+        // Both must be counted — the event buffer should not deduplicate by cycle.
+        let mut buf = EventBuffer::new();
+        add_full_timing_event(
+            &mut buf, EventType::SetupViolation, 42,
+            5, -100, 900, 200,
+        );
+        add_full_timing_event(
+            &mut buf, EventType::SetupViolation, 42,
+            10, -50, 950, 100,
+        );
+
+        let config = AssertConfig::default();
+        let mut stats = SimStats::default();
+
+        let control = process_events(&buf, &config, &mut stats, |_, _, _| {});
+
+        assert_eq!(control, SimControl::Continue);
+        assert_eq!(stats.setup_violations, 2,
+            "Both setup violations at cycle 42 must be counted");
+        assert_eq!(stats.hold_violations, 0);
+    }
+
+    #[test]
     fn test_mixed_violations_and_sim_control() {
         let mut buf = EventBuffer::new();
         // Setup violation, then hold violation, then $stop

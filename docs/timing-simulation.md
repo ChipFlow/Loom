@@ -315,16 +315,30 @@ For simplified timing, a single uniform delay constant can be used instead of pe
 
 ### At Each Cycle Boundary
 
+The GPU kernel checks timing constraints per state word (32 signals) after the boomerang evaluation completes. Arrivals and constraints use **u16 picosecond** values (range 0–65535 ps). Arithmetic is performed in **u32** to avoid overflow when summing arrival + setup:
+
 ```cpp
 // After boomerang completes, before next cycle
-if(threadIdx.x < num_dffs) {
-    u8 data_arrival = get_arrival_at_dff_d_input(dff_id);
-    i8 setup_slack = CLOCK_PERIOD - SETUP_TIME - data_arrival;
+// arrival: u16 max accumulated delay for this 32-signal group
+// constraint_word: packed [setup_ps:16][hold_ps:16]
+u16 setup_ps = constraint_word >> 16;
+u16 hold_ps  = constraint_word & 0xFFFF;
 
-    if(setup_slack < 0) {
-        // Report via event buffer
-        write_event(SETUP_VIOLATION, cycle, dff_id, setup_slack);
-    }
+// Setup check: skip when arrival == 0 (no data propagated, e.g. first cycle
+// or DFF with constant inputs)
+if (arrival > 0 && (u32)arrival + (u32)setup_ps > clock_period_ps) {
+    int slack = (int)clock_period_ps - (int)arrival - (int)setup_ps;
+    write_event(event_buffer, EVENT_TYPE_SETUP_VIOLATION,
+                cycle, io_offset + threadIdx.x,
+                (u32)slack, (u32)arrival, (u32)setup_ps);
+}
+
+// Hold check: no arrival > 0 guard (hold violations matter even at cycle 0)
+if ((u32)arrival < (u32)hold_ps) {
+    int slack = (int)arrival - (int)hold_ps;
+    write_event(event_buffer, EVENT_TYPE_HOLD_VIOLATION,
+                cycle, io_offset + threadIdx.x,
+                (u32)slack, (u32)arrival, (u32)hold_ps);
 }
 ```
 
@@ -340,6 +354,8 @@ pub enum EventType {
     HoldViolation = 5,
 }
 ```
+
+For full details on interpreting violation reports and tracing violations to source signals, see [docs/timing-violations.md](timing-violations.md).
 
 ## Timing-Aware Bit Packing
 

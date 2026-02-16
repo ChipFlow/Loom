@@ -2340,4 +2340,59 @@ mod constraint_buffer_tests {
         assert!(result.is_some(), "arrival=850 + setup=200 = 1050 > 1000 → violation");
         assert_eq!(result.unwrap(), -50, "Slack should be -50ps");
     }
+
+    #[test]
+    fn test_setup_skips_zero_arrival() {
+        // The GPU kernel has an `arrival > 0` guard for setup checks.
+        // arrival=0 means "no data propagated through combinational logic"
+        // (e.g., first cycle, or a DFF whose inputs are constant).
+        // Even with a tight clock where arrival + setup > clock_period,
+        // the check must NOT fire when arrival == 0.
+        let result = check_setup_violation(0, 200, 100);
+        assert!(result.is_none(),
+            "arrival=0 must skip setup check even when 0+200=200 > 100");
+
+        // Confirm a non-zero arrival with same parameters DOES fire
+        let result = check_setup_violation(1, 200, 100);
+        assert!(result.is_some(),
+            "arrival=1 should trigger: 1+200=201 > 100");
+
+        // Also verify arrival=0 with a very large setup still doesn't fire
+        let result = check_setup_violation(0, u16::MAX, 1);
+        assert!(result.is_none(),
+            "arrival=0 must always skip, regardless of setup or clock_period");
+    }
+
+    #[test]
+    fn test_setup_u16_max_arrival() {
+        // Test arrival near u16::MAX (65535ps) with setup that pushes sum past
+        // u16 range. The kernel uses u32 arithmetic:
+        //   (u32)arrival + (u32)setup_ps > clock_period_ps
+        // so it must not overflow at 16-bit boundary.
+
+        // arrival=65000, setup=1000 → (u32)66000 > 60000 → violation
+        let result = check_setup_violation(65000, 1000, 60000);
+        assert!(result.is_some(),
+            "65000+1000=66000 > 60000 → violation");
+        assert_eq!(result.unwrap(), 60000 - 65000 - 1000,
+            "Slack should be -6000ps");
+
+        // arrival=65000, setup=1000 → (u32)66000 > 70000 → no violation
+        let result = check_setup_violation(65000, 1000, 70000);
+        assert!(result.is_none(),
+            "65000+1000=66000 <= 70000 → no violation");
+
+        // Extreme: both at u16::MAX
+        // arrival=65535, setup=65535 → (u32)131070 > 131069 → violation
+        let result = check_setup_violation(u16::MAX, u16::MAX, 131069);
+        assert!(result.is_some(),
+            "u16::MAX + u16::MAX = 131070 > 131069 → violation");
+        assert_eq!(result.unwrap(), 131069 - 65535 - 65535,
+            "Slack should be -1ps");
+
+        // Same extreme but clock_period accommodates it
+        let result = check_setup_violation(u16::MAX, u16::MAX, 131070);
+        assert!(result.is_none(),
+            "u16::MAX + u16::MAX = 131070 <= 131070 → no violation");
+    }
 }
