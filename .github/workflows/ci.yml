@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, staged-aig-release]
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -193,6 +196,7 @@ jobs:
           name: benchmark-results
           path: benchmark_results.txt
 
+<<<<<<< HEAD
   # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
   mcu-soc-synth:
     name: MCU SoC Synthesis + P&R
@@ -393,7 +397,7 @@ jobs:
             gpu_sim_output.txt
             tests/mcu_soc/sim_config.json
 
-  # Build documentation (cargo doc + mdbook)
+  # Build documentation (cargo doc + mdbook) and deploy to GitHub Pages
   docs:
     name: Documentation
     runs-on: ubuntu-latest
