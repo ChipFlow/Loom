@@ -347,6 +347,7 @@ impl MetalSimulator {
         sram_data_buffer: &metal::Buffer,
         states_buffer: &metal::Buffer,
         event_buffer_metal: &metal::Buffer,
+        timing_constraints_buffer: Option<&metal::Buffer>,
     ) {
         self.write_params(stage_i, num_blocks, num_major_stages, state_size, cycle_i);
 
@@ -355,6 +356,7 @@ impl MetalSimulator {
             &command_buffer, num_blocks, stage_i,
             blocks_start_buffer, blocks_data_buffer,
             sram_data_buffer, states_buffer, event_buffer_metal,
+            timing_constraints_buffer,
         );
         command_buffer.commit();
         command_buffer.wait_until_completed();
@@ -398,6 +400,7 @@ impl MetalSimulator {
         sram_data_buffer: &metal::Buffer,
         states_buffer: &metal::Buffer,
         event_buffer_metal: &metal::Buffer,
+        timing_constraints_buffer: Option<&metal::Buffer>,
     ) {
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&self.pipeline_state);
@@ -407,6 +410,7 @@ impl MetalSimulator {
         encoder.set_buffer(3, Some(states_buffer), 0);
         encoder.set_buffer(4, Some(&self.params_buffers[stage_i]), 0);
         encoder.set_buffer(5, Some(event_buffer_metal), 0);
+        encoder.set_buffer(6, timing_constraints_buffer.map(|v| &**v), 0);
 
         let threads_per_threadgroup = MTLSize::new(256, 1, 1);
         let threadgroups = MTLSize::new(num_blocks as u64, 1, 1);
@@ -556,6 +560,7 @@ impl MetalSimulator {
         uart_channel_buffer: &metal::Buffer,
         wb_trace_channel_buffer: &metal::Buffer,
         wb_trace_params_buffer: &metal::Buffer,
+        timing_constraints_buffer: Option<&metal::Buffer>,
     ) -> u64 {
         let batch_done = self.event_counter.get() + 1;
         let cb = self.command_queue.new_command_buffer();
@@ -576,6 +581,7 @@ impl MetalSimulator {
                     cb, num_blocks, stage_i,
                     blocks_start_buffer, blocks_data_buffer,
                     sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer,
                 );
             }
 
@@ -602,6 +608,7 @@ impl MetalSimulator {
                     cb, num_blocks, stage_i,
                     blocks_start_buffer, blocks_data_buffer,
                     sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer,
                 );
             }
 
@@ -653,6 +660,7 @@ impl MetalSimulator {
         uart_channel_buffer: &metal::Buffer,
         wb_trace_channel_buffer: &metal::Buffer,
         wb_trace_params_buffer: &metal::Buffer,
+        timing_constraints_buffer: Option<&metal::Buffer>,
     ) {
         #[inline]
         fn gpu_times(cb: &metal::CommandBufferRef) -> (f64, f64) {
@@ -675,7 +683,8 @@ impl MetalSimulator {
             for stage_i in 0..num_major_stages {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 self.encode_dispatch(cb, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
             }
             self.encode_flash_model_step(cb, states_buffer, flash_state_buffer,
                 flash_model_params_buffer, flash_data_buffer);
@@ -684,7 +693,8 @@ impl MetalSimulator {
             for stage_i in 0..num_major_stages {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 self.encode_dispatch(cb, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
             }
             self.encode_flash_model_step(cb, states_buffer, flash_state_buffer,
                 flash_model_params_buffer, flash_data_buffer);
@@ -727,7 +737,8 @@ impl MetalSimulator {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 let cb2 = self.command_queue.new_command_buffer();
                 self.encode_dispatch(cb2, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
                 cb2.commit(); cb2.wait_until_completed();
                 let (s, e) = gpu_times(cb2);
                 time_simulate_fall += e - s;
@@ -760,7 +771,8 @@ impl MetalSimulator {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 let cb4 = self.command_queue.new_command_buffer();
                 self.encode_dispatch(cb4, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
                 cb4.commit(); cb4.wait_until_completed();
                 let (s, e) = gpu_times(cb4);
                 time_simulate_rise += e - s;
@@ -790,7 +802,8 @@ impl MetalSimulator {
             for stage_i in 0..num_major_stages {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 self.encode_dispatch(cb_full, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
             }
             self.encode_flash_model_step(cb_full, states_buffer, flash_state_buffer,
                 flash_model_params_buffer, flash_data_buffer);
@@ -799,7 +812,8 @@ impl MetalSimulator {
             for stage_i in 0..num_major_stages {
                 self.write_params(stage_i, num_blocks, num_major_stages, state_size, 0);
                 self.encode_dispatch(cb_full, num_blocks, stage_i, blocks_start_buffer,
-                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal);
+                    blocks_data_buffer, sram_data_buffer, states_buffer, event_buffer_metal,
+                    timing_constraints_buffer);
             }
             self.encode_flash_model_step(cb_full, states_buffer, flash_state_buffer,
                 flash_model_params_buffer, flash_data_buffer);
@@ -1657,6 +1671,30 @@ fn main() {
         None,
     );
 
+    // Timing constraint buffer for GPU-side setup/hold checking.
+    // Format: [clock_period_ps:u32, constraints[0], constraints[1], ...]
+    // Each constraint word packs [setup_ps:16][hold_ps:16] for that state word.
+    let timing_constraints_buffer = if script.timing_enabled && !script.dff_constraints.is_empty() {
+        let (clock_ps, constraints) = script.build_timing_constraint_buffer();
+        let non_zero = constraints.iter().filter(|&&v| v != 0).count();
+        clilog::info!(
+            "Timing constraints: {} words, {} with DFF constraints, clock_period={}ps",
+            constraints.len(), non_zero, clock_ps
+        );
+        // Prepend clock_period_ps as first element
+        let mut buf = Vec::with_capacity(1 + constraints.len());
+        buf.push(clock_ps);
+        buf.extend_from_slice(&constraints);
+        let metal_buf = simulator.device.new_buffer_with_data(
+            buf.as_ptr() as *const _,
+            (buf.len() * std::mem::size_of::<u32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        Some(metal_buf)
+    } else {
+        None
+    };
+
     clilog::finish!(timer_init);
 
     // ── Build GPU-side state_prep + IO model buffers ──────────────────────
@@ -1889,6 +1927,7 @@ fn main() {
             &uart_channel_buffer,
             &wb_trace_channel_buffer,
             &wb_trace_params_buffer,
+            timing_constraints_buffer.as_ref(),
         );
 
         // Clean up event buffer
@@ -2059,6 +2098,7 @@ fn main() {
             &uart_channel_buffer,
             &wb_trace_channel_buffer,
             &wb_trace_params_buffer,
+            timing_constraints_buffer.as_ref(),
         );
         prof_batch_encode += t_encode.elapsed().as_nanos() as u64;
 

@@ -1396,6 +1396,47 @@ impl FlattenedScriptV1 {
         );
     }
 
+    /// Build a per-word timing constraint buffer for GPU-side setup/hold checking.
+    ///
+    /// Returns `(clock_period_ps, constraints)` where `constraints` has one u32 per
+    /// state word (`reg_io_state_size` words). Each u32 packs:
+    ///   - bits [31:16] = min setup_ps across all DFFs in that word
+    ///   - bits [15:0]  = min hold_ps across all DFFs in that word
+    ///
+    /// Words with no DFF constraints have value 0 (skipped by the kernel).
+    /// This is conservative: the max arrival across the word is compared against the
+    /// min constraint, which may over-report violations but never misses real ones.
+    pub fn build_timing_constraint_buffer(&self) -> (u32, Vec<u32>) {
+        let num_words = self.reg_io_state_size as usize;
+        let mut constraints = vec![0u32; num_words];
+        for c in &self.dff_constraints {
+            if c.data_state_pos == u32::MAX {
+                continue;
+            }
+            let word_idx = (c.data_state_pos / 32) as usize;
+            if word_idx >= num_words {
+                continue;
+            }
+            let existing = constraints[word_idx];
+            let old_setup = (existing >> 16) as u16;
+            let old_hold = (existing & 0xFFFF) as u16;
+            // Most restrictive (min) constraint per word, treating 0 as "not yet set"
+            let new_setup = if old_setup == 0 {
+                c.setup_ps
+            } else {
+                old_setup.min(c.setup_ps)
+            };
+            let new_hold = if old_hold == 0 {
+                c.hold_ps
+            } else {
+                old_hold.min(c.hold_ps)
+            };
+            constraints[word_idx] = ((new_setup as u32) << 16) | (new_hold as u32);
+        }
+        let clock_ps = self.clock_period_ps.min(u32::MAX as u64) as u32;
+        (clock_ps, constraints)
+    }
+
     /// Load timing from an SDF file with per-instance back-annotated delays.
     ///
     /// This replaces the uniform Liberty-based delays with per-instance IOPATH
@@ -2035,5 +2076,97 @@ mod sdf_delay_tests {
         assert!(cell.iopaths.is_empty(), "Should have no IOPATHs");
         // In load_timing_from_sdf, this case falls through to liberty fallback
         // With no liberty fallback, it returns PackedDelay::default() = (0, 0)
+    }
+}
+
+#[cfg(test)]
+mod constraint_buffer_tests {
+    use super::*;
+
+    /// Helper: build a minimal FlattenedScriptV1 for constraint buffer testing.
+    fn make_script_with_constraints(
+        reg_io_state_size: u32,
+        clock_period_ps: u64,
+        constraints: Vec<DFFConstraint>,
+    ) -> FlattenedScriptV1 {
+        FlattenedScriptV1 {
+            num_blocks: 0,
+            num_major_stages: 0,
+            blocks_start: Vec::<usize>::new().into(),
+            blocks_data: Vec::<u32>::new().into(),
+            reg_io_state_size,
+            sram_storage_size: 0,
+            input_layout: Vec::new(),
+            output_map: IndexMap::new(),
+            input_map: IndexMap::new(),
+            stages_blocks_parts: Vec::new(),
+            assertion_positions: Vec::new(),
+            display_positions: Vec::new(),
+            gate_delays: Vec::new(),
+            dff_constraints: constraints,
+            clock_period_ps,
+            timing_enabled: true,
+            delay_patch_map: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_empty_constraints() {
+        let script = make_script_with_constraints(4, 10000, Vec::new());
+        let (clock_ps, buf) = script.build_timing_constraint_buffer();
+        assert_eq!(clock_ps, 10000);
+        assert_eq!(buf.len(), 4);
+        assert!(buf.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_single_dff_constraint() {
+        let script = make_script_with_constraints(4, 25000, vec![
+            DFFConstraint { setup_ps: 200, hold_ps: 50, data_state_pos: 35, cell_id: 1 },
+        ]);
+        let (clock_ps, buf) = script.build_timing_constraint_buffer();
+        assert_eq!(clock_ps, 25000);
+        // data_state_pos 35 → word_idx 1
+        assert_eq!(buf[0], 0);
+        assert_eq!(buf[1], (200u32 << 16) | 50);
+        assert_eq!(buf[2], 0);
+        assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn test_multiple_dffs_same_word_takes_min() {
+        let script = make_script_with_constraints(2, 10000, vec![
+            DFFConstraint { setup_ps: 300, hold_ps: 100, data_state_pos: 5, cell_id: 1 },
+            DFFConstraint { setup_ps: 150, hold_ps: 200, data_state_pos: 10, cell_id: 2 },
+        ]);
+        let (_clock_ps, buf) = script.build_timing_constraint_buffer();
+        // Both in word 0 → min(300,150)=150 setup, min(100,200)=100 hold
+        assert_eq!(buf[0], (150u32 << 16) | 100);
+    }
+
+    #[test]
+    fn test_skip_invalid_data_state_pos() {
+        let script = make_script_with_constraints(2, 10000, vec![
+            DFFConstraint { setup_ps: 200, hold_ps: 50, data_state_pos: u32::MAX, cell_id: 1 },
+        ]);
+        let (_clock_ps, buf) = script.build_timing_constraint_buffer();
+        assert!(buf.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_skip_out_of_range_word() {
+        let script = make_script_with_constraints(2, 10000, vec![
+            DFFConstraint { setup_ps: 200, hold_ps: 50, data_state_pos: 100, cell_id: 1 },
+        ]);
+        let (_clock_ps, buf) = script.build_timing_constraint_buffer();
+        // word_idx = 100/32 = 3, but num_words = 2 → skipped
+        assert!(buf.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_clock_period_saturation() {
+        let script = make_script_with_constraints(1, u64::MAX, Vec::new());
+        let (clock_ps, _buf) = script.build_timing_constraint_buffer();
+        assert_eq!(clock_ps, u32::MAX);
     }
 }

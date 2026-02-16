@@ -25,11 +25,14 @@ void simulate_v1_noninteractive_simple_scan_cuda(
   u32 *states_noninteractive
   )
 {
-  void *arg_ptrs[8] = {
+  const u32 *timing_constraints = nullptr;
+  EventBuffer *event_buffer = nullptr;
+  void *arg_ptrs[10] = {
     (void *)&num_blocks, (void *)&num_major_stages,
     (void *)&blocks_start, (void *)&blocks_data,
     (void *)&sram_data, (void *)&num_cycles, (void *)&state_size,
-    (void *)&states_noninteractive
+    (void *)&states_noninteractive,
+    (void *)&timing_constraints, (void *)&event_buffer
   };
   checkCudaErrors(cudaLaunchCooperativeKernel(
     (void *)simulate_v1_noninteractive_simple_scan, num_blocks, 256,

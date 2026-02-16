@@ -59,7 +59,14 @@ inline void simulate_block_v1(
     // Arrival times in raw picoseconds (ushort), max representable 65,535ps.
     // Gate delays are stored as u16 in the script padding slots.
     // No quantization needed — 512 bytes of threadgroup memory per block is negligible.
-    threadgroup ushort* shared_arrival
+    threadgroup ushort* shared_arrival,
+    // Writeout arrival times captured during writeout hook
+    threadgroup ushort* shared_writeout_arrival,
+    // Timing constraint buffer: one u32 per state word, [setup_ps:16][hold_ps:16]
+    device const u32* timing_constraints,
+    u32 clock_period_ps,
+    device struct EventBuffer* event_buffer,
+    u32 cycle_i
 ) {
     int script_pi = 0;
 
@@ -265,6 +272,7 @@ inline void simulate_block_v1(
             // write out
             if ((writeout_hook_i >> 8) == (uint)bs_i) {
                 shared_writeouts[tid] = shared_state[writeout_hook_i & 255];
+                shared_writeout_arrival[tid] = shared_arrival[writeout_hook_i & 255];
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -371,6 +379,30 @@ inline void simulate_block_v1(
             output_state[io_offset + tid] = wo;
         }
 
+        // DFF timing violation check (per writeout word)
+        if (tid < (uint)num_ios && clken_perm != 0 && timing_constraints != nullptr) {
+            u32 constraint = timing_constraints[io_offset + tid];
+            if (constraint != 0) {
+                ushort setup_ps = (ushort)(constraint >> 16);
+                ushort hold_ps = (ushort)(constraint & 0xFFFF);
+                ushort arrival = shared_writeout_arrival[tid];
+                // Setup: arrival + setup must fit within clock period
+                if (arrival > 0 && (u32)arrival + (u32)setup_ps > clock_period_ps) {
+                    int slack = (int)clock_period_ps - (int)arrival - (int)setup_ps;
+                    write_event(event_buffer, EVENT_TYPE_SETUP_VIOLATION,
+                               io_offset + tid, cycle_i,
+                               io_offset + tid, (u32)slack, (u32)arrival, (u32)setup_ps);
+                }
+                // Hold: arrival must exceed hold time
+                if (arrival < hold_ps) {
+                    int slack = (int)arrival - (int)hold_ps;
+                    write_event(event_buffer, EVENT_TYPE_HOLD_VIOLATION,
+                               io_offset + tid, cycle_i,
+                               io_offset + tid, (u32)slack, (u32)arrival, (u32)hold_ps);
+                }
+            }
+        }
+
         if (is_last_part) break;
     }
 }
@@ -386,6 +418,7 @@ kernel void simulate_v1_stage(
     device u32* states_noninteractive [[buffer(3)]],
     constant SimParams& params [[buffer(4)]],
     device struct EventBuffer* event_buffer [[buffer(5)]],
+    device const u32* timing_constraints [[buffer(6)]],
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
@@ -394,9 +427,17 @@ kernel void simulate_v1_stage(
     threadgroup u32 shared_writeouts[256];
     threadgroup u32 shared_state[256];
     threadgroup ushort shared_arrival[256];  // Per-thread-position arrival times (raw picoseconds)
+    threadgroup ushort shared_writeout_arrival[256];  // Arrival times captured at writeout
+    shared_writeout_arrival[tid] = 0;  // Must initialize — only writeout threads update this
 
     usize stage_i = params.current_stage;
     usize cycle_i = params.current_cycle;
+
+    // Clock period is stored in timing_constraints[0] when constraints are present,
+    // but we pass it via SimParams to avoid an extra read. Use state_size as a proxy
+    // for whether constraints exist (non-null buffer check happens in simulate_block_v1).
+    // Read clock_period from first element of timing_constraints buffer.
+    u32 clock_period_ps = (timing_constraints != nullptr) ? timing_constraints[0] : 0;
 
     // Get script location for this block and stage
     usize script_start = blocks_start[stage_i * params.num_blocks + gid];
@@ -406,6 +447,9 @@ kernel void simulate_v1_stage(
     device const u32* script = blocks_data + script_start;
     device const u32* input_state = states_noninteractive + cycle_i * params.state_size;
     device u32* output_state = states_noninteractive + (cycle_i + 1) * params.state_size;
+
+    // Constraints start at index 1 (index 0 is clock_period_ps)
+    device const u32* constraints_data = (timing_constraints != nullptr) ? timing_constraints + 1 : nullptr;
 
     simulate_block_v1(
         tid,
@@ -417,16 +461,13 @@ kernel void simulate_v1_stage(
         shared_metadata,
         shared_writeouts,
         shared_state,
-        shared_arrival
+        shared_arrival,
+        shared_writeout_arrival,
+        constraints_data,
+        clock_period_ps,
+        event_buffer,
+        (u32)cycle_i
     );
-
-    // TODO: Process simulation control nodes from the script
-    // When the script includes SimControl data, event writing will happen here.
-    // For now, the event_buffer parameter is available but unused.
-    // Example usage when implemented:
-    //   if (simcontrol_condition_met && tid == 0) {
-    //       write_sim_control_event(event_buffer, EVENT_TYPE_STOP, (u32)cycle_i);
-    //   }
 }
 
 // ── State Prep Kernel ────────────────────────────────────────────────────

@@ -298,25 +298,35 @@ where
                 }
             }
             EventType::SetupViolation => {
-                // data[0] = DFF cell ID, data[1] = slack (signed as u32)
-                let cell_id = event.data[0];
+                // data[0] = state word index, data[1] = slack (signed as u32)
+                // data[2] = arrival (ps), data[3] = setup constraint (ps)
+                let word_id = event.data[0];
                 let slack = event.data[1] as i32;
+                let arrival = event.data[2];
+                let setup = event.data[3];
                 clilog::warn!(
-                    "[cycle {}] SETUP VIOLATION: DFF {} slack={} ps",
+                    "[cycle {}] SETUP VIOLATION: word {} arrival={}ps setup={}ps slack={}ps",
                     event.cycle,
-                    cell_id,
+                    word_id,
+                    arrival,
+                    setup,
                     slack
                 );
                 stats.setup_violations += 1;
             }
             EventType::HoldViolation => {
-                // data[0] = DFF cell ID, data[1] = slack (signed as u32)
-                let cell_id = event.data[0];
+                // data[0] = state word index, data[1] = slack (signed as u32)
+                // data[2] = arrival (ps), data[3] = hold constraint (ps)
+                let word_id = event.data[0];
                 let slack = event.data[1] as i32;
+                let arrival = event.data[2];
+                let hold = event.data[3];
                 clilog::warn!(
-                    "[cycle {}] HOLD VIOLATION: DFF {} slack={} ps",
+                    "[cycle {}] HOLD VIOLATION: word {} arrival={}ps hold={}ps slack={}ps",
                     event.cycle,
-                    cell_id,
+                    word_id,
+                    arrival,
+                    hold,
                     slack
                 );
                 stats.hold_violations += 1;

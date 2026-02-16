@@ -28,6 +28,8 @@ typedef unsigned int atomic_u32;
 #define EVENT_TYPE_FINISH     1
 #define EVENT_TYPE_DISPLAY    2
 #define EVENT_TYPE_ASSERT_FAIL 3
+#define EVENT_TYPE_SETUP_VIOLATION 4
+#define EVENT_TYPE_HOLD_VIOLATION  5
 
 // A single event written by the GPU
 struct Event {

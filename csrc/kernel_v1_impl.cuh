@@ -33,7 +33,14 @@ __device__ void simulate_block_v1(
   // Arrival times in raw picoseconds (u16), max representable 65,535ps.
   // Gate delays are stored as u16 in the script padding slots.
   // No quantization needed — 512 bytes of shared memory per block is negligible.
-  u16 *__restrict__ shared_arrival
+  u16 *__restrict__ shared_arrival,
+  // Writeout arrival times captured during writeout hook
+  u16 *__restrict__ shared_writeout_arrival,
+  // Timing constraint buffer: one u32 per state word, [setup_ps:16][hold_ps:16]
+  const u32 *__restrict__ timing_constraints,
+  u32 clock_period_ps,
+  EventBuffer *__restrict__ event_buffer,
+  u32 cycle_i
   )
 {
   int script_pi = 0;
@@ -226,6 +233,7 @@ __device__ void simulate_block_v1(
       // write out
       if((writeout_hook_i >> 8) == bs_i) {
         shared_writeouts[threadIdx.x] = shared_state[writeout_hook_i & 255];
+        shared_writeout_arrival[threadIdx.x] = shared_arrival[writeout_hook_i & 255];
       }
     }
     __syncthreads();
@@ -342,6 +350,30 @@ __device__ void simulate_block_v1(
       output_state[io_offset + threadIdx.x] = wo;
     }
 
+    // DFF timing violation check (per writeout word)
+    if(threadIdx.x < num_ios && clken_perm != 0 && timing_constraints != nullptr) {
+      u32 constraint = timing_constraints[io_offset + threadIdx.x];
+      if(constraint != 0) {
+        u16 setup_ps = (u16)(constraint >> 16);
+        u16 hold_ps = (u16)(constraint & 0xFFFF);
+        u16 arrival = shared_writeout_arrival[threadIdx.x];
+        // Setup: arrival + setup must fit within clock period
+        if(arrival > 0 && (u32)arrival + (u32)setup_ps > clock_period_ps) {
+          int slack = (int)clock_period_ps - (int)arrival - (int)setup_ps;
+          write_event(event_buffer, EVENT_TYPE_SETUP_VIOLATION,
+                     io_offset + threadIdx.x, cycle_i,
+                     io_offset + threadIdx.x, (u32)slack, (u32)arrival, (u32)setup_ps);
+        }
+        // Hold: arrival must exceed hold time
+        if(arrival < hold_ps) {
+          int slack = (int)arrival - (int)hold_ps;
+          write_event(event_buffer, EVENT_TYPE_HOLD_VIOLATION,
+                     io_offset + threadIdx.x, cycle_i,
+                     io_offset + threadIdx.x, (u32)slack, (u32)arrival, (u32)hold_ps);
+        }
+      }
+    }
+
     if(is_last_part) break;
   }
   assert(script_size == script_pi);
@@ -355,7 +387,9 @@ __global__ void simulate_v1_noninteractive_simple_scan(
   u32 *__restrict__ sram_data,
   usize num_cycles,
   usize state_size,
-  u32 *__restrict__ states_noninteractive
+  u32 *__restrict__ states_noninteractive,
+  const u32 *__restrict__ timing_constraints,
+  EventBuffer *__restrict__ event_buffer
   )
 {
   assert(num_blocks == gridDim.x);
@@ -364,8 +398,15 @@ __global__ void simulate_v1_noninteractive_simple_scan(
   __shared__ u32 shared_writeouts[256];
   __shared__ u32 shared_state[256];
   __shared__ u16 shared_arrival[256];  // Per-thread-position arrival times (raw picoseconds)
+  __shared__ u16 shared_writeout_arrival[256];  // Arrival times captured at writeout
+  shared_writeout_arrival[threadIdx.x] = 0;  // Must initialize — only writeout threads update this
   __shared__ u32 script_starts[32], script_sizes[32];
   assert(num_major_stages <= 32);
+
+  // Read clock period from first element of constraints buffer
+  u32 clock_period_ps = (timing_constraints != nullptr) ? timing_constraints[0] : 0;
+  const u32* constraints_data = (timing_constraints != nullptr) ? timing_constraints + 1 : nullptr;
+
   if(threadIdx.x < num_major_stages) {
     script_starts[threadIdx.x] = blocks_start[threadIdx.x * num_blocks + blockIdx.x];
     script_sizes[threadIdx.x] = blocks_start[threadIdx.x * num_blocks + blockIdx.x + 1] - script_starts[threadIdx.x];
@@ -379,7 +420,12 @@ __global__ void simulate_v1_noninteractive_simple_scan(
         states_noninteractive + cycle_i * state_size,
         states_noninteractive + (cycle_i + 1) * state_size,
         sram_data,
-        shared_metadata, shared_writeouts, shared_state, shared_arrival
+        shared_metadata, shared_writeouts, shared_state, shared_arrival,
+        shared_writeout_arrival,
+        constraints_data,
+        clock_period_ps,
+        event_buffer,
+        (u32)cycle_i
         );
       cooperative_groups::this_grid().sync();
     }
