@@ -205,6 +205,13 @@ pub struct FlattenedScriptV1 {
 
     /// Whether timing data has been loaded.
     pub timing_enabled: bool,
+
+    /// Delay injection info for GPU kernel.
+    /// Each entry: (offset in blocks_data where the padding u32 lives,
+    ///              list of AIG pin indices contributing to this thread position).
+    /// Used by load_timing() / load_timing_from_sdf() to patch the script
+    /// with per-thread-position max gate delays.
+    pub delay_patch_map: Vec<(usize, Vec<usize>)>,
 }
 
 fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
@@ -703,14 +710,18 @@ impl FlatteningPart {
         // println!("test clken_permute: {:?}, wos (w/o sram or dup): {:?}", self.clken_permute, self.parts_after_writeouts);
     }
 
+    /// Build the GPU script for this partition.
+    /// Returns (script_data, delay_patch_entries) where each delay_patch_entry
+    /// is (local_offset, vec_of_aigpins) for patching timing data later.
     fn build_script(
         &self,
         aig: &AIG,
         part: &Partition,
         input_map: &IndexMap<usize, u32>,
         staged_io_map: &IndexMap<usize, u32>,
-    ) -> Vec<u32> {
+    ) -> (Vec<u32>, Vec<(usize, Vec<usize>)>) {
         let mut script = Vec::<u32>::new();
+        let mut delay_patches: Vec<(usize, Vec<usize>)> = Vec::new();
 
         // metadata
         script.push(part.stages.len() as u32);
@@ -875,11 +886,34 @@ impl FlatteningPart {
                     script.push((bs_perm[i + 6] as u32) | (bs_perm[i + 7] as u32) << 16);
                 }
             }
+            // Compute per-thread-position delay (max gate delay across all
+            // 32 signals evaluated in this thread position).
+            // Used by GPU timing kernel for arrival time tracking.
+            // Collect AIG pins per thread position for delay injection
+            let mut thread_aigpins: Vec<Vec<usize>> = vec![Vec::new(); NUM_THREADS_V1];
+            for hi in 1..bs.hier.len() {
+                let hi_len = bs.hier[hi].len();
+                for j in 0..hi_len {
+                    let out = bs.hier[hi][j];
+                    if out == usize::MAX {
+                        continue;
+                    }
+                    let thread_pos = (hi_len + j) >> 5;
+                    if thread_pos < NUM_THREADS_V1 {
+                        thread_aigpins[thread_pos].push(out);
+                    }
+                }
+            }
+
             for i in 0..NUM_THREADS_V1 {
                 script.push(bs_xora[i]);
                 script.push(bs_xorb[i]);
                 script.push(bs_orb[i]);
-                script.push(0);
+                let padding_offset = script.len();
+                script.push(0); // Padding slot — patched by inject_timing_to_script()
+                if !thread_aigpins[i].is_empty() {
+                    delay_patches.push((padding_offset, std::mem::take(&mut thread_aigpins[i])));
+                }
             }
 
             last_pin2localpos = self.afters[bs_i]
@@ -946,7 +980,7 @@ impl FlatteningPart {
             script.push(0);
         }
 
-        script
+        (script, delay_patches)
     }
 }
 
@@ -969,6 +1003,7 @@ fn build_flattened_script_v1(
     let mut input_map = IndexMap::new();
     let mut output_map = IndexMap::new();
     let mut staged_io_map = IndexMap::new();
+    let mut delay_patch_map: Vec<(usize, Vec<usize>)> = Vec::new();
     for (i, &input) in input_layout.iter().enumerate() {
         if input == usize::MAX {
             continue;
@@ -1078,7 +1113,7 @@ fn build_flattened_script_v1(
         .zip(parts_in_stages.into_iter().copied())
     {
         // build script per part in parallel. we will later assemble them to blocks.
-        let parts_data_split: Vec<Vec<u32>> = flattening_parts.par_iter()
+        let parts_results: Vec<(Vec<u32>, Vec<(usize, Vec<usize>)>)> = flattening_parts.par_iter()
             .enumerate()
             .map(|(part_id, fp)| {
                 fp.build_script(
@@ -1103,7 +1138,13 @@ fn build_flattened_script_v1(
                     if i == num_parts - 1 {
                         last_part_st = blocks_data.len();
                     }
-                    blocks_data.extend(parts_data_split[part_id].iter().copied());
+                    let base_offset = blocks_data.len();
+                    let (ref script_data, ref patches) = parts_results[part_id];
+                    blocks_data.extend(script_data.iter().copied());
+                    // Adjust patch offsets from local to global blocks_data position
+                    for (local_off, aigpins) in patches {
+                        delay_patch_map.push((base_offset + local_off, aigpins.clone()));
+                    }
                 }
                 assert_ne!(last_part_st, usize::MAX);
                 blocks_data[last_part_st + 1] = 1;
@@ -1207,6 +1248,7 @@ fn build_flattened_script_v1(
         dff_constraints: Vec::new(),
         clock_period_ps: 1000, // Default 1ns
         timing_enabled: false,
+        delay_patch_map,
     }
 }
 
@@ -1317,6 +1359,38 @@ impl FlattenedScriptV1 {
     /// Check if timing data is available.
     pub fn has_timing(&self) -> bool {
         self.timing_enabled
+    }
+
+    /// Inject timing delay data into the GPU script's padding slots.
+    /// Must be called after load_timing() or load_timing_from_sdf().
+    /// Each padding u32 gets the max gate delay (in ps) across all AIG pins
+    /// mapped to that thread position.
+    pub fn inject_timing_to_script(&mut self) {
+        if self.gate_delays.is_empty() || self.delay_patch_map.is_empty() {
+            return;
+        }
+
+        let mut patched = 0usize;
+        for (offset, aigpins) in &self.delay_patch_map {
+            let mut max_delay: u32 = 0;
+            for &aigpin in aigpins {
+                if aigpin < self.gate_delays.len() {
+                    max_delay = max_delay.max(self.gate_delays[aigpin].max_delay() as u32);
+                }
+            }
+            if *offset < self.blocks_data.len() {
+                self.blocks_data[*offset] = max_delay;
+                if max_delay > 0 {
+                    patched += 1;
+                }
+            }
+        }
+
+        clilog::info!(
+            "Injected timing to GPU script: {} padding slots patched ({} total slots)",
+            patched,
+            self.delay_patch_map.len()
+        );
     }
 
     /// Load timing from an SDF file with per-instance back-annotated delays.
