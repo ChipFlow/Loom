@@ -212,6 +212,15 @@ pub struct FlattenedScriptV1 {
     /// Used by load_timing() / load_timing_from_sdf() to patch the script
     /// with per-thread-position max gate delays.
     pub delay_patch_map: Vec<(usize, Vec<usize>)>,
+
+    /// Timing quantum in picoseconds for GPU delay quantization.
+    /// Each u8 delay unit = timing_quantum_ps picoseconds.
+    /// Default: 10ps/unit, giving range 0-2550ps.
+    pub timing_quantum_ps: u32,
+
+    /// Offsets of metadata slot [8] in blocks_data for each partition.
+    /// Used to write the timing quantum into the GPU script metadata.
+    pub metadata_timing_slots: Vec<usize>,
 }
 
 fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
@@ -1004,6 +1013,7 @@ fn build_flattened_script_v1(
     let mut output_map = IndexMap::new();
     let mut staged_io_map = IndexMap::new();
     let mut delay_patch_map: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut metadata_timing_slots: Vec<usize> = Vec::new();
     for (i, &input) in input_layout.iter().enumerate() {
         if input == usize::MAX {
             continue;
@@ -1141,6 +1151,8 @@ fn build_flattened_script_v1(
                     let base_offset = blocks_data.len();
                     let (ref script_data, ref patches) = parts_results[part_id];
                     blocks_data.extend(script_data.iter().copied());
+                    // Record metadata slot [8] offset for timing quantum
+                    metadata_timing_slots.push(base_offset + 8);
                     // Adjust patch offsets from local to global blocks_data position
                     for (local_off, aigpins) in patches {
                         delay_patch_map.push((base_offset + local_off, aigpins.clone()));
@@ -1249,6 +1261,8 @@ fn build_flattened_script_v1(
         clock_period_ps: 1000, // Default 1ns
         timing_enabled: false,
         delay_patch_map,
+        timing_quantum_ps: 10, // Default 10ps per unit, range 0-2550ps
+        metadata_timing_slots,
     }
 }
 
@@ -1363,12 +1377,40 @@ impl FlattenedScriptV1 {
 
     /// Inject timing delay data into the GPU script's padding slots.
     /// Must be called after load_timing() or load_timing_from_sdf().
-    /// Each padding u32 gets the max gate delay (in ps) across all AIG pins
-    /// mapped to that thread position.
+    /// Each padding u32 gets the quantized max gate delay across all AIG pins
+    /// mapped to that thread position. Delays are quantized to u8 using
+    /// `timing_quantum_ps` (default 10ps/unit, range 0-2550ps).
+    ///
+    /// Also writes the timing quantum to metadata slot [8] of each partition
+    /// so the GPU kernel can dequantize arrival times.
     pub fn inject_timing_to_script(&mut self) {
         if self.gate_delays.is_empty() || self.delay_patch_map.is_empty() {
             return;
         }
+
+        let quantum = self.timing_quantum_ps.max(1);
+
+        // Auto-adjust quantum if max delay exceeds u8 range
+        let max_raw_delay = self.delay_patch_map.iter()
+            .map(|(_, aigpins)| {
+                aigpins.iter()
+                    .filter_map(|&ap| self.gate_delays.get(ap))
+                    .map(|d| d.max_delay() as u32)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0);
+
+        let effective_quantum = if max_raw_delay > 255 * quantum {
+            // Need larger quantum to fit in u8
+            let q = (max_raw_delay + 254) / 255;
+            clilog::warn!("Timing quantum auto-adjusted from {}ps to {}ps (max delay {}ps)",
+                         quantum, q, max_raw_delay);
+            q
+        } else {
+            quantum
+        };
 
         let mut patched = 0usize;
         for (offset, aigpins) in &self.delay_patch_map {
@@ -1378,18 +1420,28 @@ impl FlattenedScriptV1 {
                     max_delay = max_delay.max(self.gate_delays[aigpin].max_delay() as u32);
                 }
             }
+            // Quantize to u8
+            let quantized = ((max_delay + effective_quantum - 1) / effective_quantum).min(255) as u8;
             if *offset < self.blocks_data.len() {
-                self.blocks_data[*offset] = max_delay;
-                if max_delay > 0 {
+                self.blocks_data[*offset] = quantized as u32;
+                if quantized > 0 {
                     patched += 1;
                 }
             }
         }
 
+        // Write timing quantum to metadata slot [8] of each partition
+        for &slot_offset in &self.metadata_timing_slots {
+            if slot_offset < self.blocks_data.len() {
+                self.blocks_data[slot_offset] = effective_quantum;
+            }
+        }
+
         clilog::info!(
-            "Injected timing to GPU script: {} padding slots patched ({} total slots)",
+            "Injected timing to GPU script: {} padding slots patched ({} total), quantum={}ps",
             patched,
-            self.delay_patch_map.len()
+            self.delay_patch_map.len(),
+            effective_quantum
         );
     }
 

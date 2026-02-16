@@ -29,7 +29,8 @@ __device__ void simulate_block_v1(
   u32 *__restrict__ sram_data,
   u32 *__restrict__ shared_metadata,
   u32 *__restrict__ shared_writeouts,
-  u32 *__restrict__ shared_state
+  u32 *__restrict__ shared_state,
+  u8 *__restrict__ shared_arrival  // per-thread-position arrival times
   )
 {
   int script_pi = 0;
@@ -102,7 +103,12 @@ __device__ void simulate_block_v1(
       }
     }
     shared_state[threadIdx.x] = t_global_rd_state;
+    // Initialize arrival times to 0 (inputs have zero arrival)
+    shared_arrival[threadIdx.x] = 0;
     __syncthreads();
+
+    // Read timing quantum from metadata slot [8] (ps per u8 unit)
+    u32 timing_quantum = shared_metadata[8];
 
     for(int bs_i = 0; bs_i < num_stages; ++bs_i) {
       u32 hier_input = 0, hier_flag_xora = 0, hier_flag_xorb = 0, hier_flag_orb = 0;
@@ -136,22 +142,33 @@ __device__ void simulate_block_v1(
       hier_flag_xora = t4_5.c1;
       hier_flag_xorb = t4_5.c2;
       hier_flag_orb = t4_5.c3;
+      // Extract per-thread-position gate delay from padding slot (u8 quantized)
+      u8 gate_delay = (u8)(t4_5.c4 & 0xFF);
       t4_5.read(((const VectorRead4 *)(script + script_pi + 256 * 4 * 4)) + threadIdx.x);
 
       __syncthreads();
       shared_state[threadIdx.x] = hier_input;
+      shared_arrival[threadIdx.x] = 0;  // Reset arrival for shuffle inputs
       __syncthreads();
 
-      // hier[0]
+      // hier[0]: threads 128-255 compute AND gates + track arrivals
       if(threadIdx.x >= 128) {
         u32 hier_input_a = shared_state[threadIdx.x - 128];
         u32 hier_input_b = hier_input;
         u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
         shared_state[threadIdx.x] = ret;
+
+        // Arrival tracking: max(input_a, input_b) + gate_delay
+        u16 arr_a = (u16)shared_arrival[threadIdx.x - 128];
+        u16 arr_b = (u16)shared_arrival[threadIdx.x];
+        bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+        u16 new_arr = is_pass ? arr_a : min((u16)(max(arr_a, arr_b) + (u16)gate_delay), (u16)255);
+        shared_arrival[threadIdx.x] = (u8)new_arr;
       }
       __syncthreads();
-      // hier[1..3]
+      // hier[1..3]: shared memory reduction + arrival tracking
       u32 tmp_cur_hi;
+      u8 tmp_cur_arr = 0;
       for(int hi = 1; hi <= 3; ++hi) {
         int hier_width = 1 << (7 - hi);
         if(threadIdx.x >= hier_width && threadIdx.x < hier_width * 2) {
@@ -160,21 +177,38 @@ __device__ void simulate_block_v1(
           u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
           tmp_cur_hi = ret;
           shared_state[threadIdx.x] = ret;
+
+          // Arrival tracking
+          u16 arr_a = (u16)shared_arrival[threadIdx.x + hier_width];
+          u16 arr_b = (u16)shared_arrival[threadIdx.x + hier_width * 2];
+          bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+          u16 new_arr = is_pass ? arr_a : min((u16)(max(arr_a, arr_b) + (u16)gate_delay), (u16)255);
+          tmp_cur_arr = (u8)new_arr;
+          shared_arrival[threadIdx.x] = tmp_cur_arr;
         }
         __syncthreads();
       }
       // hier[4..7], within the first warp.
+      // Pack arrival into u32 for warp shuffle
+      u32 tmp_cur_arr_u32 = (u32)tmp_cur_arr;
       if(threadIdx.x < 32) {
         for(int hi = 4; hi <= 7; ++hi) {
           int hier_width = 1 << (7 - hi);
           u32 hier_input_a = __shfl_down_sync(0xffffffff, tmp_cur_hi, hier_width);
           u32 hier_input_b = __shfl_down_sync(0xffffffff, tmp_cur_hi, hier_width * 2);
+          u32 arr_a_u32 = __shfl_down_sync(0xffffffff, tmp_cur_arr_u32, hier_width);
+          u32 arr_b_u32 = __shfl_down_sync(0xffffffff, tmp_cur_arr_u32, hier_width * 2);
           if(threadIdx.x >= hier_width && threadIdx.x < hier_width * 2) {
             tmp_cur_hi = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+            // Arrival tracking
+            bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+            u16 new_arr = is_pass ? (u16)arr_a_u32 : min((u16)(max((u16)arr_a_u32, (u16)arr_b_u32) + (u16)gate_delay), (u16)255);
+            tmp_cur_arr_u32 = (u32)(u8)new_arr;
           }
         }
         u32 v1 = __shfl_down_sync(0xffffffff, tmp_cur_hi, 1);
-        // hier[8..12]
+        // hier[8..12]: bit-level operations within single u32
+        // All 32 signals share one thread's arrival — arrival carries forward unchanged
         if(threadIdx.x == 0) {
           u32 r8 = ((v1 << 16) ^ hier_flag_xora) & ((v1 ^ hier_flag_xorb) | hier_flag_orb) & 0xffff0000;
           u32 r9 = ((r8 >> 8) ^ hier_flag_xora) & (((r8 >> 16) ^ hier_flag_xorb) | hier_flag_orb) & 0xff00;
@@ -182,8 +216,10 @@ __device__ void simulate_block_v1(
           u32 r11 = ((r10 >> 2) ^ hier_flag_xora) & (((r10 >> 4) ^ hier_flag_xorb) | hier_flag_orb) & 12 /* 0b1100 */;
           u32 r12 = ((r11 >> 1) ^ hier_flag_xora) & (((r11 >> 2) ^ hier_flag_xorb) | hier_flag_orb) & 2 /* 0b10 */;
           tmp_cur_hi = r8 | r9 | r10 | r11 | r12;
+          // Arrival from hier[7] thread 1 carries forward through bit-level ops
         }
         shared_state[threadIdx.x] = tmp_cur_hi;
+        shared_arrival[threadIdx.x] = (u8)tmp_cur_arr_u32;
       }
       __syncthreads();
 
@@ -327,6 +363,7 @@ __global__ void simulate_v1_noninteractive_simple_scan(
   __shared__ u32 shared_metadata[256];
   __shared__ u32 shared_writeouts[256];
   __shared__ u32 shared_state[256];
+  __shared__ u8 shared_arrival[256];  // Per-thread-position arrival times for timing
   __shared__ u32 script_starts[32], script_sizes[32];
   assert(num_major_stages <= 32);
   if(threadIdx.x < num_major_stages) {
@@ -342,7 +379,7 @@ __global__ void simulate_v1_noninteractive_simple_scan(
         states_noninteractive + cycle_i * state_size,
         states_noninteractive + (cycle_i + 1) * state_size,
         sram_data,
-        shared_metadata, shared_writeouts, shared_state
+        shared_metadata, shared_writeouts, shared_state, shared_arrival
         );
       cooperative_groups::this_grid().sync();
     }

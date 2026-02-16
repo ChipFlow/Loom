@@ -55,7 +55,8 @@ inline void simulate_block_v1(
     device u32* sram_data,
     threadgroup u32* shared_metadata,
     threadgroup u32* shared_writeouts,
-    threadgroup u32* shared_state
+    threadgroup u32* shared_state,
+    threadgroup uchar* shared_arrival  // per-thread-position arrival times
 ) {
     int script_pi = 0;
 
@@ -133,7 +134,12 @@ inline void simulate_block_v1(
             }
         }
         shared_state[tid] = t_global_rd_state;
+        // Initialize arrival times to 0 (inputs have zero arrival)
+        shared_arrival[tid] = 0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Read timing quantum from metadata slot [8] (ps per u8 unit)
+        u32 timing_quantum = shared_metadata[8];
 
         for (int bs_i = 0; bs_i < num_stages; ++bs_i) {
             u32 hier_input = 0, hier_flag_xora = 0, hier_flag_xorb = 0, hier_flag_orb = 0;
@@ -171,21 +177,35 @@ inline void simulate_block_v1(
             hier_flag_orb = t4_5.c3;
             t4_5 = read_vec4(script + script_pi + 256 * 4 * 4, tid);
 
+            // Extract per-thread-position gate delay from padding slot (u8 quantized)
+            u32 hier_flag_padding = t4_5.c4;
+            uchar gate_delay = (uchar)(hier_flag_padding & 0xFFu);
+
             threadgroup_barrier(mem_flags::mem_threadgroup);
             shared_state[tid] = hier_input;
+            shared_arrival[tid] = 0;  // Reset arrival for shuffle inputs
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // hier[0]
+            // hier[0]: threads 128-255 compute AND gates + track arrivals
             if (tid >= 128) {
                 u32 hier_input_a = shared_state[tid - 128];
                 u32 hier_input_b = hier_input;
                 u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
                 shared_state[tid] = ret;
+
+                // Arrival tracking: max(input_a, input_b) + gate_delay
+                // Pass-through (orb == 0xFFFFFFFF) means no gate, just wire
+                ushort arr_a = (ushort)shared_arrival[tid - 128];
+                ushort arr_b = (ushort)shared_arrival[tid];
+                bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+                ushort new_arr = is_pass ? arr_a : min((ushort)(max(arr_a, arr_b) + (ushort)gate_delay), (ushort)255);
+                shared_arrival[tid] = (uchar)new_arr;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // hier[1..3]
+            // hier[1..3]: shared memory reduction + arrival tracking
             u32 tmp_cur_hi = 0;
+            uchar tmp_cur_arr = 0;
             for (int hi = 1; hi <= 3; ++hi) {
                 int hier_width = 1 << (7 - hi);
                 if (tid >= (uint)hier_width && tid < (uint)(hier_width * 2)) {
@@ -194,22 +214,39 @@ inline void simulate_block_v1(
                     u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
                     tmp_cur_hi = ret;
                     shared_state[tid] = ret;
+
+                    // Arrival tracking
+                    ushort arr_a = (ushort)shared_arrival[tid + hier_width];
+                    ushort arr_b = (ushort)shared_arrival[tid + hier_width * 2];
+                    bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+                    ushort new_arr = is_pass ? arr_a : min((ushort)(max(arr_a, arr_b) + (ushort)gate_delay), (ushort)255);
+                    tmp_cur_arr = (uchar)new_arr;
+                    shared_arrival[tid] = tmp_cur_arr;
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
 
             // hier[4..7], within the first SIMD group (32 threads)
+            // Pack arrival into u32 for SIMD shuffle (Metal simd_shuffle works on u32)
+            u32 tmp_cur_arr_u32 = (u32)tmp_cur_arr;
             if (tid < 32) {
                 for (int hi = 4; hi <= 7; ++hi) {
                     int hier_width = 1 << (7 - hi);
                     u32 hier_input_a = simd_shuffle_down(tmp_cur_hi, hier_width);
                     u32 hier_input_b = simd_shuffle_down(tmp_cur_hi, hier_width * 2);
+                    u32 arr_a_u32 = simd_shuffle_down(tmp_cur_arr_u32, hier_width);
+                    u32 arr_b_u32 = simd_shuffle_down(tmp_cur_arr_u32, hier_width * 2);
                     if (tid >= (uint)hier_width && tid < (uint)(hier_width * 2)) {
                         tmp_cur_hi = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+                        // Arrival tracking
+                        bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+                        ushort new_arr = is_pass ? (ushort)arr_a_u32 : min((ushort)(max((ushort)arr_a_u32, (ushort)arr_b_u32) + (ushort)gate_delay), (ushort)255);
+                        tmp_cur_arr_u32 = (u32)(uchar)new_arr;
                     }
                 }
                 u32 v1 = simd_shuffle_down(tmp_cur_hi, 1);
-                // hier[8..12]
+                // hier[8..12]: bit-level operations within single u32
+                // All 32 signals share one thread's arrival — arrival carries forward unchanged
                 if (tid == 0) {
                     u32 r8 = ((v1 << 16) ^ hier_flag_xora) & ((v1 ^ hier_flag_xorb) | hier_flag_orb) & 0xffff0000;
                     u32 r9 = ((r8 >> 8) ^ hier_flag_xora) & (((r8 >> 16) ^ hier_flag_xorb) | hier_flag_orb) & 0xff00;
@@ -217,8 +254,11 @@ inline void simulate_block_v1(
                     u32 r11 = ((r10 >> 2) ^ hier_flag_xora) & (((r10 >> 4) ^ hier_flag_xorb) | hier_flag_orb) & 12;
                     u32 r12 = ((r11 >> 1) ^ hier_flag_xora) & (((r11 >> 2) ^ hier_flag_xorb) | hier_flag_orb) & 2;
                     tmp_cur_hi = r8 | r9 | r10 | r11 | r12;
+                    // Arrival from hier[7] thread 1 carries forward through bit-level ops
+                    // (conservative: same arrival for all 32 signals in this word)
                 }
                 shared_state[tid] = tmp_cur_hi;
+                shared_arrival[tid] = (uchar)tmp_cur_arr_u32;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -353,6 +393,7 @@ kernel void simulate_v1_stage(
     threadgroup u32 shared_metadata[256];
     threadgroup u32 shared_writeouts[256];
     threadgroup u32 shared_state[256];
+    threadgroup uchar shared_arrival[256];  // Per-thread-position arrival times for timing
 
     usize stage_i = params.current_stage;
     usize cycle_i = params.current_cycle;
@@ -375,7 +416,8 @@ kernel void simulate_v1_stage(
         sram_data,
         shared_metadata,
         shared_writeouts,
-        shared_state
+        shared_state,
+        shared_arrival
     );
 
     // TODO: Process simulation control nodes from the script
