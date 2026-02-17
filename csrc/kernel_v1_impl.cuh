@@ -4,6 +4,7 @@
 #include <crates/ulib/includes.hpp>
 #include <cstdio>
 #include <cooperative_groups.h>
+#include "event_buffer.h"
 
 struct alignas(8) VectorRead2 {
   u32 c1, c2;
