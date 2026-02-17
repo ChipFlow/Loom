@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,6 +50,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -135,6 +137,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install CUDA Toolkit (driver already present on GPU runner)
         run: |
@@ -200,6 +203,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -227,6 +231,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -272,6 +277,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -377,6 +383,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -475,6 +482,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -524,6 +532,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
