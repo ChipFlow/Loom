@@ -136,10 +136,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Check CUDA availability
+      - name: Install CUDA Toolkit (driver already present on GPU runner)
         run: |
-          nvidia-smi || true
-          nvcc --version || true
+          nvidia-smi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-toolkit-12-8
+          echo "PATH=/usr/local/cuda-12.8/bin:$PATH" >> $GITHUB_ENV
+          echo "CUDA_PATH=/usr/local/cuda-12.8" >> $GITHUB_ENV
+          nvcc --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
