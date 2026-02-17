@@ -276,8 +276,7 @@ jobs:
   # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
   mcu-soc-synth:
     name: MCU SoC Synthesis + P&R
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: backend-monster
     steps:
       - uses: actions/checkout@v4
         with:
@@ -349,7 +348,6 @@ jobs:
           fi
 
       - name: Run OpenLane2 P&R in Docker
-        timeout-minutes: 35
         run: |
           docker run --rm \
             -v "openlane-pdk:/root/.volare" \
