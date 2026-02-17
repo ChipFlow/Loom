@@ -56,13 +56,14 @@ jobs:
       - name: Install LLVM (for OpenMP support)
         run: |
           brew install llvm
-          echo "CC=/opt/homebrew/opt/llvm/bin/clang" >> $GITHUB_ENV
-          echo "CXX=/opt/homebrew/opt/llvm/bin/clang++" >> $GITHUB_ENV
-          # Add library paths for libomp linking
-          echo "LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
-          # Export LLVM version for cache key (C++ ABI changes break cached objects)
-          LLVM_VER=$(/opt/homebrew/opt/llvm/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
+          # Use Homebrew LLVM toolchain consistently (compiler, linker, libc++)
+          echo "LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          echo "LDFLAGS=-L${LLVM_PREFIX}/lib/c++ -L${LLVM_PREFIX}/lib -fuse-ld=${LLVM_PREFIX}/bin/ld64.lld" >> $GITHUB_ENV
+          LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
           echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
 
       - name: Cache cargo
@@ -375,11 +376,13 @@ jobs:
       - name: Install LLVM (for OpenMP support)
         run: |
           brew install llvm
-          echo "CC=/opt/homebrew/opt/llvm/bin/clang" >> $GITHUB_ENV
-          echo "CXX=/opt/homebrew/opt/llvm/bin/clang++" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
-          LLVM_VER=$(/opt/homebrew/opt/llvm/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          echo "LDFLAGS=-L${LLVM_PREFIX}/lib/c++ -L${LLVM_PREFIX}/lib -fuse-ld=${LLVM_PREFIX}/bin/ld64.lld" >> $GITHUB_ENV
+          LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
           echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
 
       - name: Cache cargo
