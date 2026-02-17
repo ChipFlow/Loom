@@ -131,7 +131,7 @@ jobs:
   # Build and run CUDA simulation on NVIDIA GPU
   cuda:
     name: CUDA Tests
-    runs-on: [self-hosted, nvidia-runner-1]
+    runs-on: nvidia-runner-1
     steps:
       - uses: actions/checkout@v4
         with:
