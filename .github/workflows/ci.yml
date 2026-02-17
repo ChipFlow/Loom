@@ -276,7 +276,7 @@ jobs:
   # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
   mcu-soc-synth:
     name: MCU SoC Synthesis + P&R
-    runs-on: ubuntu-latest-large
+    runs-on: backend-monster
     steps:
       - uses: actions/checkout@v4
         with:
