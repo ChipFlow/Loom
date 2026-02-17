@@ -809,42 +809,28 @@ fn sim_cuda(
     device.synchronize();
     let timer_sim = clilog::stimer!("simulation");
 
-    if let Some(tc) = timing_constraints {
-        // Use timed variant with timing constraints
-        let mut tc_uvec: UVec<u32> = tc.clone().into();
-        tc_uvec.as_mut_uptr(device);
-        // Event buffer for timing violations (allocated on GPU)
-        let mut event_buf_uvec: UVec<u8> = UVec::new_zeroed(
-            std::mem::size_of::<gem::event_buffer::EventBuffer>(),
-            device,
-        );
-        ucci::simulate_v1_noninteractive_timed(
-            script.num_blocks,
-            script.num_major_stages,
-            &script.blocks_start,
-            &script.blocks_data,
-            &mut sram_storage,
-            num_cycles,
-            script.reg_io_state_size as usize,
-            &mut input_states_uvec,
-            &tc_uvec,
-            &mut event_buf_uvec,
-            device,
-        );
-    } else {
-        // Use original function without timing
-        ucci::simulate_v1_noninteractive_simple_scan(
-            script.num_blocks,
-            script.num_major_stages,
-            &script.blocks_start,
-            &script.blocks_data,
-            &mut sram_storage,
-            num_cycles,
-            script.reg_io_state_size as usize,
-            &mut input_states_uvec,
-            device,
+    if timing_constraints.is_some() {
+        // TODO: Wire timing constraints to CUDA timed kernel variant.
+        // The EventBuffer struct contains AtomicU32, which doesn't impl Copy,
+        // so UVec<EventBuffer> can't satisfy the UniversalCopy trait bound.
+        // For now, the simple_scan variant passes nullptr for both timing_constraints
+        // and event_buffer on the C side, matching cuda_test.rs behavior.
+        clilog::warn!(
+            "Timing constraints requested but CUDA timed kernel not yet wired; \
+             running without GPU-side timing checks"
         );
     }
+    ucci::simulate_v1_noninteractive_simple_scan(
+        script.num_blocks,
+        script.num_major_stages,
+        &script.blocks_start,
+        &script.blocks_data,
+        &mut sram_storage,
+        num_cycles,
+        script.reg_io_state_size as usize,
+        &mut input_states_uvec,
+        device,
+    );
 
     device.synchronize();
     clilog::finish!(timer_sim);
