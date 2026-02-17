@@ -1,98 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! GPU-only simulation with Metal: gate evaluation, SPI flash, and UART
-//! all run on GPU. No per-tick CPU interaction needed.
+//! Metal GPU co-simulation engine with SPI flash, UART, and Wishbone bus trace models.
 //!
-//! Flash and UART IO models execute as GPU kernels after each tick's
-//! simulate passes, eliminating the CPU round-trip bottleneck.
-//!
-//! Usage:
-//!   cargo run -r --features metal --bin gpu_sim -- <netlist.gv> <gemparts> \
-//!     --config <testbench.json> [--max-cycles N] [--num-blocks N]
+//! Extracted from the `gpu_sim` binary. All IO models (flash, UART, bus trace)
+//! run as GPU kernels — no per-tick CPU interaction needed.
 
-use gem::aig::{DriverType, AIG};
-use gem::aigpdk::AIGPDKLeafPins;
-use gem::flatten::FlattenedScriptV1;
-use gem::pe::Partition;
-use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
-use gem::staging::build_staged_aigs;
-use gem::testbench::{CppSpiFlash, PortMapping, TestbenchConfig};
-use indexmap::IndexSet;
-use netlistdb::{GeneralPinName, NetlistDB};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::PathBuf;
-use ulib::{AsUPtr, Device};
 
-#[macro_use]
-extern crate objc;
-
+use crate::aig::{DriverType, AIG};
+use crate::flatten::FlattenedScriptV1;
+use crate::sim::setup::{self, LoadedDesign};
+use crate::testbench::{CppSpiFlash, PortMapping, TestbenchConfig, UartEvent};
 use metal::{
     CommandQueue, ComputePipelineState, Device as MTLDevice, MTLResourceOptions, MTLSize,
     SharedEvent,
 };
+use netlistdb::{GeneralPinName, NetlistDB};
+use ulib::{AsUPtr, Device};
 
-// ── CLI Arguments ────────────────────────────────────────────────────────────
+/// Runtime options for co-simulation.
+pub struct CosimOpts {
+    pub max_cycles: Option<usize>,
+    pub num_blocks: usize,
+    pub flash_verbose: bool,
+    pub check_with_cpu: bool,
+    pub gpu_profile: bool,
+    pub clock_period: Option<u64>,
+}
 
-#[derive(clap::Parser, Debug)]
-#[command(name = "gpu_sim")]
-#[command(about = "Hybrid GPU/CPU co-simulation with Metal")]
-struct Args {
-    /// Gate-level verilog path synthesized in AIGPDK library.
-    netlist_verilog: PathBuf,
-
-    /// Pre-compiled partition mapping (.gemparts file).
-    gemparts: PathBuf,
-
-    /// Testbench configuration JSON file.
-    #[clap(long)]
-    config: PathBuf,
-
-    /// Top module type in netlist.
-    #[clap(long)]
-    top_module: Option<String>,
-
-    /// Level split thresholds (comma-separated).
-    #[clap(long, value_delimiter = ',')]
-    level_split: Vec<usize>,
-
-    /// Number of GPU threadgroups (blocks). Should be ~2x GPU SM count.
-    #[clap(long, default_value = "64")]
-    num_blocks: usize,
-
-    /// Maximum system clock ticks to simulate.
-    #[clap(long)]
-    max_cycles: Option<usize>,
-
-    /// Enable verbose flash model debug output.
-    #[clap(long)]
-    flash_verbose: bool,
-
-    /// Clock period in picoseconds (overrides config file value, for UART baud calc).
-    #[clap(long)]
-    clock_period: Option<u64>,
-
-    /// Verify GPU results against CPU baseline.
-    #[clap(long)]
-    check_with_cpu: bool,
-
-    /// Run GPU kernel profiling: isolate each kernel in its own command buffer
-    /// and measure per-kernel GPU execution time.
-    #[clap(long)]
-    gpu_profile: bool,
-
-    /// Path to SDF file for per-instance back-annotated delays.
-    #[clap(long)]
-    sdf: Option<PathBuf>,
-
-    /// SDF corner selection: min, typ, or max (default: typ).
-    #[clap(long, default_value = "typ")]
-    sdf_corner: String,
-
-    /// Enable SDF debug output (reports unmatched instances).
-    #[clap(long)]
-    sdf_debug: bool,
+/// Result of a co-simulation run.
+pub struct CosimResult {
+    pub passed: bool,
+    pub uart_events: Vec<UartEvent>,
+    pub ticks_simulated: usize,
 }
 
 // ── Simulation Parameters (must match Metal shader) ──────────────────────────
@@ -1077,7 +1017,7 @@ impl MetalSimulator {
 // ── GPIO ↔ State Buffer Mapping ──────────────────────────────────────────────
 
 /// Maps GPIO pin indices to bit positions in the packed u32 state buffer.
-struct GpioMapping {
+pub(crate) struct GpioMapping {
     /// gpio_in[idx] → (aigpin, state bit position)
     input_bits: HashMap<usize, u32>,
     /// gpio_out[idx] → state bit position in output_map
@@ -1114,7 +1054,7 @@ fn clear_bit(state: &mut [u32], pos: u32) {
 /// When `port_mapping` is provided, maps GPIO indices to port names explicitly
 /// (for designs like ChipFlow that use named ports instead of gpio_in[N]/gpio_out[N]).
 /// Falls back to parsing gpio_in[N]/gpio_out[N] from pin names when no mapping given.
-fn build_gpio_mapping(
+pub(crate) fn build_gpio_mapping(
     aig: &AIG,
     netlistdb: &NetlistDB,
     script: &FlattenedScriptV1,
@@ -1836,7 +1776,7 @@ fn simulate_block_v1_inner(
     sram_data: &mut [u32],
     diag: bool,
 ) {
-    use gem::aigpdk::AIGPDK_SRAM_SIZE;
+    use crate::aigpdk::AIGPDK_SRAM_SIZE;
     let mut script_pi = 0;
     loop {
         let num_stages = script[script_pi];
@@ -2043,7 +1983,7 @@ fn simulate_block_v1_inner(
                 .count();
             let changed_bits: usize = (0..num_ios as usize)
                 .map(|i| {
-                    let old_wo = input_state[(io_offset as usize + i)];
+                    let old_wo = input_state[io_offset as usize + i];
                     let clken = clken_perm[i];
                     let wo = (old_wo & !clken) | (writeouts[i] & clken);
                     (old_wo ^ wo).count_ones() as usize
@@ -2086,157 +2026,59 @@ fn simulate_block_v1_inner(
     assert_eq!(script_pi, script.len());
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// ── Public Entry Point ───────────────────────────────────────────────────────
 
-fn main() {
-    clilog::init_stderr_color_debug();
-    clilog::enable_timer("gpu_sim");
-    clilog::enable_timer("gem");
-    clilog::set_max_print_count(clilog::Level::Warn, "NL_SV_LIT", 1);
-    eprintln!("WARNING: gpu_sim is deprecated. Use `loom cosim` instead:");
-    eprintln!("  cargo run -r --features metal --bin loom -- cosim ...");
-    eprintln!();
-
-    let args = <Args as clap::Parser>::parse();
-    clilog::info!("gpu_sim args:\n{:#?}", args);
-
-    // ── Load testbench config ────────────────────────────────────────────
-
-    let file = File::open(&args.config).expect("Failed to open config file");
-    let reader = BufReader::new(file);
-    let config: TestbenchConfig =
-        serde_json::from_reader(reader).expect("Failed to parse config JSON");
-    clilog::info!("Loaded testbench config: {:?}", config);
-
-    let max_ticks = args.max_cycles.unwrap_or(config.num_cycles);
-
-    // ── Load netlist and build AIG ───────────────────────────────────────
-
-    let timer_load = clilog::stimer!("load_netlist");
-
-    // Detect cell library (AIGPDK vs SKY130)
-    let cell_library = detect_library_from_file(&args.netlist_verilog)
-        .expect("Failed to read netlist file for library detection");
-    clilog::info!("Detected cell library: {}", cell_library);
-
-    let netlistdb = match cell_library {
-        CellLibrary::SKY130 => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &SKY130LeafPins,
-        ),
-        CellLibrary::AIGPDK | CellLibrary::Mixed => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &AIGPDKLeafPins(),
-        ),
-    }
-    .expect("cannot build netlist");
-
-    let aig = AIG::from_netlistdb(&netlistdb);
-    clilog::info!(
-        "AIG: {} pins, {} DFFs, {} SRAMs",
-        aig.num_aigpins,
-        aig.dffs.len(),
-        aig.srams.len()
-    );
-    clilog::finish!(timer_load);
-
-    // ── Build staged AIGs and load partitions ────────────────────────────
-
-    let timer_script = clilog::stimer!("build_script");
-    let stageds = build_staged_aigs(&aig, &args.level_split);
-
-    let f = std::fs::File::open(&args.gemparts).unwrap();
-    let mut buf = std::io::BufReader::new(f);
-    let parts_in_stages: Vec<Vec<Partition>> = serde_bare::from_reader(&mut buf).unwrap();
-    clilog::info!(
-        "Partitions per stage: {:?}",
-        parts_in_stages
-            .iter()
-            .map(|ps| ps.len())
-            .collect::<Vec<_>>()
-    );
-
-    let mut input_layout = Vec::new();
-    for (i, driv) in aig.drivers.iter().enumerate() {
-        if let DriverType::InputPort(_) | DriverType::InputClockFlag(_, _) = driv {
-            input_layout.push(i);
-        }
-    }
-
-    let mut script = FlattenedScriptV1::from(
-        &aig,
-        &stageds
-            .iter()
-            .map(|(_, _, staged)| staged)
-            .collect::<Vec<_>>(),
-        &parts_in_stages
-            .iter()
-            .map(|ps| ps.as_slice())
-            .collect::<Vec<_>>(),
-        args.num_blocks,
-        input_layout,
-    );
-    clilog::info!(
-        "Script: state_size={}, sram_storage={}, blocks={}, stages={}",
-        script.reg_io_state_size,
-        script.sram_storage_size,
-        script.num_blocks,
-        script.num_major_stages
-    );
-    clilog::finish!(timer_script);
-
-    // ── Load SDF timing data (from CLI or testbench config) ──────────────
-    {
-        let sdf_path = args.sdf.clone().or_else(|| {
-            config
+/// Run a GPU co-simulation with testbench config.
+///
+/// `design` should already have basic SDF loaded if `--sdf` was passed on CLI.
+/// This function also checks `config.timing` for additional SDF configuration.
+pub fn run_cosim(
+    design: &mut LoadedDesign,
+    config: &TestbenchConfig,
+    opts: &CosimOpts,
+    timing_constraints: &Option<Vec<u32>>,
+) -> CosimResult {
+    // Load SDF from testbench config if not already loaded via CLI --sdf
+    if !design.script.timing_enabled {
+        let sdf_path_from_config = config
+            .timing
+            .as_ref()
+            .map(|t| std::path::PathBuf::from(&t.sdf_file));
+        if let Some(ref sdf_path) = sdf_path_from_config {
+            let sdf_corner_str = config
                 .timing
                 .as_ref()
-                .map(|t| std::path::PathBuf::from(&t.sdf_file))
-        });
-        let sdf_corner_str = if args.sdf.is_some() {
-            &args.sdf_corner
-        } else if let Some(ref t) = config.timing {
-            &t.sdf_corner
-        } else {
-            "typ"
-        };
-        let sdf_corner = match sdf_corner_str {
-            "min" => gem::sdf_parser::SdfCorner::Min,
-            "max" => gem::sdf_parser::SdfCorner::Max,
-            _ => gem::sdf_parser::SdfCorner::Typ,
-        };
-
-        if let Some(ref sdf_path) = sdf_path {
-            clilog::info!("Loading SDF: {:?} (corner: {})", sdf_path, sdf_corner_str);
-            match gem::sdf_parser::SdfFile::parse_file(sdf_path, sdf_corner) {
-                Ok(sdf) => {
-                    clilog::info!("SDF loaded: {}", sdf.summary());
-                    let clock_ps = config
-                        .timing
-                        .as_ref()
-                        .map(|t| t.clock_period_ps)
-                        .or(config.clock_period_ps)
-                        .unwrap_or(25000);
-                    script.load_timing_from_sdf(
-                        &aig,
-                        &netlistdb,
-                        &sdf,
-                        clock_ps,
-                        None,
-                        args.sdf_debug,
-                    );
-                    script.inject_timing_to_script();
-                }
-                Err(e) => clilog::warn!("Failed to load SDF: {}", e),
-            }
+                .map(|t| t.sdf_corner.as_str())
+                .unwrap_or("typ");
+            let clock_ps = config
+                .timing
+                .as_ref()
+                .map(|t| t.clock_period_ps)
+                .or(config.clock_period_ps)
+                .unwrap_or(25000);
+            setup::load_sdf(
+                &mut design.script,
+                &design.aig,
+                &design.netlistdb,
+                sdf_path,
+                sdf_corner_str,
+                false,
+                Some(clock_ps),
+            );
         }
     }
+
+    let max_ticks = opts.max_cycles.unwrap_or(config.num_cycles);
+    let script = &design.script;
+    let aig = &design.aig;
+    let netlistdb = &design.netlistdb;
+    let num_blocks = script.num_blocks;
+    let num_major_stages = script.num_major_stages;
+    let state_size = script.reg_io_state_size as usize;
 
     // ── Build GPIO mapping ───────────────────────────────────────────────
 
-    let gpio_map = build_gpio_mapping(&aig, &netlistdb, &script, config.port_mapping.as_ref());
+    let gpio_map = build_gpio_mapping(aig, netlistdb, script, config.port_mapping.as_ref());
 
     // Verify we found the expected GPIO pins
     let clock_gpio = config.clock_gpio;
@@ -2288,7 +2130,7 @@ fn main() {
         "flash_csn",
     ];
     for sig in &diag_signals {
-        let pos = resolve_signal_pos(&aig, &netlistdb, &script, sig);
+        let pos = resolve_signal_pos(aig, netlistdb, script, sig);
         if pos != 0xFFFFFFFF {
             clilog::info!("Diagnostic signal '{}' → output state pos {}", sig, pos);
         } else {
@@ -2298,9 +2140,9 @@ fn main() {
 
     // ── Initialize peripheral models (CPU-side, kept for --check-with-cpu) ──
 
-    let flash: Option<CppSpiFlash> = if let Some(ref flash_cfg) = config.flash {
+    let _flash: Option<CppSpiFlash> = if let Some(ref flash_cfg) = config.flash {
         let mut fl = CppSpiFlash::new(16 * 1024 * 1024);
-        fl.set_verbose(args.flash_verbose);
+        fl.set_verbose(opts.flash_verbose);
         let firmware_path = std::path::Path::new(&flash_cfg.firmware);
         match fl.load_firmware(firmware_path, flash_cfg.firmware_offset) {
             Ok(size) => clilog::info!(
@@ -2316,7 +2158,7 @@ fn main() {
     };
 
     // CLI --clock-period overrides config file clock_period_ps; default 1000ps (1GHz) if neither set
-    let clock_period_ps = args.clock_period.or(config.clock_period_ps).unwrap_or(1000);
+    let clock_period_ps = opts.clock_period.or(config.clock_period_ps).unwrap_or(1000);
     let clock_hz = 1_000_000_000_000u64 / clock_period_ps;
     clilog::info!(
         "Clock period: {} ps ({} MHz), UART cycles_per_bit: {}",
@@ -2330,9 +2172,7 @@ fn main() {
     // ── Initialize Metal simulator and GPU state buffers ─────────────────
 
     let timer_init = clilog::stimer!("init_gpu");
-    let simulator = MetalSimulator::new(script.num_major_stages);
-
-    let state_size = script.reg_io_state_size as usize;
+    let simulator = MetalSimulator::new(num_major_stages);
 
     // States: [input state (state_size)] [output state (state_size)]
     let states_buffer = simulator.device.new_buffer(
@@ -2415,40 +2255,23 @@ fn main() {
     );
 
     // Event buffer (for $stop/$finish/assertions)
-    let event_buffer = Box::new(gem::event_buffer::EventBuffer::new());
+    let event_buffer = Box::new(crate::event_buffer::EventBuffer::new());
     let event_buffer_ptr = Box::into_raw(event_buffer);
     let event_buffer_metal = simulator.device.new_buffer_with_bytes_no_copy(
         event_buffer_ptr as *const _,
-        std::mem::size_of::<gem::event_buffer::EventBuffer>() as u64,
+        std::mem::size_of::<crate::event_buffer::EventBuffer>() as u64,
         MTLResourceOptions::StorageModeShared,
         None,
     );
 
     // Timing constraint buffer for GPU-side setup/hold checking.
-    // Format: [clock_period_ps:u32, constraints[0], constraints[1], ...]
-    // Each constraint word packs [setup_ps:16][hold_ps:16] for that state word.
-    let timing_constraints_buffer = if script.timing_enabled && !script.dff_constraints.is_empty() {
-        let (clock_ps, constraints) = script.build_timing_constraint_buffer();
-        let non_zero = constraints.iter().filter(|&&v| v != 0).count();
-        clilog::info!(
-            "Timing constraints: {} words, {} with DFF constraints, clock_period={}ps",
-            constraints.len(),
-            non_zero,
-            clock_ps
-        );
-        // Prepend clock_period_ps as first element
-        let mut buf = Vec::with_capacity(1 + constraints.len());
-        buf.push(clock_ps);
-        buf.extend_from_slice(&constraints);
-        let metal_buf = simulator.device.new_buffer_with_data(
+    let timing_constraints_buffer = timing_constraints.as_ref().map(|buf| {
+        simulator.device.new_buffer_with_data(
             buf.as_ptr() as *const _,
             (buf.len() * std::mem::size_of::<u32>()) as u64,
             MTLResourceOptions::StorageModeShared,
-        );
-        Some(metal_buf)
-    } else {
-        None
-    };
+        )
+    });
 
     clilog::finish!(timer_init);
 
@@ -2456,8 +2279,6 @@ fn main() {
 
     let timer_prep = clilog::stimer!("build_state_prep_buffers");
     let reset_cycles = config.reset_cycles;
-    let num_major_stages = script.num_major_stages;
-    let num_blocks = script.num_blocks;
 
     // Initial reset value
     let reset_val_active = if config.reset_active_high { 1u8 } else { 0u8 };
@@ -2606,7 +2427,7 @@ fn main() {
     if let Some(ref flash_cfg) = config.flash {
         use std::io::Read;
         let firmware_path = std::path::Path::new(&flash_cfg.firmware);
-        let mut file = File::open(firmware_path).expect("Failed to open firmware file");
+        let mut file = std::fs::File::open(firmware_path).expect("Failed to open firmware file");
         let mut data = Vec::new();
         file.read_to_end(&mut data)
             .expect("Failed to read firmware");
@@ -2673,7 +2494,7 @@ fn main() {
 
     // ── GPU Wishbone Bus Trace buffers ────────────────────────────────
 
-    let wb_trace_params = build_wb_trace_params(&aig, &netlistdb, &script);
+    let wb_trace_params = build_wb_trace_params(aig, netlistdb, script);
     let wb_trace_params_buffer = simulator.device.new_buffer(
         std::mem::size_of::<WbTraceParams>() as u64,
         MTLResourceOptions::StorageModeShared,
@@ -2707,8 +2528,8 @@ fn main() {
 
     // ── GPU Kernel Profiling (optional) ──────────────────────────────────
 
-    if args.gpu_profile {
-        let profile_ticks = args.max_cycles.unwrap_or(1000).min(5000);
+    if opts.gpu_profile {
+        let profile_ticks = opts.max_cycles.unwrap_or(1000).min(5000);
         simulator.profile_gpu_kernels(
             profile_ticks,
             num_blocks,
@@ -2739,7 +2560,11 @@ fn main() {
         unsafe {
             drop(Box::from_raw(event_buffer_ptr));
         }
-        return;
+        return CosimResult {
+            passed: true,
+            uart_events: Vec::new(),
+            ticks_simulated: 0,
+        };
     }
 
     // ── GPU-only simulation loop ─────────────────────────────────────────
@@ -2785,7 +2610,7 @@ fn main() {
     }
 
     // UART event collection (CPU-side, populated from channel drain)
-    let mut uart_events: Vec<gem::testbench::UartEvent> = Vec::new();
+    let mut uart_events: Vec<UartEvent> = Vec::new();
     let mut uart_read_head: u32 = 0;
     let mut wb_trace_read_head: u32 = 0;
 
@@ -2808,24 +2633,24 @@ fn main() {
     let mut diag_sram_write_count: usize = 0;
 
     // CPU verification state (--check-with-cpu)
-    let mut cpu_states: Vec<u32> = if args.check_with_cpu {
+    let mut cpu_states: Vec<u32> = if opts.check_with_cpu {
         vec![0u32; 2 * state_size]
     } else {
         Vec::new()
     };
-    let mut cpu_sram: Vec<u32> = if args.check_with_cpu {
+    let mut cpu_sram: Vec<u32> = if opts.check_with_cpu {
         vec![0u32; script.sram_storage_size as usize]
     } else {
         Vec::new()
     };
     let mut cpu_check_mismatches: usize = 0;
-    let cpu_check_max_ticks = if args.check_with_cpu { 500 } else { 0 };
+    let cpu_check_max_ticks = if opts.check_with_cpu { 500 } else { 0 };
 
     let mut post_reset_state_snapshot: Option<Vec<u32>> = None;
 
     let mut tick: usize = 0;
     while tick < max_ticks {
-        let batch = if args.check_with_cpu && tick < cpu_check_max_ticks {
+        let batch = if opts.check_with_cpu && tick < cpu_check_max_ticks {
             1 // single tick for CPU comparison
         } else if trace_ticks > 0 && tick < reset_cycles + trace_ticks {
             1 // single tick for tracing
@@ -2859,7 +2684,7 @@ fn main() {
 
         // Save pre-tick state for CPU verification
         let saved_flash_d_i: u8;
-        if args.check_with_cpu && tick < cpu_check_max_ticks && batch == 1 {
+        if opts.check_with_cpu && tick < cpu_check_max_ticks && batch == 1 {
             let gpu_states: &[u32] = unsafe {
                 std::slice::from_raw_parts(states_buffer.contents() as *const u32, 2 * state_size)
             };
@@ -2964,7 +2789,7 @@ fn main() {
         }
 
         // ── CPU verification: simulate same tick on CPU and compare ──
-        if args.check_with_cpu && tick < cpu_check_max_ticks && batch == 1 {
+        if opts.check_with_cpu && tick < cpu_check_max_ticks && batch == 1 {
             // CPU state_prep(fall): copy output → input, apply fall_ops
             // Read from the Metal buffer (updated by update_reset_in_ops each tick)
             cpu_states.copy_within(state_size..2 * state_size, 0);
@@ -3119,13 +2944,13 @@ fn main() {
             if tick >= reset_cycles && tick <= reset_cycles + 5 {
                 let (input_half, output_half) = cpu_states.split_at(state_size);
                 compare_aig_vs_flattened(
-                    &aig,
+                    aig,
                     input_half,
                     output_half,
-                    &script,
+                    script,
                     state_size,
                     tick,
-                    Some(&netlistdb),
+                    Some(netlistdb),
                 );
             }
 
@@ -3157,7 +2982,7 @@ fn main() {
             let gpu_output = &gpu_states[state_size..2 * state_size];
             let cpu_output = &cpu_states[state_size..2 * state_size];
             let mut mismatches = 0;
-            let mut first_mismatch_word = 0;
+            let mut _first_mismatch_word = 0;
             for i in 0..state_size {
                 if gpu_output[i] != cpu_output[i] {
                     if mismatches < 5 {
@@ -3174,7 +2999,7 @@ fn main() {
                         );
                     }
                     if mismatches == 0 {
-                        first_mismatch_word = i;
+                        _first_mismatch_word = i;
                     }
                     mismatches += 1;
                 }
@@ -3217,7 +3042,7 @@ fn main() {
             // Per-tick output state change tracking
             if tick >= reset_cycles.saturating_sub(2) && tick <= reset_cycles + 15 {
                 let gpu_output = &gpu_states[state_size..2 * state_size];
-                let changed_words: usize = gpu_output
+                let _changed_words: usize = gpu_output
                     .iter()
                     .zip(cpu_output.iter())
                     .filter(|(a, b)| a != b)
@@ -3253,7 +3078,7 @@ fn main() {
                     '.'
                 };
                 clilog::info!("UART TX: 0x{:02X} '{}'", byte, ch);
-                uart_events.push(gem::testbench::UartEvent {
+                uart_events.push(UartEvent {
                     timestamp: tick, // approximate tick
                     peripheral: "uart_0".to_string(),
                     event: "tx".to_string(),
@@ -3578,13 +3403,13 @@ fn main() {
     if let Some(ref output_path) = config.output_events {
         #[derive(serde::Serialize)]
         struct EventsOutput {
-            events: Vec<gem::testbench::UartEvent>,
+            events: Vec<UartEvent>,
         }
         let output = EventsOutput {
             events: uart_events.clone(),
         };
         let json = serde_json::to_string_pretty(&output).expect("Failed to serialize events");
-        let mut file = File::create(output_path).expect("Failed to create events file");
+        let mut file = std::fs::File::create(output_path).expect("Failed to create events file");
         use std::io::Write;
         file.write_all(json.as_bytes())
             .expect("Failed to write events");
@@ -3597,7 +3422,7 @@ fn main() {
     if let Some(ref ref_path) = config.events_reference {
         #[derive(serde::Deserialize)]
         struct EventsFile {
-            events: Vec<gem::testbench::UartEvent>,
+            events: Vec<UartEvent>,
         }
         let ref_file = std::fs::read_to_string(ref_path)
             .unwrap_or_else(|e| panic!("Failed to read events reference {}: {}", ref_path, e));
@@ -3662,7 +3487,7 @@ fn main() {
 
     // ── Optional CPU verification ────────────────────────────────────────
 
-    if args.check_with_cpu {
+    if opts.check_with_cpu {
         if cpu_check_mismatches == 0 {
             clilog::info!(
                 "CPU verification: PASSED ({} ticks checked)",
@@ -3677,9 +3502,6 @@ fn main() {
         }
     }
 
-    // Keep flash alive (for --check-with-cpu in future)
-    let _ = flash;
-
     // Clean up event buffer
     unsafe {
         drop(Box::from_raw(event_buffer_ptr));
@@ -3690,6 +3512,11 @@ fn main() {
         println!("SIMULATION: PASSED");
     } else {
         println!("SIMULATION: FAILED (event mismatch)");
-        std::process::exit(1);
+    }
+
+    CosimResult {
+        passed: events_passed,
+        uart_events,
+        ticks_simulated: max_ticks,
     }
 }

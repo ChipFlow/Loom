@@ -360,6 +360,7 @@ fn cmd_sim(args: SimArgs) {
         sdf: args.sdf.clone(),
         sdf_corner: args.sdf_corner.clone(),
         sdf_debug: args.sdf_debug,
+        clock_period_ps: None,
     };
 
     #[allow(unused_mut)]
@@ -1038,26 +1039,66 @@ fn cmd_cosim(args: CosimArgs) {
 
     #[cfg(feature = "metal")]
     {
-        // The co-simulation logic is complex (SPI flash, UART, batch GPU encoding).
-        // For now, delegate to gpu_sim binary. Full integration planned for a future release.
-        eprintln!(
-            "loom cosim is not yet fully integrated.\n\
-             \n\
-             The co-simulation logic (SPI flash model, UART, GPU batch encoding)\n\
-             is currently available in the gpu_sim binary:\n\
-             \n  cargo run -r --features metal --bin gpu_sim -- \\\n\
-               {:?} {:?} --config {:?} \\\n\
-               --num-blocks {}{}{}\n",
-            args.netlist_verilog,
-            args.gemparts,
-            args.config,
-            args.num_blocks,
-            args.max_cycles
-                .map_or(String::new(), |c| format!(" --max-cycles {}", c)),
-            args.sdf
+        use gem::sim::cosim_metal::CosimOpts;
+        use gem::sim::setup;
+        use gem::testbench::TestbenchConfig;
+
+        // Load testbench config
+        let file = std::fs::File::open(&args.config).expect("Failed to open config file");
+        let reader = std::io::BufReader::new(file);
+        let config: TestbenchConfig =
+            serde_json::from_reader(reader).expect("Failed to parse config JSON");
+        clilog::info!("Loaded testbench config: {:?}", config);
+
+        // Determine clock period for SDF loading
+        let clock_period_ps = args
+            .clock_period
+            .or(config.clock_period_ps)
+            .or(config.timing.as_ref().map(|t| t.clock_period_ps));
+
+        // Determine SDF path: CLI --sdf takes priority, then config.timing.sdf_file
+        let sdf = args.sdf.clone().or_else(|| {
+            config
+                .timing
                 .as_ref()
-                .map_or(String::new(), |s| format!(" --sdf {:?}", s)),
-        );
-        std::process::exit(1);
+                .map(|t| std::path::PathBuf::from(&t.sdf_file))
+        });
+        let sdf_corner = if args.sdf.is_some() {
+            args.sdf_corner.clone()
+        } else if let Some(ref t) = config.timing {
+            t.sdf_corner.clone()
+        } else {
+            "typ".to_string()
+        };
+        let sdf_debug = args.sdf_debug;
+
+        let design_args = DesignArgs {
+            netlist_verilog: args.netlist_verilog.clone(),
+            top_module: args.top_module.clone(),
+            level_split: args.level_split.clone(),
+            gemparts: args.gemparts.clone(),
+            num_blocks: args.num_blocks,
+            json_path: None,
+            sdf,
+            sdf_corner,
+            sdf_debug,
+            clock_period_ps,
+        };
+
+        let mut design = setup::load_design(&design_args);
+        let timing_constraints = setup::build_timing_constraints(&design.script);
+
+        let opts = CosimOpts {
+            max_cycles: args.max_cycles,
+            num_blocks: args.num_blocks,
+            flash_verbose: args.flash_verbose,
+            check_with_cpu: args.check_with_cpu,
+            gpu_profile: args.gpu_profile,
+            clock_period: args.clock_period,
+        };
+
+        let result =
+            gem::sim::cosim_metal::run_cosim(&mut design, &config, &opts, &timing_constraints);
+        std::process::exit(if result.passed { 0 } else { 1 });
     }
 }

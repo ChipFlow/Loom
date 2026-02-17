@@ -34,6 +34,10 @@
 //! - [`testbench`] — Testbench configuration and VCD-driven simulation setup
 //! - [`display`] — Display/assertion support infrastructure
 
+#[cfg(feature = "metal")]
+#[macro_use]
+extern crate objc;
+
 pub mod aigpdk;
 
 pub mod sky130;

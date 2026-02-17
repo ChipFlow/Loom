@@ -442,24 +442,24 @@ jobs:
             build_artifacts/6_final.v build_artifacts/result.gemparts \
             --top-module top
 
-      - name: Run GPU simulation with SDF timing (100K ticks)
+      - name: Run GPU co-simulation with SDF timing (100K ticks)
         timeout-minutes: 10
         run: |
-          cargo run --release --features metal --bin gpu_sim -- \
+          cargo run --release --features metal --bin loom -- cosim \
+            build_artifacts/6_final.v build_artifacts/result.gemparts \
             --config tests/mcu_soc/sim_config.json --top-module top \
             --sdf build_artifacts/6_final.sdf --sdf-corner typ \
             --max-cycles 100000 \
-            build_artifacts/6_final.v build_artifacts/result.gemparts \
-            2>&1 | tee gpu_sim_output.txt
+            2>&1 | tee cosim_output.txt
 
       - name: Verify UART boot output
         run: |
-          if grep -q "nyaa" gpu_sim_output.txt; then
+          if grep -q "nyaa" cosim_output.txt; then
             echo "MCU SoC booted successfully - UART output detected"
           else
             echo "ERROR: Expected UART output 'nyaa' not found"
             echo "--- Last 50 lines of simulation output ---"
-            tail -50 gpu_sim_output.txt
+            tail -50 cosim_output.txt
             exit 1
           fi
 
@@ -467,9 +467,9 @@ jobs:
         if: always()
         run: |
           {
-            echo "## MCU SoC Metal Simulation (with SDF timing)"
+            echo "## MCU SoC Metal Co-simulation (with SDF timing)"
             echo "\`\`\`"
-            tail -20 gpu_sim_output.txt
+            tail -20 cosim_output.txt
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -479,7 +479,7 @@ jobs:
         with:
           name: mcu-soc-results
           path: |
-            gpu_sim_output.txt
+            cosim_output.txt
             tests/mcu_soc/sim_config.json
 
   # Build documentation (cargo doc + mdbook) and deploy to GitHub Pages

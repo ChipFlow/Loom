@@ -1375,9 +1375,10 @@ mod tests {
 
     #[test]
     fn test_parse_ha() {
-        let src =
-            std::fs::read_to_string("vendor/sky130_fd_sc_hd/cells/ha/sky130_fd_sc_hd__ha.functional.v")
-                .unwrap();
+        let src = std::fs::read_to_string(
+            "vendor/sky130_fd_sc_hd/cells/ha/sky130_fd_sc_hd__ha.functional.v",
+        )
+        .unwrap();
         let model = parse_functional_model(&src).unwrap();
         assert_eq!(model.module_name, "sky130_fd_sc_hd__ha");
         assert_eq!(model.inputs, vec!["A", "B"]);
