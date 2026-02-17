@@ -506,7 +506,7 @@ jobs:
       - name: Install mdbook
         run: |
           mkdir -p ~/.cargo/bin
-          curl -sSL https://github.com/rust-lang/mdBook/releases/latest/download/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz \
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
       - name: Build mdbook
