@@ -20,8 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,8 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -136,8 +138,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install CUDA Toolkit (driver already present on GPU runner)
         run: |
@@ -202,8 +205,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -230,8 +234,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -395,8 +400,6 @@ jobs:
           echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
           echo "LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
-          echo "LDFLAGS=-L${LLVM_PREFIX}/lib/c++ -L${LLVM_PREFIX}/lib -Wl,-rpath,${LLVM_PREFIX}/lib/c++" >> $GITHUB_ENV
           LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
           echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
 
@@ -481,8 +484,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -531,8 +535,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-          persist-credentials: true
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -148,7 +148,7 @@ struct Args {
 
     /// Path to PDK cell library for vendor-verified decompositions.
     /// Points to the cells/ directory of sky130_fd_sc_hd.
-    /// Defaults to sky130_fd_sc_hd/cells if the submodule is present.
+    /// Defaults to vendor/sky130_fd_sc_hd/cells if the submodule is present.
     #[clap(long)]
     pdk_cells: Option<PathBuf>,
 
@@ -2781,7 +2781,7 @@ fn main() {
 
     // Load PDK models if available
     let pdk_cells_path = args.pdk_cells.clone().or_else(|| {
-        let default_path = std::path::PathBuf::from("sky130_fd_sc_hd/cells");
+        let default_path = std::path::PathBuf::from("vendor/sky130_fd_sc_hd/cells");
         if default_path.exists() {
             Some(default_path)
         } else {

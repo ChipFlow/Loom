@@ -13,8 +13,8 @@ Examples:
         --firmware tests/timing_test/software.bin
 
     # Generate from chipflow-examples mcu_soc
-    python scripts/gen_sim_config.py chipflow-examples/mcu_soc/pins.lock \
-        tests/mcu_soc/ --firmware chipflow-examples/mcu_soc/build/software/software.bin
+    python scripts/gen_sim_config.py vendor/chipflow-examples/mcu_soc/pins.lock \
+        tests/mcu_soc/ --firmware vendor/chipflow-examples/mcu_soc/build/software/software.bin
 """
 
 from __future__ import annotations

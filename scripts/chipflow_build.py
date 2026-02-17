@@ -15,7 +15,7 @@ Usage:
 
 Examples:
     # Submit mcu_soc for synthesis
-    python scripts/chipflow_build.py submit chipflow-examples/mcu_soc --wait --build-mode synth_only
+    python scripts/chipflow_build.py submit vendor/chipflow-examples/mcu_soc --wait --build-mode synth_only
 
     # Download results
     python scripts/chipflow_build.py download <build_id> tests/mcu_soc/build/

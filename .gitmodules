@@ -1,12 +1,12 @@
 [submodule "eda-infra-rs"]
-	path = eda-infra-rs
+	path = vendor/eda-infra-rs
 	url = https://github.com/ChipFlow/eda-infra-rs.git
 [submodule "benchmarks/dataset"]
 	path = benchmarks/dataset
 	url = https://github.com/ChipFlow/GEM-dataset.git
 [submodule "sky130_fd_sc_hd"]
-	path = sky130_fd_sc_hd
+	path = vendor/sky130_fd_sc_hd
 	url = https://github.com/google/skywater-pdk-libs-sky130_fd_sc_hd.git
 [submodule "chipflow-examples"]
-	path = chipflow-examples
+	path = vendor/chipflow-examples
 	url = https://github.com/ChipFlow/chipflow-examples.git

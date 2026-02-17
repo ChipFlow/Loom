@@ -7,12 +7,12 @@ links = "gem"
 [dependencies]
 cachedhash = "0.2.0"
 clap = { version = "4.5.15", features = ["derive"] }
-clilog = { version = "0.2.5", path = "eda-infra-rs/clilog" }
+clilog = { version = "0.2.5", path = "vendor/eda-infra-rs/clilog" }
 compact_str = "0.7.1"
 indexmap = { version = "2.4.0", features = ["rayon"] }
 itertools = "0.13.0"
 mt-kahypar = "0.2.0"
-netlistdb = { version = "0.4.6", path = "eda-infra-rs/netlistdb" }
+netlistdb = { version = "0.4.6", path = "vendor/eda-infra-rs/netlistdb" }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 rayon = "1.10.0"
@@ -20,13 +20,13 @@ serde = { version = "1.0.208", features = ["derive"] }
 smallvec = "1.13"
 serde_bare = "0.5.0"
 serde_json = "1.0"
-sverilogparse = { version = "0.4.2", path = "eda-infra-rs/sverilogparse" }
+sverilogparse = { version = "0.4.2", path = "vendor/eda-infra-rs/sverilogparse" }
 tempdir = "0.3.7"
-ulib = { version = "0.3.13", path = "eda-infra-rs/ulib" }
-vcd-ng = { version = "0.2.0", path = "eda-infra-rs/vcd-ng" }
+ulib = { version = "0.3.13", path = "vendor/eda-infra-rs/ulib" }
+vcd-ng = { version = "0.2.0", path = "vendor/eda-infra-rs/vcd-ng" }
 
 [build-dependencies]
-ucc = { version = "0.2.5", path = "eda-infra-rs/ucc" }
+ucc = { version = "0.2.5", path = "vendor/eda-infra-rs/ucc" }
 cc = "1.0"
 
 [features]

@@ -80,7 +80,7 @@ NetlistDB (Verilog) → AIG → StagedAIG → Partitions → FlattenedScript →
 - **`gpu_sim.rs`**: GPU co-simulation binary
 - Other `*_test.rs` files: Development/debugging utilities
 
-### Dependencies (`eda-infra-rs` submodule)
+### Dependencies (`vendor/eda-infra-rs` submodule)
 
 Open-source Rust gate-level EDA infrastructure (https://github.com/gzz2000/eda-infra-rs):
 

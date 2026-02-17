@@ -1291,7 +1291,7 @@ impl AIG {
     /// Build an AIG from a netlistdb.
     ///
     /// For designs with SKY130 cells, automatically loads PDK models from the
-    /// `sky130_fd_sc_hd/cells` submodule. Panics with a helpful message if the
+    /// `vendor/sky130_fd_sc_hd/cells` submodule. Panics with a helpful message if the
     /// submodule is not initialized.
     pub fn from_netlistdb(netlistdb: &NetlistDB) -> AIG {
         // Check if the design uses SKY130 cells
@@ -1299,7 +1299,7 @@ impl AIG {
             (1..netlistdb.num_cells).any(|cid| is_sky130_cell(netlistdb.celltypes[cid].as_str()));
 
         if has_sky130 {
-            let pdk_path = std::path::PathBuf::from("sky130_fd_sc_hd/cells");
+            let pdk_path = std::path::PathBuf::from("vendor/sky130_fd_sc_hd/cells");
             assert!(
                 pdk_path.exists(),
                 "Design uses SKY130 cells but sky130_fd_sc_hd submodule not found. \

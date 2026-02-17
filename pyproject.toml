@@ -6,7 +6,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = []
 
 [tool.uv.workspace]
-members = ["chipflow-examples", "designs/mcu_soc_sky130"]
+members = ["vendor/chipflow-examples", "designs/mcu_soc_sky130"]
 
 [tool.uv.sources]
 chipflow-lib = { git = "https://github.com/ChipFlow/chipflow-lib.git" }

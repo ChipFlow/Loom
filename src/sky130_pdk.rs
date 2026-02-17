@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn test_parse_o21ai() {
         let src = std::fs::read_to_string(
-            "sky130_fd_sc_hd/cells/o21ai/sky130_fd_sc_hd__o21ai.functional.v",
+            "vendor/sky130_fd_sc_hd/cells/o21ai/sky130_fd_sc_hd__o21ai.functional.v",
         )
         .unwrap();
         let model = parse_functional_model(&src).unwrap();
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn test_parse_ha() {
         let src =
-            std::fs::read_to_string("sky130_fd_sc_hd/cells/ha/sky130_fd_sc_hd__ha.functional.v")
+            std::fs::read_to_string("vendor/sky130_fd_sc_hd/cells/ha/sky130_fd_sc_hd__ha.functional.v")
                 .unwrap();
         let model = parse_functional_model(&src).unwrap();
         assert_eq!(model.module_name, "sky130_fd_sc_hd__ha");
@@ -1388,7 +1388,7 @@ mod tests {
     #[test]
     fn test_parse_mux2i_udp() {
         let src = std::fs::read_to_string(
-            "sky130_fd_sc_hd/cells/mux2i/sky130_fd_sc_hd__mux2i.functional.v",
+            "vendor/sky130_fd_sc_hd/cells/mux2i/sky130_fd_sc_hd__mux2i.functional.v",
         )
         .unwrap();
         let model = parse_functional_model(&src).unwrap();
@@ -1405,7 +1405,7 @@ mod tests {
     #[test]
     fn test_parse_udp_mux_2to1_n() {
         let src = std::fs::read_to_string(
-            "sky130_fd_sc_hd/models/udp_mux_2to1_n/sky130_fd_sc_hd__udp_mux_2to1_n.v",
+            "vendor/sky130_fd_sc_hd/models/udp_mux_2to1_n/sky130_fd_sc_hd__udp_mux_2to1_n.v",
         )
         .unwrap();
         let udp = parse_udp(&src).unwrap();
@@ -1507,7 +1507,7 @@ mod tests {
 
     /// Load all PDK models and UDPs from the submodule.
     fn load_test_pdk() -> PdkModels {
-        let pdk_path = Path::new("sky130_fd_sc_hd/cells");
+        let pdk_path = Path::new("vendor/sky130_fd_sc_hd/cells");
         if !pdk_path.exists() {
             panic!("sky130_fd_sc_hd submodule not initialized. Run: git submodule update --init");
         }

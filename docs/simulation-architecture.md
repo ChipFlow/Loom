@@ -303,7 +303,7 @@ This documentation was created through systematic investigation:
 ## References
 
 - Main codebase: `src/` directory
-- EDA infrastructure: `eda-infra-rs/` submodule (netlistdb, vcd-ng, ulib)
+- EDA infrastructure: `vendor/eda-infra-rs/` submodule (netlistdb, vcd-ng, ulib)
 - AIGPDK library: `aigpdk/` directory
 - Test cases: `tests/` directory
 - Third-party examples: `tests/regression/third_party/`
