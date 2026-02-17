@@ -1,0 +1,208 @@
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "inv_chain")
+  (DATE "Mon Jan 01 00:00:00 2024")
+  (VENDOR "OpenLane2")
+  (PROGRAM "OpenSTA")
+  (VERSION "2.5.0")
+  (DIVIDER .)
+  (VOLTAGE 1.800::1.800)
+  (PROCESS "typical")
+  (TEMPERATURE 25.000::25.000)
+  (TIMESCALE 1ps)
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__dfxtp_1")
+    (INSTANCE dff_in)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH CLK Q (300:350:400) (280:330:380))
+      )
+    )
+    (TIMINGCHECK
+      (SETUP D (posedge CLK) (60:80:100))
+      (HOLD D (posedge CLK) (-40:-30:-20))
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i0)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (40:50:60) (30:40:55))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i1)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (42:52:62) (32:42:57))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i2)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (41:51:61) (31:41:56))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i3)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (43:53:63) (33:43:58))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i4)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (40:50:60) (30:40:55))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i5)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (44:54:64) (34:44:59))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i6)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (41:51:61) (31:41:56))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i7)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (42:52:62) (32:42:57))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i8)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (40:50:60) (30:40:55))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i9)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (43:53:63) (33:43:58))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i10)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (41:51:61) (31:41:56))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i11)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (44:54:64) (34:44:59))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i12)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (42:52:62) (32:42:57))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i13)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (41:51:61) (31:41:56))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i14)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (40:50:60) (30:40:55))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i15)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (43:53:63) (33:43:58))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__dfxtp_1")
+    (INSTANCE dff_out)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH CLK Q (310:360:410) (290:340:390))
+      )
+    )
+    (TIMINGCHECK
+      (SETUP D (posedge CLK) (65:85:105))
+      (HOLD D (posedge CLK) (-38:-28:-18))
+    )
+  )
+  (CELL
+    (CELLTYPE "inv_chain")
+    (INSTANCE)
+    (DELAY
+      (ABSOLUTE
+        (INTERCONNECT dff_in.Q i0.A (10:15:20) (8:12:16))
+        (INTERCONNECT i0.Y i1.A (5:8:12) (4:7:10))
+        (INTERCONNECT i1.Y i2.A (6:9:13) (5:8:11))
+        (INTERCONNECT i2.Y i3.A (5:8:12) (4:7:10))
+        (INTERCONNECT i3.Y i4.A (7:10:14) (6:9:12))
+        (INTERCONNECT i4.Y i5.A (5:8:12) (4:7:10))
+        (INTERCONNECT i5.Y i6.A (6:9:13) (5:8:11))
+        (INTERCONNECT i6.Y i7.A (5:8:12) (4:7:10))
+        (INTERCONNECT i7.Y i8.A (8:11:15) (7:10:13))
+        (INTERCONNECT i8.Y i9.A (5:8:12) (4:7:10))
+        (INTERCONNECT i9.Y i10.A (6:9:13) (5:8:11))
+        (INTERCONNECT i10.Y i11.A (5:8:12) (4:7:10))
+        (INTERCONNECT i11.Y i12.A (7:10:14) (6:9:12))
+        (INTERCONNECT i12.Y i13.A (5:8:12) (4:7:10))
+        (INTERCONNECT i13.Y i14.A (6:9:13) (5:8:11))
+        (INTERCONNECT i14.Y i15.A (5:8:12) (4:7:10))
+        (INTERCONNECT i15.Y dff_out.D (10:15:20) (8:12:16))
+      )
+    )
+  )
+)

@@ -1,0 +1,20 @@
+ram block $__CF_SRAM_1024x32_wrapper {
+    # Has 10 address bits (ie. 1024 rows).
+    abits 10;
+    # Has 32 data bits.
+    width 32;
+    # Cost for the selection heuristic.
+    cost 1889;
+    # zero initialized on startup
+    init zero;
+    # bit enables
+    byte 1;
+    # Has a synchronous read/write port called "1P"
+    port srsw "1P" {
+        # ... with a positive edge clock.
+        clock posedge;
+        clken;
+        rdwr old;
+        wrbe_separate;
+    }
+}

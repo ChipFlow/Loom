@@ -1,4 +1,35 @@
 /target
+/book
 /Cargo.lock
 /compile_commands.json
 .cache
+
+# Python
+__pycache__/
+*.pyc
+*.swp
+
+# Claude Code session data
+.claude/
+
+# Simulation artifacts
+*.vvp
+*.vcd
+*.tar.gz
+debug_trace.csv
+*_watchlist.json
+api_artifacts/
+tb_verify_sim
+
+# Build output directories
+**/build/results/
+
+# ChipFlow design build artifacts
+designs/*/build/
+designs/*/.doit.db
+
+# Test build artifacts (binary firmware, netlists)
+tests/*/build/
+
+# uv lock file
+uv.lock

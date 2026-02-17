@@ -1,0 +1,15 @@
+[chipflow]
+project_name = "mcu-soc-sky130"
+
+[chipflow.top]
+soc = "design.design:MySoC"
+
+[chipflow.steps]
+board = "design.steps.board:MyBoardStep"
+
+[chipflow.silicon]
+process = "sky130"
+package = "openframe"
+
+[chipflow.test]
+event_reference = "design/tests/events_reference.json"

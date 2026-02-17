@@ -1,0 +1,26 @@
+{
+  "signals": [
+    {"name": "rst_n_sync.rst", "net": "inst$top.rst_n_sync.rst", "type": "reg"},
+    {"name": "ibus_cyc", "net": "inst$top.soc.cpu.fetch.ibus__cyc", "type": "reg"},
+    {"name": "dbus_cyc", "net": "inst$top.soc.cpu.loadstore.dbus__cyc", "type": "reg"},
+    {"name": "f.source_valid", "net": "inst$top.soc.cpu.f.source__valid", "type": "reg"},
+    {"name": "d.source_valid", "net": "inst$top.soc.cpu.d.source__valid", "type": "reg"},
+    {"name": "x.source_valid", "net": "inst$top.soc.cpu.x.source__valid", "type": "reg"},
+    {"name": "m.source_valid", "net": "inst$top.soc.cpu.m.source__valid", "type": "reg"},
+    {"name": "divider.fsm_state", "net": "inst$top.soc.cpu.divider.fsm_state", "type": "reg"},
+    {"name": "net639", "net": "net639", "type": "comb"},
+    {"name": "net755", "net": "net755", "type": "comb"},
+    {"name": "net665", "net": "net665", "type": "comb"},
+    {"name": "net792", "net": "net792", "type": "comb"},
+    {"name": "net837", "net": "net837", "type": "comb"},
+    {"name": "_09415_", "net": "_09415_", "type": "comb"},
+    {"name": "_20360_", "net": "_20360_", "type": "comb"},
+    {"name": "net2949", "net": "net2949", "type": "comb"},
+    {"name": "_20365_", "net": "_20365_", "type": "comb"},
+    {"name": "_20366_", "net": "_20366_", "type": "comb"},
+    {"name": "_20368_", "net": "_20368_", "type": "comb"},
+    {"name": "_20369_", "net": "_20369_", "type": "comb"},
+    {"name": "_09414_", "net": "_09414_", "type": "comb"},
+    {"name": "net2238", "net": "net2238", "type": "comb"}
+  ]
+}

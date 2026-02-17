@@ -1,0 +1,40 @@
+Solderpad Hardware License, Version 0.51
+
+This license operates as a wraparound license to the Apache License Version 2.0
+(the "Apache License") and incorporates the terms and conditions of the Apache
+License (which can be found here: http://apache.org/licenses/LICENSE-2.0), with
+the following additions and modifications:
+
+- The term "software" in the Apache License is replaced with the term "work".
+
+- Section 6 of the Apache License (Trademarks) is deleted in its entirety and
+  replaced with:
+  "This License does not grant permission to use the trade names, trademarks,
+   service marks, or product names of the Licensor, except as required for
+   reasonable and customary use in describing the origin of the Work and
+   reproducing the content of the NOTICE file."
+
+- Section 2 of the Apache License (License) is amended by deleting the word
+  "perpetual" from the first sentence.
+
+- In the Apache License, references to "The Software" or "software" or
+  "Source Code" shall mean "Work" as defined in this Preamble. References to
+  "The Licensor" shall mean the copyright owner(s).
+
+The Preamble is not part of this License.
+
+---
+
+Copyright 2018-2024 ETH Zurich and University of Bologna
+
+Licensed under the Solderpad Hardware License, Version 0.51 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://solderpad.org/licenses/SHL-0.51
+
+Unless required by applicable law or agreed to in writing, software, hardware
+and materials distributed under this License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

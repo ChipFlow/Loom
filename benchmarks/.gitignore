@@ -1,0 +1,5 @@
+# Generated partition files (can be large, generate locally)
+*.gemparts
+
+# Simulation outputs
+*_output.vcd

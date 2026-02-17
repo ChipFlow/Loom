@@ -1,0 +1,4 @@
+# Test work directories
+*_work/
+*.vcd
+*.out

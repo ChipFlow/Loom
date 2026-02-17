@@ -1,0 +1,23 @@
+[project]
+name = "mcu-soc-sky130"
+version = "0.0.0"
+description = "Trimmed mcu_soc for sky130 openframe - no motor PWMs, 1 SPI, 1 I2C"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "amaranth[builtin-yosys]>=0.5.4,<0.6",
+    "amaranth-soc",
+    "chipflow-lib",
+    "chipflow-digital-ip",
+    "ziglang>=0.11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+chipflow-lib = { git = "https://github.com/chipflow/chipflow-lib" }
+chipflow-digital-ip = { git = "https://github.com/chipflow/chipflow-digital-ip" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["design"]

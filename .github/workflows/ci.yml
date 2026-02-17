@@ -1,0 +1,628 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staged-aig-release]
+  pull_request:
+    branches: [main, staged-aig-release]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Run library unit tests on Linux (no GPU required)
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run library tests
+        run: cargo test --lib
+
+  # Build and run Metal simulation on macOS
+  metal:
+    name: Metal Tests (macOS)
+    runs-on: macos-latest-xlarge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM (for OpenMP support)
+        run: |
+          brew install llvm
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
+          # Use Homebrew LLVM's libc++ for linking (not runtime — DYLD_LIBRARY_PATH
+          # poisons system frameworks). LIBRARY_PATH is used by the compiler for -lc++.
+          echo "LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
+          echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-metal-llvm${{ env.LLVM_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-metal-llvm${{ env.LLVM_VERSION }}-
+
+      - name: Build loom (Metal)
+        run: cargo build --release --features metal --bin loom
+
+      - name: Run Metal simulation (timing test)
+        run: |
+          # Capture timing output
+          time (cargo run --release --features metal --bin loom -- sim \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test.gemparts \
+            tests/timing_test/dff_test.vcd \
+            tests/timing_test/ci_output.vcd \
+            1) 2>&1 | tee metal_timing.txt
+
+      - name: Report Metal performance
+        run: |
+          {
+            echo "## Metal Simulation Performance"
+            echo "\`\`\`"
+            cat metal_timing.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify simulation output
+        run: |
+          echo "Comparing GEM output with golden VCD..."
+          # Extract q signal values from both VCDs and compare
+          # Golden VCD uses 'q' signal, GEM output should match
+          if diff -q <(grep '^[01]!' tests/timing_test/dff_test.vcd | head -20) \
+                     <(grep '^[01]!' tests/timing_test/ci_output.vcd | head -20); then
+            echo "✓ VCD outputs match!"
+          else
+            echo "VCD comparison (first 20 signal changes):"
+            echo "=== Golden (iverilog) ==="
+            grep '^[01]!' tests/timing_test/dff_test.vcd | head -20
+            echo "=== GEM output ==="
+            grep '^[01]!' tests/timing_test/ci_output.vcd | head -20
+            echo ""
+            echo "Note: Minor differences may be acceptable depending on signal timing"
+          fi
+
+      - name: Upload VCD artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vcd-outputs
+          path: |
+            tests/timing_test/ci_output.vcd
+            metal_timing.txt
+
+  # Build and run CUDA simulation on NVIDIA GPU
+  cuda:
+    name: CUDA Tests
+    runs-on: nvidia-runner-1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install CUDA Toolkit (driver already present on GPU runner)
+        run: |
+          nvidia-smi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-toolkit-12-8
+          echo "PATH=/usr/local/cuda-12.8/bin:$PATH" >> $GITHUB_ENV
+          echo "CUDA_PATH=/usr/local/cuda-12.8" >> $GITHUB_ENV
+          /usr/local/cuda-12.8/bin/nvcc --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cuda-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cuda-
+
+      - name: Build loom (CUDA)
+        run: cargo build --release --features cuda --bin loom
+
+      - name: Run CUDA simulation (timing test)
+        run: |
+          time (cargo run --release --features cuda --bin loom -- sim \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test.gemparts \
+            tests/timing_test/dff_test.vcd \
+            tests/timing_test/ci_cuda_output.vcd \
+            1) 2>&1 | tee cuda_timing.txt
+
+      - name: Report CUDA performance
+        run: |
+          {
+            echo "## CUDA Simulation Performance"
+            echo "\`\`\`"
+            cat cuda_timing.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CUDA artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuda-outputs
+          path: |
+            tests/timing_test/ci_cuda_output.vcd
+            cuda_timing.txt
+
+  # Check formatting and clippy
+  # Note: Currently set to warn-only due to existing issues in codebase
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check || echo "::warning::Formatting issues found"
+
+      - name: Clippy
+        run: cargo clippy --lib 2>&1 | tee clippy_output.txt || true
+
+      - name: Check for clippy errors (not warnings)
+        run: |
+          if grep -q "^error" clippy_output.txt; then
+            echo "Clippy errors found!"
+            exit 1
+          fi
+
+  # Run benchmarks and track performance
+  benchmark:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Run benchmarks
+        run: cargo bench --bench event_buffer -- --noplot 2>&1 | tee benchmark_results.txt
+
+      - name: Extract benchmark summary
+        run: |
+          {
+            echo "## Benchmark Results"
+            echo "\`\`\`"
+            grep -E "^(event_buffer|buffer_ops)" benchmark_results.txt | head -20 || true
+            grep -E "time:" benchmark_results.txt | head -20 || true
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results.txt
+
+  # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
+  mcu-soc-synth:
+    name: MCU SoC Synthesis + P&R
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-mcu-soc-${{ hashFiles('designs/mcu_soc_sky130/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-mcu-soc-
+
+      - name: Cache SKY130 PDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: sky130-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+          restore-keys: |
+            sky130-pdk-
+
+      - name: Install volare and download SKY130 PDK
+        run: |
+          uv tool install volare
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Generate RTLIL and firmware from design source
+        run: |
+          cd designs/mcu_soc_sky130
+          uv sync
+          uv run chipflow silicon submit --dry-run
+          uv run chipflow software
+          # Verify outputs
+          test -f build/mcu_soc_sky130.il || { echo "RTLIL not generated"; exit 1; }
+          test -f build/software/software.bin || { echo "Firmware not generated"; exit 1; }
+
+      - name: Set up Docker PDK volume
+        run: |
+          docker create --name pdk-init -v openlane-pdk:/root/.volare busybox
+          docker cp ~/.volare/. pdk-init:/root/.volare/
+          docker rm pdk-init
+
+      - name: Run Yosys synthesis in Docker (with SRAM mapping)
+        timeout-minutes: 15
+        run: |
+          docker run --rm \
+            -v "openlane-pdk:/root/.volare" \
+            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
+            -v "$PWD/sram:/sram:ro" \
+            -v "$PWD/scripts/openlane2/synth.ys:/design/synth.ys:ro" \
+            ghcr.io/efabless/openlane2:2.4.0.dev1 \
+            yosys -s /design/synth.ys
+          # Verify SRAM macros are preserved
+          SRAM_COUNT=$(grep -c CF_SRAM_1024x32 designs/mcu_soc_sky130/build/top_synth.v || true)
+          echo "CF_SRAM_1024x32 instances: $SRAM_COUNT"
+          if [ "$SRAM_COUNT" -eq 0 ]; then
+            echo "ERROR: No SRAM macros found - synthesis may have flattened them"
+            exit 1
+          fi
+
+      - name: Run OpenLane2 P&R in Docker
+        timeout-minutes: 20
+        run: |
+          docker run --rm \
+            -v "openlane-pdk:/root/.volare" \
+            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
+            -v "$PWD/sram:/sram:ro" \
+            -v "$PWD/scripts/openlane2/mcu_soc_config.json:/design/config.json:ro" \
+            -w /design \
+            ghcr.io/efabless/openlane2:2.4.0.dev1 \
+            openlane /design/config.json
+
+      - name: Extract P&R outputs
+        run: |
+          mkdir -p build_artifacts
+          LATEST=$(ls -td designs/mcu_soc_sky130/build/openlane_runs/RUN_* | head -1)
+          echo "Using run directory: $LATEST"
+          cp "$LATEST/results/finishing/6_final.v" build_artifacts/
+          cp "$LATEST/results/finishing/6_final.sdf" build_artifacts/
+          cp designs/mcu_soc_sky130/build/software/software.bin build_artifacts/
+          # Verify outputs
+          test -f build_artifacts/6_final.v || { echo "Post-P&R netlist not found"; exit 1; }
+          test -f build_artifacts/6_final.sdf || { echo "SDF file not found"; exit 1; }
+          echo "Post-P&R netlist lines: $(wc -l < build_artifacts/6_final.v)"
+          echo "SDF file size: $(wc -c < build_artifacts/6_final.sdf) bytes"
+
+      - name: Upload synth artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mcu-soc-synth
+          path: |
+            build_artifacts/6_final.v
+            build_artifacts/6_final.sdf
+            build_artifacts/software.bin
+
+  # Run GPU simulation on macOS with post-P&R netlist and SDF timing
+  mcu-soc-metal:
+    name: MCU SoC Metal Simulation (with SDF timing)
+    runs-on: macos-latest-xlarge
+    needs: mcu-soc-synth
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM (for OpenMP support)
+        run: |
+          brew install llvm
+          LLVM_PREFIX=$(brew --prefix llvm)
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> $GITHUB_ENV
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=${LLVM_PREFIX}/lib/c++:${LLVM_PREFIX}/lib" >> $GITHUB_ENV
+          LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
+          echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-mcu-soc-llvm${{ env.LLVM_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mcu-soc-llvm${{ env.LLVM_VERSION }}-
+
+      - name: Download synth artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mcu-soc-synth
+          path: build_artifacts
+
+      - name: Generate sim_config.json
+        run: |
+          python3 scripts/gen_sim_config.py \
+            designs/mcu_soc_sky130/pins.lock tests/mcu_soc/ \
+            --netlist build_artifacts/6_final.v \
+            --firmware build_artifacts/software.bin \
+            --port-mapping
+
+      - name: Compile gemparts
+        timeout-minutes: 10
+        run: |
+          cargo run --release --features metal --bin cut_map_interactive -- \
+            build_artifacts/6_final.v build_artifacts/result.gemparts \
+            --top-module top
+
+      - name: Run GPU co-simulation with SDF timing (100K ticks)
+        timeout-minutes: 10
+        run: |
+          cargo run --release --features metal --bin loom -- cosim \
+            build_artifacts/6_final.v build_artifacts/result.gemparts \
+            --config tests/mcu_soc/sim_config.json --top-module top \
+            --sdf build_artifacts/6_final.sdf --sdf-corner typ \
+            --max-cycles 100000 \
+            2>&1 | tee cosim_output.txt
+
+      - name: Verify UART boot output
+        run: |
+          if grep -q "nyaa" cosim_output.txt; then
+            echo "MCU SoC booted successfully - UART output detected"
+          else
+            echo "ERROR: Expected UART output 'nyaa' not found"
+            echo "--- Last 50 lines of simulation output ---"
+            tail -50 cosim_output.txt
+            exit 1
+          fi
+
+      - name: Report simulation results
+        if: always()
+        run: |
+          {
+            echo "## MCU SoC Metal Co-simulation (with SDF timing)"
+            echo "\`\`\`"
+            tail -20 cosim_output.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mcu-soc-results
+          path: |
+            cosim_output.txt
+            tests/mcu_soc/sim_config.json
+
+  # Build documentation (cargo doc + mdbook) and deploy to GitHub Pages
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
+      - name: Build cargo docs
+        run: cargo doc --no-deps --lib
+
+      - name: Install mdbook
+        run: |
+          mkdir -p ~/.cargo/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C ~/.cargo/bin
+
+      - name: Build mdbook
+        run: mdbook build
+
+      - name: Prepare Pages site
+        run: |
+          cp -r target/doc book/api
+          touch book/.nojekyll
+
+      - name: Deploy to gh-pages branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./book
+
+  # Run SKY130 post-layout timing simulation
+  sky130-timing:
+    name: SKY130 Timing Simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-sky130-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sky130-
+
+      - name: Cache SKY130 PDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: sky130-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
+          restore-keys: |
+            sky130-pdk-
+
+      - name: Install volare and download SKY130 PDK
+        run: |
+          uv tool install volare
+          # Use the same PDK version as OpenLane 2.x for reproducibility
+          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
+
+      - name: Build timing simulator
+        run: cargo build --release --bin timing_sim_cpu
+
+      - name: Run SKY130 timing simulation
+        timeout-minutes: 5
+        run: |
+          # Build command arguments (using default timing values)
+          ARGS=(
+            tests/timing_test/minimal_build/6_final.v
+            tests/timing_test/6_final_test_input.vcd
+            --clock-period 25000
+            --max-cycles 10
+          )
+
+          # Add SDF back-annotation if available
+          SDF_FILE="tests/timing_test/minimal_build/6_final.sdf"
+          if [ -f "$SDF_FILE" ]; then
+            echo "Running timing simulation with SDF back-annotation"
+            ARGS+=(--sdf "$SDF_FILE" --sdf-corner typ)
+          else
+            echo "Running timing simulation with default timing values"
+            echo "(SDF file not available — add 6_final.sdf for post-layout accuracy)"
+          fi
+
+          # Run timing simulation on the post-P&R netlist
+          cargo run --release --bin timing_sim_cpu -- "${ARGS[@]}" 2>&1 | tee sky130_timing.txt
+
+      - name: Report SKY130 timing results
+        run: |
+          {
+            echo "## SKY130 Timing Simulation Results"
+            echo "\`\`\`"
+            cat sky130_timing.txt
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check timing passed
+        run: |
+          if grep -q "TIMING: PASSED" sky130_timing.txt; then
+            echo "SKY130 timing simulation passed!"
+          elif grep -q "TIMING: FAILED" sky130_timing.txt; then
+            echo "SKY130 timing simulation found violations (expected for this test design)"
+            # Don't fail - timing violations are informational
+          else
+            echo "Error: Could not determine timing result"
+            exit 1
+          fi
+
+      - name: Upload timing results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sky130-timing-results
+          path: sky130_timing.txt

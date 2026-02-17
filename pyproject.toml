@@ -1,0 +1,14 @@
+[project]
+name = "gem-workspace"
+version = "0.0.0"
+description = "GEM workspace - includes chipflow-examples for design builds"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["vendor/chipflow-examples", "designs/mcu_soc_sky130"]
+
+[tool.uv.sources]
+chipflow-lib = { git = "https://github.com/ChipFlow/chipflow-lib.git" }
+chipflow-digital-ip = { git = "https://github.com/ChipFlow/chipflow-digital-ip" }
+amaranth-soc = { git = "https://github.com/amaranth-lang/amaranth-soc" }

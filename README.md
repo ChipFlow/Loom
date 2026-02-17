@@ -1,18 +1,115 @@
-# Welcome to GEM
-GEM is an open-source RTL logic simulator with CUDA acceleration, developed and maintained by NVIDIA Research.
-GEM can deliver up to 5--40X speed-up compared to CPU-based leading RTL simulators.
-A summary of the work with paper can be found [here](https://research.nvidia.com/publication/2025-06_gem-gpu-accelerated-emulator-inspired-rtl-simulation).
+# Loom
 
-## Compile and Run Your Design with GEM
-GEM works in a way similar to an FPGA-based RTL emulator.
-It first synthesizes your design with a special and-inverter graph (AIG) process, and then map the synthesized gate-level netlist to a virtual manycore Boolean processor which can be emulated with CUDA-compatible GPUs.
+![CI](https://github.com/ChipFlow/Loom/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![Rust](https://img.shields.io/badge/rust-edition%202021-orange)
 
-The synthesis and mapping is slower than the compiling/elaboration process of CPU-based simulators. But it is a one-time cost and your design can be simulated under different testbenches without re-running the synthesis or mapping.
+Loom is a GPU-accelerated RTL logic simulator. Like a Jacquard loom weaving patterns from punched cards, Loom maps gate-level netlists onto a virtual manycore Boolean processor and executes them on GPUs, delivering 5-40X speedup over CPU-based RTL simulators.
 
-**See [usage.md](./usage.md) for usage documentation.**
+Loom builds on the excellent [GEM](https://github.com/NVlabs/GEM) research by Zizheng Guo, Yanqing Zhang, Runsheng Wang, Yibo Lin, and Haoxing Ren at NVIDIA Research. [ChipFlow](https://chipflow.io) extends their work with:
+
+- **Metal backend** for Apple Silicon Macs (in addition to the original CUDA backend)
+- **Liberty timing support** — load real cell delays from Liberty files (e.g. SKY130) for timing-annotated simulation
+- **SDF back-annotation** — post-layout timing from Standard Delay Format files
+- **Setup/hold violation detection** — both CPU and GPU-side checking
+- **Significant performance optimizations** to the partition mapping pipeline
+- **CI/CD** with automated testing across both backends
+
+### Roadmap: Timing Simulation
+
+The goal is GPU-accelerated gate-level simulation with real cell timing — a first for open source. Current status:
+
+| Component | Status |
+|-----------|--------|
+| Liberty file parsing | Done — loads SKY130 HD cell delays |
+| Gate delay computation | Done — per-AIG-pin delays from Liberty |
+| SDF back-annotation | Done — post-layout delays from SDF files |
+| CPU timing simulation | Done — arrival time propagation with setup/hold checking |
+| GPU timing simulation | Done — setup/hold violation detection on GPU (Metal + CUDA) |
+| SKY130 timing test suite | Done — post-P&R test circuits with SDF |
+| Unified `loom sim` CLI | Done — timing constraints wired to both Metal and CUDA kernels |
+
+Next steps:
+1. Timing-aware bit packing for improved GPU utilization
+2. Multi-clock domain support
+
+## Quick Start
+
+Requires the [Rust toolchain](https://rustup.rs/).
+
+```sh
+git clone https://github.com/ChipFlow/Loom.git
+cd Loom
+git submodule update --init --recursive
+```
+
+### Build (Metal - macOS)
+
+```sh
+cargo build -r --features metal --bin loom
+```
+
+### Build (CUDA - Linux)
+
+Requires CUDA toolkit installed.
+
+```sh
+cargo build -r --features cuda --bin loom
+```
+
+## Usage
+
+Loom operates in two phases:
+
+1. **Map** your synthesized gate-level netlist to a `.gemparts` file (one-time cost):
+
+```sh
+# The `loom` binary works without GPU features:
+cargo run -r --bin loom -- map design.gv design.gemparts
+
+# Or with the legacy name (equivalent):
+cargo run -r --features metal --bin cut_map_interactive -- design.gv design.gemparts
+```
+
+2. **Simulate** with a VCD input waveform:
+
+```sh
+# Metal (macOS) - use NUM_BLOCKS=1
+cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1
+
+# CUDA (Linux) - set NUM_BLOCKS to 2x your GPU's SM count
+cargo run -r --features cuda --bin loom -- sim design.gv design.gemparts input.vcd output.vcd NUM_BLOCKS
+
+# With SDF timing back-annotation:
+cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1 \
+  --sdf design.sdf --sdf-corner typ
+```
+
+**See [docs/usage.md](./docs/usage.md) for full documentation** including synthesis preparation, VCD scope handling, and troubleshooting.
+
+## Documentation
+
+Browse the full documentation [online](https://chipflow.github.io/Loom/) or build it locally with [mdbook](https://rust-lang.github.io/mdBook/):
+
+```sh
+mdbook serve   # opens at http://localhost:3000
+```
+
+## Limitations
+
+- Only supports non-interactive testbenches (static VCD input waveforms)
+- Synchronous logic only (no latches or async sequential logic)
+- Clock gates must use the `CKLNQD` module from `aigpdk.v`
+
+## Benchmarks
+
+Pre-synthesized benchmark designs are in `benchmarks/dataset/` (git submodule). See [benchmarks/README.md](benchmarks/README.md) for instructions.
+
+Available designs: NVDLA, Rocket, Gemmini.
 
 ## Citation
-Please cite our paper if you find GEM useful.
+
+Loom builds on the GEM research. Please cite the original paper if you find this work useful.
 
 ``` bibtex
 @inproceedings{gem,
@@ -23,3 +120,7 @@ Please cite our paper if you find GEM useful.
  year = {2025}
 }
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE) for details.

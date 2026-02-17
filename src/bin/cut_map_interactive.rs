@@ -6,19 +6,20 @@
 //! The key idea is to only repartition the endpoint groups that
 //! are unable to be mapped.
 
-use std::path::PathBuf;
-use gem::repcut::RCHyperGraph;
-use gem::aigpdk::AIGPDKLeafPins;
 use gem::aig::AIG;
-use gem::staging::build_staged_aigs;
+use gem::aigpdk::AIGPDKLeafPins;
 use gem::pe::{process_partitions, Partition};
+use gem::repcut::RCHyperGraph;
+use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
+use gem::staging::build_staged_aigs;
 use netlistdb::NetlistDB;
 use rayon::prelude::*;
+use std::path::PathBuf;
 
 /// Call builtin partitioner.
 fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
     clilog::debug!("invoking partitioner (#parts {})", num_parts);
-	// Handle the special case where num_parts = 1
+    // Handle the special case where num_parts = 1
     // mt-kahypar requires k >= 2, so we handle k=1 manually
     if num_parts == 1 {
         let mut parts = vec![vec![]; 1];
@@ -28,7 +29,7 @@ fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
         }
         return parts;
     }
-	
+
     let parts_ids = hg.partition(num_parts);
     let mut parts = vec![vec![]; num_parts];
     for (i, part_id) in parts_ids.into_iter().enumerate() {
@@ -50,14 +51,14 @@ struct SimulatorArgs {
     #[clap(long)]
     top_module: Option<String>,
     /// Level split thresholds.
-    #[clap(long, value_delimiter=',')]
+    #[clap(long, value_delimiter = ',')]
     level_split: Vec<usize>,
     /// Output path for the serialized partitions.
     parts_out: PathBuf,
     /// The maximum allowance of layers for merging-induced degradations.
     ///
     /// By default is 0, meaning no degradation is allowed.
-    #[clap(long, default_value_t=0)]
+    #[clap(long, default_value_t = 0)]
     max_stage_degrad: usize,
 }
 
@@ -67,15 +68,37 @@ fn main() {
     let args = <SimulatorArgs as clap::Parser>::parse();
     clilog::info!("Simulator args:\n{:#?}", args);
 
-    let netlistdb = NetlistDB::from_sverilog_file(
-        &args.netlist_verilog,
-        args.top_module.as_deref(),
-        &AIGPDKLeafPins()
-    ).expect("cannot build netlist");
+    // Detect cell library
+    let lib = detect_library_from_file(&args.netlist_verilog).expect("Failed to read netlist file");
+    clilog::info!("Detected cell library: {}", lib);
+
+    if lib == CellLibrary::Mixed {
+        panic!("Mixed AIGPDK and SKY130 cells in netlist not supported");
+    }
+
+    // Use appropriate LeafPinProvider based on detected library
+    let netlistdb = match lib {
+        CellLibrary::SKY130 => NetlistDB::from_sverilog_file(
+            &args.netlist_verilog,
+            args.top_module.as_deref(),
+            &SKY130LeafPins,
+        )
+        .expect("cannot build netlist"),
+        CellLibrary::AIGPDK | CellLibrary::Mixed => NetlistDB::from_sverilog_file(
+            &args.netlist_verilog,
+            args.top_module.as_deref(),
+            &AIGPDKLeafPins(),
+        )
+        .expect("cannot build netlist"),
+    };
 
     let aig = AIG::from_netlistdb(&netlistdb);
-    println!("netlist has {} pins, {} aig pins, {} and gates",
-             netlistdb.num_pins, aig.num_aigpins, aig.and_gate_cache.len());
+    println!(
+        "netlist has {} pins, {} aig pins, {} and gates",
+        netlistdb.num_pins,
+        aig.num_aigpins,
+        aig.and_gate_cache.len()
+    );
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
@@ -85,7 +108,7 @@ fn main() {
             r @ _ => format!("{}", r)
         });
 
-        let mut parts_indices_good = Vec::new();
+        let mut parts_good: Vec<(Vec<usize>, Partition)> = Vec::new();
         // always made sure that staged output pins are at fronts.
         let mut unrealized_endpoints = (0..staged.num_endpoint_groups()).collect::<Vec<_>>();
         let mut division = 600;
@@ -108,8 +131,8 @@ fn main() {
             let mut new_unrealized_endpoints = Vec::new();
             for (idx, part_opt) in parts_indices.into_iter().zip(parts_try.into_iter()) {
                 match part_opt {
-                    Some(_part) => {
-                        parts_indices_good.push(idx);
+                    Some(part) => {
+                        parts_good.push((idx, part));
                     }
                     None => {
                         if idx.len() == 1 {
@@ -126,10 +149,11 @@ fn main() {
         }
 
         clilog::info!("interactive partition completed: {} in total. merging started.",
-                      parts_indices_good.len());
+                      parts_good.len());
 
+        let (parts_indices_good, prebuilt): (Vec<_>, Vec<_>) = parts_good.into_iter().unzip();
         let effective_parts = process_partitions(
-            &aig, staged, parts_indices_good, args.max_stage_degrad
+            &aig, staged, parts_indices_good, Some(prebuilt), args.max_stage_degrad
         ).unwrap();
         clilog::info!("after merging: {} parts.", effective_parts.len());
         effective_parts

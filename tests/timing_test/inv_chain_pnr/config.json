@@ -1,0 +1,16 @@
+{
+    "DESIGN_NAME": "inv_chain",
+    "VERILOG_FILES": "dir::*.v",
+    "CLOCK_PORT": "CLK",
+    "CLOCK_PERIOD": 10.0,
+    "PDK": "sky130A",
+    "FP_SIZING": "absolute",
+    "DIE_AREA": "0 0 100 100",
+    "FP_CORE_UTIL": 30,
+    "PL_TARGET_DENSITY": 0.35,
+    "GRT_ADJUSTMENT": 0.3,
+    "STA_WRITE_LIB": false,
+    "meta": {
+        "version": 2
+    }
+}

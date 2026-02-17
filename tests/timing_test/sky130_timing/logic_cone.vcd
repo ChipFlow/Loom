@@ -1,0 +1,62 @@
+$date
+	Mon Feb 16 00:00:00 2026
+$end
+$version
+	Timing test VCD
+$end
+$timescale
+	1ps
+$end
+$scope module logic_cone $end
+$var wire 1 ! CLK $end
+$var wire 1 " A $end
+$var wire 1 # B $end
+$var wire 1 $ C $end
+$var wire 1 % D_IN $end
+$var wire 1 & Q $end
+$upscope $end
+$enddefinitions $end
+#0
+$dumpvars
+0!
+0"
+0#
+0$
+0%
+x&
+$end
+#5000
+1!
+#10000
+0!
+#10001
+1"
+1#
+1$
+1%
+#15000
+1!
+#20000
+0!
+#25000
+1!
+#30000
+0!
+#30001
+0$
+0%
+#35000
+1!
+#40000
+0!
+#40001
+1$
+0"
+#45000
+1!
+#50000
+0!
+#55000
+1!
+#60000
+0!

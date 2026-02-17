@@ -1,0 +1,23 @@
+bram CF_SRAM_1024x32
+  init 0
+  abits 10
+  dbits 32
+  groups 2
+  ports  1 1
+  wrmode 0 1
+  enable 1 32
+  transp 0 0
+  clocks 1 1
+  clkpol 1 1
+endbram
+
+match CF_SRAM_1024x32
+  min abits 1
+  max abits 10
+  min dbits 1
+  max dbits 32
+  min wports 0
+  max wports 1
+  min rports 0
+  max rports 1
+endmatch

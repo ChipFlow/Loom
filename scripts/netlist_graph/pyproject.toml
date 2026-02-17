@@ -1,0 +1,27 @@
+[project]
+name = "netlist-graph"
+version = "0.1.0"
+description = "Graph-based netlist analysis tool for SKY130 post-synthesis netlists"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+netlist-graph = "netlist_graph.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/netlist_graph"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]

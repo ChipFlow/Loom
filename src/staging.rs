@@ -5,8 +5,8 @@
 //! This is crucial in efficiently handling large and deep circuits
 //! with a limited processing element width.
 
+use crate::aig::{DriverType, EndpointGroup, TopoTraverser, AIG};
 use indexmap::IndexSet;
-use crate::aig::{AIG, EndpointGroup, DriverType};
 
 /// A struct representing the boundaries of a staged AIG.
 pub struct StagedAIG {
@@ -35,8 +35,7 @@ impl StagedAIG {
     pub fn get_endpoint_group<'aig>(&self, aig: &'aig AIG, endpt_id: usize) -> EndpointGroup<'aig> {
         if endpt_id < self.primary_output_pins.len() {
             EndpointGroup::StagedIOPin(self.primary_output_pins[endpt_id])
-        }
-        else {
+        } else {
             aig.get_endpoint_group(self.endpoints[endpt_id - self.primary_output_pins.len()])
         }
     }
@@ -46,7 +45,7 @@ impl StagedAIG {
         StagedAIG {
             primary_inputs: None,
             primary_output_pins: vec![],
-            endpoints: (0..aig.num_endpoint_groups()).collect()
+            endpoints: (0..aig.num_endpoint_groups()).collect(),
         }
     }
 
@@ -60,10 +59,7 @@ impl StagedAIG {
     ///
     /// the result guarantees that the endpoint `i` corresponds to
     /// the original staged's endpoint `endpoint_subset[i]`.
-    pub fn to_endpoint_subset(
-        &self,
-        endpoint_subset: &[usize]
-    ) -> StagedAIG {
+    pub fn to_endpoint_subset(&self, endpoint_subset: &[usize]) -> StagedAIG {
         let mut staged_sub = StagedAIG {
             primary_inputs: self.primary_inputs.clone(),
             primary_output_pins: vec![],
@@ -71,16 +67,17 @@ impl StagedAIG {
         };
         for &endpt_i in endpoint_subset {
             if endpt_i < self.primary_output_pins.len() {
-                staged_sub.primary_output_pins.push(
-                    self.primary_output_pins[endpt_i]
+                staged_sub
+                    .primary_output_pins
+                    .push(self.primary_output_pins[endpt_i]);
+                assert!(
+                    staged_sub.endpoints.is_empty(),
+                    "endpoint subset must be in order!"
                 );
-                assert!(staged_sub.endpoints.is_empty(),
-                        "endpoint subset must be in order!");
-            }
-            else {
-                staged_sub.endpoints.push(
-                    self.endpoints[endpt_i - self.primary_output_pins.len()]
-                );
+            } else {
+                staged_sub
+                    .endpoints
+                    .push(self.endpoints[endpt_i - self.primary_output_pins.len()]);
             }
         }
         staged_sub
@@ -106,15 +103,13 @@ impl StagedAIG {
             });
         }
         assert!(!unrealized_endpoint_nodes.is_empty());
-        let order = aig.topo_traverse_generic(
-            Some(&unrealized_endpoint_nodes),
-            primary_inputs
-        );
+        let mut traverser = TopoTraverser::new(aig.num_aigpins);
+        let order = traverser.topo_traverse(aig, Some(&unrealized_endpoint_nodes), primary_inputs);
         let mut num_fanouts = vec![0; aig.num_aigpins + 1];
         let mut level_id = vec![0; aig.num_aigpins + 1];
         for &i in &order {
             if matches!(primary_inputs, Some(pi) if pi.contains(&i)) {
-                continue
+                continue;
             }
             if let DriverType::AndGate(a, b) = aig.drivers[i] {
                 if a >= 2 {
@@ -136,10 +131,12 @@ impl StagedAIG {
         }
         let mut nodes_at_split = IndexSet::new();
         for &i in &order {
-            if level_id[i] > split_at_level { continue }
+            if level_id[i] > split_at_level {
+                continue;
+            }
             nodes_at_split.insert(i);
             if matches!(primary_inputs, Some(pi) if pi.contains(&i)) {
-                continue
+                continue;
             }
             if let DriverType::AndGate(a, b) = aig.drivers[i] {
                 if a >= 2 {
@@ -158,7 +155,9 @@ impl StagedAIG {
         }
         let mut endpoints_before_split = Vec::new();
         for &endpt in unrealized_orig_endpoints {
-            if endpt_level_id[endpt] > split_at_level { continue }
+            if endpt_level_id[endpt] > split_at_level {
+                continue;
+            }
             endpoints_before_split.push(endpt);
             aig.get_endpoint_group(endpt).for_each_input(|i| {
                 num_fanouts[i] -= 1;
@@ -170,10 +169,12 @@ impl StagedAIG {
 
         StagedAIG {
             primary_inputs: primary_inputs.cloned(),
-            primary_output_pins: nodes_at_split.iter().copied()
+            primary_output_pins: nodes_at_split
+                .iter()
+                .copied()
                 .filter(|po| !matches!(primary_inputs, Some(pi) if pi.contains(po)))
                 .collect(),
-            endpoints: endpoints_before_split
+            endpoints: endpoints_before_split,
         }
     }
 }
@@ -185,9 +186,7 @@ impl StagedAIG {
 ///
 /// If the netlist ends early before all split points, the length might be
 /// shorter than expected.
-pub fn build_staged_aigs(
-    aig: &AIG, level_split: &[usize]
-) -> Vec<(usize, usize, StagedAIG)> {
+pub fn build_staged_aigs(aig: &AIG, level_split: &[usize]) -> Vec<(usize, usize, StagedAIG)> {
     let mut ret = Vec::new();
     let mut unrealized_orig_endpoints = (0..aig.num_endpoint_groups()).collect::<IndexSet<_>>();
     let mut primary_inputs: Option<IndexSet<usize>> = None;
@@ -196,11 +195,13 @@ pub fn build_staged_aigs(
         let cur_split = level_split[i];
         let last_split = match i {
             0 => 0,
-            i @ _ => level_split[i - 1]
+            i @ _ => level_split[i - 1],
         };
         let staged = StagedAIG::from_split(
-            aig, &unrealized_orig_endpoints, primary_inputs.as_ref(),
-            cur_split - last_split
+            aig,
+            &unrealized_orig_endpoints,
+            primary_inputs.as_ref(),
+            cur_split - last_split,
         );
         for &endpt in &staged.endpoints {
             assert!(unrealized_orig_endpoints.swap_remove(&endpt));
@@ -211,19 +212,25 @@ pub fn build_staged_aigs(
         }
         if staged.primary_output_pins.is_empty() {
             ret.push((last_split, usize::MAX, staged));
-            return ret
+            return ret;
         }
         ret.push((last_split, cur_split, staged));
     }
 
     let last_split = match level_split.len() {
         0 => 0,
-        i @ _ => level_split[i - 1]
+        i @ _ => level_split[i - 1],
     };
-    ret.push((last_split, usize::MAX, StagedAIG::from_split(
-        aig, &unrealized_orig_endpoints, primary_inputs.as_ref(),
-        usize::MAX
-    )));
+    ret.push((
+        last_split,
+        usize::MAX,
+        StagedAIG::from_split(
+            aig,
+            &unrealized_orig_endpoints,
+            primary_inputs.as_ref(),
+            usize::MAX,
+        ),
+    ));
 
     ret
 }

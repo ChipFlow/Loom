@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! AIGPDK is a special artificial cell library used in GEM.
 
-use netlistdb::{Direction, LeafPinProvider};
 use compact_str::CompactString;
+use netlistdb::{Direction, LeafPinProvider};
 use sverilogparse::SVerilogRange;
 
 /// This implements direction and width providers for
@@ -25,16 +25,21 @@ impl LeafPinProvider for AIGPDKLeafPins {
     fn direction_of(
         &self,
         macro_name: &CompactString,
-        pin_name: &CompactString, pin_idx: Option<isize>
+        pin_name: &CompactString,
+        pin_idx: Option<isize>,
     ) -> Direction {
         match (macro_name.as_str(), pin_name.as_str(), pin_idx) {
             ("INV" | "BUF", "A", None) => Direction::I,
             ("INV" | "BUF", "Y", None) => Direction::O,
 
-            ("AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" |
-             "AND2_11_1", "A" | "B", None) => Direction::I,
-            ("AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" |
-             "AND2_11_1", "Y", None) => Direction::O,
+            (
+                "AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" | "AND2_11_1",
+                "A" | "B",
+                None,
+            ) => Direction::I,
+            ("AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" | "AND2_11_1", "Y", None) => {
+                Direction::O
+            }
 
             ("DFF" | "LATCH", "CLK" | "D", None) => Direction::I,
             ("DFFSR", "CLK" | "D" | "S" | "R", None) => Direction::I,
@@ -43,22 +48,22 @@ impl LeafPinProvider for AIGPDKLeafPins {
             ("CKLNQD", "CP" | "E", None) => Direction::I,
             ("CKLNQD", "Q", None) => Direction::O,
 
-            ("$__RAMGEM_ASYNC_", _, _) => {
-                panic!("Async RAM (lib cell {}) not supported yet in GEM.", macro_name);
-            },
+            // GEM assertion and display cells (no outputs)
+            ("GEM_ASSERT", "CLK" | "EN" | "A", None) => Direction::I,
+            ("GEM_DISPLAY", "CLK" | "EN", None) => Direction::I,
+            ("GEM_DISPLAY", "MSG_ID", Some(0..=31)) => Direction::I,
 
-            ("$__RAMGEM_SYNC_",
-             "PORT_R_CLK" | "PORT_W_CLK",
-             None) => Direction::I,
-            ("$__RAMGEM_SYNC_",
-             "PORT_R_ADDR" | "PORT_W_ADDR",
-             Some(0..=12)) => Direction::I,
-            ("$__RAMGEM_SYNC_",
-             "PORT_W_WR_EN" | "PORT_W_WR_DATA",
-             Some(0..=31)) => Direction::I,
-            ("$__RAMGEM_SYNC_",
-             "PORT_R_RD_DATA",
-             Some(0..=31)) => Direction::O,
+            ("$__RAMGEM_ASYNC_", _, _) => {
+                panic!(
+                    "Async RAM (lib cell {}) not supported yet in GEM.",
+                    macro_name
+                );
+            }
+
+            ("$__RAMGEM_SYNC_", "PORT_R_CLK" | "PORT_W_CLK", None) => Direction::I,
+            ("$__RAMGEM_SYNC_", "PORT_R_ADDR" | "PORT_W_ADDR", Some(0..=12)) => Direction::I,
+            ("$__RAMGEM_SYNC_", "PORT_W_WR_EN" | "PORT_W_WR_DATA", Some(0..=31)) => Direction::I,
+            ("$__RAMGEM_SYNC_", "PORT_R_RD_DATA", Some(0..=31)) => Direction::O,
 
             _ => {
                 use netlistdb::{GeneralPinName, HierName};
@@ -72,23 +77,26 @@ impl LeafPinProvider for AIGPDKLeafPins {
     fn width_of(
         &self,
         macro_name: &CompactString,
-        pin_name: &CompactString
+        pin_name: &CompactString,
     ) -> Option<SVerilogRange> {
         match (macro_name.as_str(), pin_name.as_str()) {
             ("INV" | "BUF", "A" | "Y") => None,
-            ("AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" |
-             "AND2_11_1", "A" | "B" | "Y") => None,
+            (
+                "AND2_00_0" | "AND2_01_0" | "AND2_10_0" | "AND2_11_0" | "AND2_11_1",
+                "A" | "B" | "Y",
+            ) => None,
             ("DFF" | "DFFSR" | "LATCH", "CLK" | "D" | "Q" | "S" | "R") => None,
             ("CKLNQD", "CP" | "E" | "Q") => None,
-            ("$__RAMGEM_SYNC_",
-             "PORT_R_CLK" | "PORT_W_CLK") => None,
-            ("$__RAMGEM_SYNC_",
-             "PORT_R_ADDR" | "PORT_W_ADDR")
-                => Some(SVerilogRange(12, 0)),
-            ("$__RAMGEM_SYNC_",
-             "PORT_W_WR_EN" | "PORT_W_WR_DATA" | "PORT_R_RD_DATA")
-                => Some(SVerilogRange(31, 0)),
-            _ => None
+            // GEM assertion and display cells
+            ("GEM_ASSERT", "CLK" | "EN" | "A") => None,
+            ("GEM_DISPLAY", "CLK" | "EN") => None,
+            ("GEM_DISPLAY", "MSG_ID") => Some(SVerilogRange(31, 0)),
+            ("$__RAMGEM_SYNC_", "PORT_R_CLK" | "PORT_W_CLK") => None,
+            ("$__RAMGEM_SYNC_", "PORT_R_ADDR" | "PORT_W_ADDR") => Some(SVerilogRange(12, 0)),
+            ("$__RAMGEM_SYNC_", "PORT_W_WR_EN" | "PORT_W_WR_DATA" | "PORT_R_RD_DATA") => {
+                Some(SVerilogRange(31, 0))
+            }
+            _ => None,
         }
     }
 }

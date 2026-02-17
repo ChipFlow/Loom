@@ -4,6 +4,7 @@
 #include <crates/ulib/includes.hpp>
 #include <cstdio>
 #include <cooperative_groups.h>
+#include "event_buffer.h"
 
 struct alignas(8) VectorRead2 {
   u32 c1, c2;
@@ -29,7 +30,18 @@ __device__ void simulate_block_v1(
   u32 *__restrict__ sram_data,
   u32 *__restrict__ shared_metadata,
   u32 *__restrict__ shared_writeouts,
-  u32 *__restrict__ shared_state
+  u32 *__restrict__ shared_state,
+  // Arrival times in raw picoseconds (u16), max representable 65,535ps.
+  // Gate delays are stored as u16 in the script padding slots.
+  // No quantization needed — 512 bytes of shared memory per block is negligible.
+  u16 *__restrict__ shared_arrival,
+  // Writeout arrival times captured during writeout hook
+  u16 *__restrict__ shared_writeout_arrival,
+  // Timing constraint buffer: one u32 per state word, [setup_ps:16][hold_ps:16]
+  const u32 *__restrict__ timing_constraints,
+  u32 clock_period_ps,
+  EventBuffer *__restrict__ event_buffer,
+  u32 cycle_i
   )
 {
   int script_pi = 0;
@@ -102,6 +114,8 @@ __device__ void simulate_block_v1(
       }
     }
     shared_state[threadIdx.x] = t_global_rd_state;
+    // Initialize arrival times to 0 (inputs have zero arrival)
+    shared_arrival[threadIdx.x] = 0;
     __syncthreads();
 
     for(int bs_i = 0; bs_i < num_stages; ++bs_i) {
@@ -136,22 +150,33 @@ __device__ void simulate_block_v1(
       hier_flag_xora = t4_5.c1;
       hier_flag_xorb = t4_5.c2;
       hier_flag_orb = t4_5.c3;
+      // Extract per-thread-position gate delay from padding slot (u16 raw picoseconds)
+      u16 gate_delay = (u16)(t4_5.c4 & 0xFFFF);
       t4_5.read(((const VectorRead4 *)(script + script_pi + 256 * 4 * 4)) + threadIdx.x);
 
       __syncthreads();
       shared_state[threadIdx.x] = hier_input;
+      shared_arrival[threadIdx.x] = 0;  // Reset arrival for shuffle inputs
       __syncthreads();
 
-      // hier[0]
+      // hier[0]: threads 128-255 compute AND gates + track arrivals
       if(threadIdx.x >= 128) {
         u32 hier_input_a = shared_state[threadIdx.x - 128];
         u32 hier_input_b = hier_input;
         u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
         shared_state[threadIdx.x] = ret;
+
+        // Arrival tracking: max(input_a, input_b) + gate_delay
+        u16 arr_a = (u16)shared_arrival[threadIdx.x - 128];
+        u16 arr_b = (u16)shared_arrival[threadIdx.x];
+        bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+        u16 new_arr = is_pass ? arr_a : (u16)(max(arr_a, arr_b) + (u16)gate_delay);
+        shared_arrival[threadIdx.x] = new_arr;
       }
       __syncthreads();
-      // hier[1..3]
+      // hier[1..3]: shared memory reduction + arrival tracking
       u32 tmp_cur_hi;
+      u16 tmp_cur_arr = 0;
       for(int hi = 1; hi <= 3; ++hi) {
         int hier_width = 1 << (7 - hi);
         if(threadIdx.x >= hier_width && threadIdx.x < hier_width * 2) {
@@ -160,21 +185,38 @@ __device__ void simulate_block_v1(
           u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
           tmp_cur_hi = ret;
           shared_state[threadIdx.x] = ret;
+
+          // Arrival tracking
+          u16 arr_a = (u16)shared_arrival[threadIdx.x + hier_width];
+          u16 arr_b = (u16)shared_arrival[threadIdx.x + hier_width * 2];
+          bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+          u16 new_arr = is_pass ? arr_a : (u16)(max(arr_a, arr_b) + (u16)gate_delay);
+          tmp_cur_arr = new_arr;
+          shared_arrival[threadIdx.x] = tmp_cur_arr;
         }
         __syncthreads();
       }
       // hier[4..7], within the first warp.
+      // Pack arrival into u32 for warp shuffle
+      u32 tmp_cur_arr_u32 = (u32)tmp_cur_arr;
       if(threadIdx.x < 32) {
         for(int hi = 4; hi <= 7; ++hi) {
           int hier_width = 1 << (7 - hi);
           u32 hier_input_a = __shfl_down_sync(0xffffffff, tmp_cur_hi, hier_width);
           u32 hier_input_b = __shfl_down_sync(0xffffffff, tmp_cur_hi, hier_width * 2);
+          u32 arr_a_u32 = __shfl_down_sync(0xffffffff, tmp_cur_arr_u32, hier_width);
+          u32 arr_b_u32 = __shfl_down_sync(0xffffffff, tmp_cur_arr_u32, hier_width * 2);
           if(threadIdx.x >= hier_width && threadIdx.x < hier_width * 2) {
             tmp_cur_hi = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+            // Arrival tracking
+            bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
+            u16 new_arr = is_pass ? (u16)arr_a_u32 : (u16)(max((u16)arr_a_u32, (u16)arr_b_u32) + (u16)gate_delay);
+            tmp_cur_arr_u32 = (u32)new_arr;
           }
         }
         u32 v1 = __shfl_down_sync(0xffffffff, tmp_cur_hi, 1);
-        // hier[8..12]
+        // hier[8..12]: bit-level operations within single u32
+        // All 32 signals share one thread's arrival — arrival carries forward unchanged
         if(threadIdx.x == 0) {
           u32 r8 = ((v1 << 16) ^ hier_flag_xora) & ((v1 ^ hier_flag_xorb) | hier_flag_orb) & 0xffff0000;
           u32 r9 = ((r8 >> 8) ^ hier_flag_xora) & (((r8 >> 16) ^ hier_flag_xorb) | hier_flag_orb) & 0xff00;
@@ -182,14 +224,17 @@ __device__ void simulate_block_v1(
           u32 r11 = ((r10 >> 2) ^ hier_flag_xora) & (((r10 >> 4) ^ hier_flag_xorb) | hier_flag_orb) & 12 /* 0b1100 */;
           u32 r12 = ((r11 >> 1) ^ hier_flag_xora) & (((r11 >> 2) ^ hier_flag_xorb) | hier_flag_orb) & 2 /* 0b10 */;
           tmp_cur_hi = r8 | r9 | r10 | r11 | r12;
+          // Arrival from hier[7] thread 1 carries forward through bit-level ops
         }
         shared_state[threadIdx.x] = tmp_cur_hi;
+        shared_arrival[threadIdx.x] = (u16)tmp_cur_arr_u32;
       }
       __syncthreads();
 
       // write out
       if((writeout_hook_i >> 8) == bs_i) {
         shared_writeouts[threadIdx.x] = shared_state[writeout_hook_i & 255];
+        shared_writeout_arrival[threadIdx.x] = shared_arrival[writeout_hook_i & 255];
       }
     }
     __syncthreads();
@@ -306,6 +351,30 @@ __device__ void simulate_block_v1(
       output_state[io_offset + threadIdx.x] = wo;
     }
 
+    // DFF timing violation check (per writeout word)
+    if(threadIdx.x < num_ios && clken_perm != 0 && timing_constraints != nullptr) {
+      u32 constraint = timing_constraints[io_offset + threadIdx.x];
+      if(constraint != 0) {
+        u16 setup_ps = (u16)(constraint >> 16);
+        u16 hold_ps = (u16)(constraint & 0xFFFF);
+        u16 arrival = shared_writeout_arrival[threadIdx.x];
+        // Setup: arrival + setup must fit within clock period
+        if(arrival > 0 && (u32)arrival + (u32)setup_ps > clock_period_ps) {
+          int slack = (int)clock_period_ps - (int)arrival - (int)setup_ps;
+          write_event(event_buffer, EVENT_TYPE_SETUP_VIOLATION,
+                     io_offset + threadIdx.x, cycle_i,
+                     io_offset + threadIdx.x, (u32)slack, (u32)arrival, (u32)setup_ps);
+        }
+        // Hold: arrival must exceed hold time
+        if(arrival < hold_ps) {
+          int slack = (int)arrival - (int)hold_ps;
+          write_event(event_buffer, EVENT_TYPE_HOLD_VIOLATION,
+                     io_offset + threadIdx.x, cycle_i,
+                     io_offset + threadIdx.x, (u32)slack, (u32)arrival, (u32)hold_ps);
+        }
+      }
+    }
+
     if(is_last_part) break;
   }
   assert(script_size == script_pi);
@@ -319,7 +388,9 @@ __global__ void simulate_v1_noninteractive_simple_scan(
   u32 *__restrict__ sram_data,
   usize num_cycles,
   usize state_size,
-  u32 *__restrict__ states_noninteractive
+  u32 *__restrict__ states_noninteractive,
+  const u32 *__restrict__ timing_constraints,
+  EventBuffer *__restrict__ event_buffer
   )
 {
   assert(num_blocks == gridDim.x);
@@ -327,8 +398,16 @@ __global__ void simulate_v1_noninteractive_simple_scan(
   __shared__ u32 shared_metadata[256];
   __shared__ u32 shared_writeouts[256];
   __shared__ u32 shared_state[256];
+  __shared__ u16 shared_arrival[256];  // Per-thread-position arrival times (raw picoseconds)
+  __shared__ u16 shared_writeout_arrival[256];  // Arrival times captured at writeout
+  shared_writeout_arrival[threadIdx.x] = 0;  // Must initialize — only writeout threads update this
   __shared__ u32 script_starts[32], script_sizes[32];
   assert(num_major_stages <= 32);
+
+  // Read clock period from first element of constraints buffer
+  u32 clock_period_ps = (timing_constraints != nullptr) ? timing_constraints[0] : 0;
+  const u32* constraints_data = (timing_constraints != nullptr) ? timing_constraints + 1 : nullptr;
+
   if(threadIdx.x < num_major_stages) {
     script_starts[threadIdx.x] = blocks_start[threadIdx.x * num_blocks + blockIdx.x];
     script_sizes[threadIdx.x] = blocks_start[threadIdx.x * num_blocks + blockIdx.x + 1] - script_starts[threadIdx.x];
@@ -342,7 +421,12 @@ __global__ void simulate_v1_noninteractive_simple_scan(
         states_noninteractive + cycle_i * state_size,
         states_noninteractive + (cycle_i + 1) * state_size,
         sram_data,
-        shared_metadata, shared_writeouts, shared_state
+        shared_metadata, shared_writeouts, shared_state, shared_arrival,
+        shared_writeout_arrival,
+        constraints_data,
+        clock_period_ps,
+        event_buffer,
+        (u32)cycle_i
         );
       cooperative_groups::this_grid().sync();
     }

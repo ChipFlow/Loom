@@ -1,0 +1,208 @@
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "inv_chain")
+  (DATE "Mon Jan 01 00:00:00 2024")
+  (VENDOR "OpenLane2")
+  (PROGRAM "OpenSTA")
+  (VERSION "2.5.0")
+  (DIVIDER .)
+  (VOLTAGE 1.800::1.800)
+  (PROCESS "typical")
+  (TEMPERATURE 25.000::25.000)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__dfxtp_1")
+    (INSTANCE dff_in)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH CLK Q (0.300:0.350:0.400) (0.280:0.330:0.380))
+      )
+    )
+    (TIMINGCHECK
+      (SETUP D (posedge CLK) (0.060:0.080:0.100))
+      (HOLD D (posedge CLK) (-0.040:-0.030:-0.020))
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i0)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.040:0.050:0.060) (0.030:0.040:0.055))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i1)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.042:0.052:0.062) (0.032:0.042:0.057))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i2)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.041:0.051:0.061) (0.031:0.041:0.056))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i3)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.043:0.053:0.063) (0.033:0.043:0.058))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i4)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.040:0.050:0.060) (0.030:0.040:0.055))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i5)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.044:0.054:0.064) (0.034:0.044:0.059))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i6)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.041:0.051:0.061) (0.031:0.041:0.056))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i7)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.042:0.052:0.062) (0.032:0.042:0.057))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i8)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.040:0.050:0.060) (0.030:0.040:0.055))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i9)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.043:0.053:0.063) (0.033:0.043:0.058))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i10)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.041:0.051:0.061) (0.031:0.041:0.056))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i11)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.044:0.054:0.064) (0.034:0.044:0.059))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i12)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.042:0.052:0.062) (0.032:0.042:0.057))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i13)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.041:0.051:0.061) (0.031:0.041:0.056))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i14)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.040:0.050:0.060) (0.030:0.040:0.055))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__inv_1")
+    (INSTANCE i15)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH A Y (0.043:0.053:0.063) (0.033:0.043:0.058))
+      )
+    )
+  )
+  (CELL
+    (CELLTYPE "sky130_fd_sc_hd__dfxtp_1")
+    (INSTANCE dff_out)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH CLK Q (0.310:0.360:0.410) (0.290:0.340:0.390))
+      )
+    )
+    (TIMINGCHECK
+      (SETUP D (posedge CLK) (0.065:0.085:0.105))
+      (HOLD D (posedge CLK) (-0.038:-0.028:-0.018))
+    )
+  )
+  (CELL
+    (CELLTYPE "inv_chain")
+    (INSTANCE)
+    (DELAY
+      (ABSOLUTE
+        (INTERCONNECT dff_in.Q i0.A (0.010:0.015:0.020) (0.008:0.012:0.016))
+        (INTERCONNECT i0.Y i1.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i1.Y i2.A (0.006:0.009:0.013) (0.005:0.008:0.011))
+        (INTERCONNECT i2.Y i3.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i3.Y i4.A (0.007:0.010:0.014) (0.006:0.009:0.012))
+        (INTERCONNECT i4.Y i5.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i5.Y i6.A (0.006:0.009:0.013) (0.005:0.008:0.011))
+        (INTERCONNECT i6.Y i7.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i7.Y i8.A (0.008:0.011:0.015) (0.007:0.010:0.013))
+        (INTERCONNECT i8.Y i9.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i9.Y i10.A (0.006:0.009:0.013) (0.005:0.008:0.011))
+        (INTERCONNECT i10.Y i11.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i11.Y i12.A (0.007:0.010:0.014) (0.006:0.009:0.012))
+        (INTERCONNECT i12.Y i13.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i13.Y i14.A (0.006:0.009:0.013) (0.005:0.008:0.011))
+        (INTERCONNECT i14.Y i15.A (0.005:0.008:0.012) (0.004:0.007:0.010))
+        (INTERCONNECT i15.Y dff_out.D (0.010:0.015:0.020) (0.008:0.012:0.016))
+      )
+    )
+  )
+)

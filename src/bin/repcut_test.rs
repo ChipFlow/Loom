@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::path::PathBuf;
-use gem::aigpdk::AIGPDKLeafPins;
 use gem::aig::AIG;
+use gem::aigpdk::AIGPDKLeafPins;
 use gem::repcut::RCHyperGraph;
 use gem::staging::build_staged_aigs;
 use netlistdb::NetlistDB;
-use std::io::Write;
 use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 
 #[derive(clap::Parser, Debug)]
 struct SimulatorArgs {
@@ -22,7 +22,7 @@ struct SimulatorArgs {
     #[clap(long)]
     top_module: Option<String>,
     /// Level split thresholds.
-    #[clap(long, value_delimiter=',')]
+    #[clap(long, value_delimiter = ',')]
     level_split: Vec<usize>,
     /// Output directory for hypergraph files.
     hgr_output_dir: PathBuf,
@@ -37,12 +37,17 @@ fn main() {
     let netlistdb = NetlistDB::from_sverilog_file(
         &args.netlist_verilog,
         args.top_module.as_deref(),
-        &AIGPDKLeafPins()
-    ).expect("cannot build netlist");
+        &AIGPDKLeafPins(),
+    )
+    .expect("cannot build netlist");
 
     let aig = AIG::from_netlistdb(&netlistdb);
-    println!("netlist has {} pins, {} aig pins, {} and gates",
-             netlistdb.num_pins, aig.num_aigpins, aig.and_gate_cache.len());
+    println!(
+        "netlist has {} pins, {} aig pins, {} and gates",
+        netlistdb.num_pins,
+        aig.num_aigpins,
+        aig.and_gate_cache.len()
+    );
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
@@ -52,10 +57,15 @@ fn main() {
     for &(l, r, ref staged) in &stageds {
         let hg = RCHyperGraph::from_staged_aig(&aig, staged);
 
-        let filename = format!("{}.stage.{}-{}.hgr", netlistdb.name, l, match r {
-            usize::MAX => "max".to_string(),
-            r @ _ => format!("{}", r)
-        });
+        let filename = format!(
+            "{}.stage.{}-{}.hgr",
+            netlistdb.name,
+            l,
+            match r {
+                usize::MAX => "max".to_string(),
+                r @ _ => format!("{}", r),
+            }
+        );
         println!("writing {}", filename);
         let path = args.hgr_output_dir.join(filename);
 

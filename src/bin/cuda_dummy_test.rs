@@ -3,13 +3,13 @@
 //! this binary only measures performance for 10000 cycles. it does not
 //! input or output actual VCD.
 
-use std::path::PathBuf;
-use gem::aigpdk::AIGPDKLeafPins;
 use gem::aig::{DriverType, AIG};
-use gem::staging::build_staged_aigs;
-use gem::pe::Partition;
+use gem::aigpdk::AIGPDKLeafPins;
 use gem::flatten::FlattenedScriptV1;
+use gem::pe::Partition;
+use gem::staging::build_staged_aigs;
 use netlistdb::NetlistDB;
+use std::path::PathBuf;
 use ulib::{Device, UVec};
 
 #[derive(clap::Parser, Debug)]
@@ -25,7 +25,7 @@ struct SimulatorArgs {
     #[clap(long)]
     top_module: Option<String>,
     /// Level split thresholds.
-    #[clap(long, value_delimiter=',')]
+    #[clap(long, value_delimiter = ',')]
     level_split: Vec<usize>,
     /// Input path for the serialized partitions.
     gemparts: PathBuf,
@@ -52,8 +52,9 @@ fn main() {
     let netlistdb = NetlistDB::from_sverilog_file(
         &args.netlist_verilog,
         args.top_module.as_deref(),
-        &AIGPDKLeafPins()
-    ).expect("cannot build netlist");
+        &AIGPDKLeafPins(),
+    )
+    .expect("cannot build netlist");
 
     let aig = AIG::from_netlistdb(&netlistdb);
 
@@ -71,8 +72,12 @@ fn main() {
         }
     }
     let max_level = level_id.iter().copied().max().unwrap();
-    println!("netlist has {} pins, {} aig pins, {} and gates",
-             netlistdb.num_pins, aig.num_aigpins, aig.and_gate_cache.len());
+    println!(
+        "netlist has {} pins, {} aig pins, {} and gates",
+        netlistdb.num_pins,
+        aig.num_aigpins,
+        aig.and_gate_cache.len()
+    );
     println!("netlist logic depth: {}", max_level);
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
@@ -80,8 +85,13 @@ fn main() {
     let f = std::fs::File::open(&args.gemparts).unwrap();
     let mut buf = std::io::BufReader::new(f);
     let parts_in_stages: Vec<Vec<Partition>> = serde_bare::from_reader(&mut buf).unwrap();
-    clilog::info!("# of effective partitions in each stage: {:?}",
-                  parts_in_stages.iter().map(|ps| ps.len()).collect::<Vec<_>>());
+    clilog::info!(
+        "# of effective partitions in each stage: {:?}",
+        parts_in_stages
+            .iter()
+            .map(|ps| ps.len())
+            .collect::<Vec<_>>()
+    );
 
     let mut input_layout = Vec::new();
     for (i, driv) in aig.drivers.iter().enumerate() {
@@ -91,13 +101,21 @@ fn main() {
     }
 
     let script = FlattenedScriptV1::from(
-        &aig, &stageds.iter().map(|(_, _, staged)| staged).collect::<Vec<_>>(),
-        &parts_in_stages.iter().map(|ps| ps.as_slice()).collect::<Vec<_>>(),
-        args.num_blocks, input_layout
+        &aig,
+        &stageds
+            .iter()
+            .map(|(_, _, staged)| staged)
+            .collect::<Vec<_>>(),
+        &parts_in_stages
+            .iter()
+            .map(|ps| ps.as_slice())
+            .collect::<Vec<_>>(),
+        args.num_blocks,
+        input_layout,
     );
 
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hasher, Hash};
+    use std::hash::{Hash, Hasher};
     let mut s = DefaultHasher::new();
     script.blocks_data.hash(&mut s);
     println!("Script hash: {}", s.finish());
@@ -105,19 +123,23 @@ fn main() {
     // do simulation
     clilog::info!("total number of cycles: {}", args.num_dummy_cycles);
     let device = Device::CUDA(0);
-    let mut input_states_uvec = UVec::new_zeroed(script.reg_io_state_size as usize * (args.num_dummy_cycles + 1), device);
+    let mut input_states_uvec = UVec::new_zeroed(
+        script.reg_io_state_size as usize * (args.num_dummy_cycles + 1),
+        device,
+    );
     let mut sram_storage = UVec::new_zeroed(script.sram_storage_size as usize, device);
     device.synchronize();
     let timer_sim = clilog::stimer!("simulation (warm up)");
     ucci::simulate_v1_noninteractive_simple_scan(
         args.num_blocks,
         script.num_major_stages,
-        &script.blocks_start, &script.blocks_data,
+        &script.blocks_start,
+        &script.blocks_data,
         &mut sram_storage,
         args.num_dummy_cycles,
         script.reg_io_state_size as usize,
         &mut input_states_uvec,
-        device
+        device,
     );
     device.synchronize();
     clilog::finish!(timer_sim);
@@ -125,12 +147,13 @@ fn main() {
     ucci::simulate_v1_noninteractive_simple_scan(
         args.num_blocks,
         script.num_major_stages,
-        &script.blocks_start, &script.blocks_data,
+        &script.blocks_start,
+        &script.blocks_data,
         &mut sram_storage,
         args.num_dummy_cycles,
         script.reg_io_state_size as usize,
         &mut input_states_uvec,
-        device
+        device,
     );
     device.synchronize();
     clilog::finish!(timer_sim);

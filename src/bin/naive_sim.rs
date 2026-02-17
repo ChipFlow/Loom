@@ -1,17 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::path::PathBuf;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Seek, SeekFrom};
-use std::hash::Hash;
-use std::rc::Rc;
-use std::collections::{HashMap, HashSet};
 use compact_str::CompactString;
-use netlistdb::{Direction, GeneralHierName, GeneralPinName, NetlistDB};
-use sverilogparse::SVerilogRange;
-use itertools::Itertools;
-use vcd_ng::{Parser, ScopeItem, Var, Scope, FastFlow, FastFlowToken, FFValueChange, Writer, SimulationCommand};
 use gem::aigpdk::AIGPDKLeafPins;
+use itertools::Itertools;
+use netlistdb::{Direction, GeneralHierName, GeneralPinName, NetlistDB};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::hash::Hash;
+use std::io::{BufReader, BufWriter, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::rc::Rc;
+use sverilogparse::SVerilogRange;
+use vcd_ng::{
+    FFValueChange, FastFlow, FastFlowToken, Parser, Scope, ScopeItem, SimulationCommand, Var,
+    Writer,
+};
 
 #[derive(clap::Parser, Debug)]
 struct SimulatorArgs {
@@ -49,7 +52,7 @@ struct SimulatorArgs {
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct VCDHier {
     cur: CompactString,
-    prev: Option<Rc<VCDHier>>
+    prev: Option<Rc<VCDHier>>,
 }
 
 /// Reverse iterator of a [`VCDHier`], yielding cell names
@@ -63,7 +66,7 @@ impl<'i> Iterator for VCDHierRevIter<'i> {
     fn next(&mut self) -> Option<&'i CompactString> {
         let name = self.0?;
         if name.cur.is_empty() {
-            return None
+            return None;
         }
         let ret = &name.cur;
         self.0 = name.prev.as_ref().map(|a| a.as_ref());
@@ -98,7 +101,10 @@ impl VCDHier {
 
     #[inline]
     fn empty() -> Self {
-        VCDHier { cur: "".into(), prev: None }
+        VCDHier {
+            cur: "".into(),
+            prev: None,
+        }
     }
 
     #[inline]
@@ -117,32 +123,34 @@ impl VCDHier {
 /// all paths matched).
 /// If fails, return None.
 fn match_scope_path<'i>(mut scope: &'i str, cur: &str) -> Option<&'i str> {
-    if scope.len() == 0 { return Some("") }
+    if scope.len() == 0 {
+        return Some("");
+    }
     if scope.starts_with('/') {
         scope = &scope[1..];
     }
-    if scope.len() == 0 { Some("") }
-    else if scope.starts_with(cur) {
-        if scope.len() == cur.len() { Some("") }
-        else if scope.as_bytes()[cur.len()] == b'/' {
+    if scope.len() == 0 {
+        Some("")
+    } else if scope.starts_with(cur) {
+        if scope.len() == cur.len() {
+            Some("")
+        } else if scope.as_bytes()[cur.len()] == b'/' {
             Some(&scope[cur.len() + 1..])
+        } else {
+            None
         }
-        else { None }
+    } else {
+        None
     }
-    else { None }
 }
 
-fn find_top_scope<'i>(
-    items: &'i [ScopeItem], top_scope: &'_ str
-) -> Option<&'i Scope> {
+fn find_top_scope<'i>(items: &'i [ScopeItem], top_scope: &'_ str) -> Option<&'i Scope> {
     for item in items {
         if let ScopeItem::Scope(scope) = item {
-            if let Some(s1) = match_scope_path(
-                top_scope, scope.identifier.as_str()
-            ) {
+            if let Some(s1) = match_scope_path(top_scope, scope.identifier.as_str()) {
                 return match s1 {
                     "" => Some(scope),
-                    _ => find_top_scope(&scope.children[..], s1)
+                    _ => find_top_scope(&scope.children[..], s1),
                 };
             }
         }
@@ -158,23 +166,26 @@ fn main() {
     let netlistdb = NetlistDB::from_sverilog_file(
         &args.netlist_verilog,
         args.top_module.as_deref(),
-        &AIGPDKLeafPins()
-    ).expect("cannot build netlist");
+        &AIGPDKLeafPins(),
+    )
+    .expect("cannot build netlist");
 
     let mut posedge_monitor = HashSet::new();
     for cellid in 1..netlistdb.num_cells {
-        if matches!(netlistdb.celltypes[cellid].as_str(),
-                    "DFF" | "$__RAMGEM_SYNC_") {
+        if matches!(
+            netlistdb.celltypes[cellid].as_str(),
+            "DFF" | "$__RAMGEM_SYNC_"
+        ) {
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if matches!(netlistdb.pinnames[pinid].1.as_str(),
-                            "CLK" | "PORT_R_CLK" | "PORT_W_CLK") {
+                if matches!(
+                    netlistdb.pinnames[pinid].1.as_str(),
+                    "CLK" | "PORT_R_CLK" | "PORT_W_CLK"
+                ) {
                     let netid = netlistdb.pin2net[pinid];
                     if Some(netid) == netlistdb.net_zero || Some(netid) == netlistdb.net_one {
-                        continue
+                        continue;
                     }
-                    let root = netlistdb.net2pin.items[
-                        netlistdb.net2pin.start[netid]
-                    ];
+                    let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
                     if netlistdb.pin2cell[root] != 0 {
                         panic!("DFF {} driven by non-port pin {}: this pattern is not yet supported. please disable clock gating.",
                                netlistdb.cellnames[cellid],
@@ -187,9 +198,11 @@ fn main() {
     }
     clilog::info!(
         "clock ports detected: {}",
-        posedge_monitor.iter()
+        posedge_monitor
+            .iter()
             .map(|&i| netlistdb.pinnames[i].dbg_fmt_pin())
-            .format(", "));
+            .format(", ")
+    );
 
     let input_vcd = File::open(&args.input_vcd).unwrap();
     let mut bufrd = BufReader::with_capacity(65536, input_vcd);
@@ -202,18 +215,19 @@ fn main() {
 
     let top_scope = find_top_scope(
         &header.items[..],
-        args.input_vcd_scope.as_deref().unwrap_or("")
-    ).expect("Specified top scope not found in VCD.");
+        args.input_vcd_scope.as_deref().unwrap_or(""),
+    )
+    .expect("Specified top scope not found in VCD.");
 
     let mut vcd2inp = HashMap::new();
     let mut inp_port_given = HashSet::new();
 
     let mut match_one_input = |var: &Var, i: Option<isize>, vcd_pos: usize| {
         let key = (VCDHier::empty(), var.reference.as_str(), i);
-        if let Some(&id) = netlistdb.pinname2id.get(
-            &key as &dyn GeneralPinName
-        ) {
-            if netlistdb.pindirect[id] != Direction::O { return }
+        if let Some(&id) = netlistdb.pinname2id.get(&key as &dyn GeneralPinName) {
+            if netlistdb.pindirect[id] != Direction::O {
+                return;
+            }
             vcd2inp.insert((var.code.0, vcd_pos), id);
             inp_port_given.insert(id);
         }
@@ -225,20 +239,14 @@ fn main() {
                 None => match var.size {
                     1 => match_one_input(var, None, 0),
                     w @ _ => {
-                        for (pos, i) in (0..w).rev()
-                            .enumerate()
-                        {
-                            match_one_input(
-                                var, Some(i as isize), pos)
+                        for (pos, i) in (0..w).rev().enumerate() {
+                            match_one_input(var, Some(i as isize), pos)
                         }
                     }
                 },
-                Some(BitSelect(i)) => match_one_input(
-                    var, Some(i as isize), 0),
+                Some(BitSelect(i)) => match_one_input(var, Some(i as isize), 0),
                 Some(Range(a, b)) => {
-                    for (pos, i) in SVerilogRange(
-                        a as isize, b as isize).enumerate()
-                    {
+                    for (pos, i) in SVerilogRange(a as isize, b as isize).enumerate() {
                         match_one_input(var, Some(i), pos);
                     }
                 }
@@ -246,14 +254,13 @@ fn main() {
         }
     }
     for i in netlistdb.cell2pin.iter_set(0) {
-        if netlistdb.pindirect[i] != Direction::I &&
-            !inp_port_given.contains(&i)
-        {
+        if netlistdb.pindirect[i] != Direction::I && !inp_port_given.contains(&i) {
             clilog::warn!(
                 GATESIM_VCDI_MISSING_PI,
                 "Primary input port {:?} not present in \
                  the VCD input",
-                netlistdb.pinnames[i]);
+                netlistdb.pinnames[i]
+            );
         }
     }
 
@@ -274,11 +281,12 @@ fn main() {
         }
     }
     for cellid in 1..netlistdb.num_cells {
-        if matches!(netlistdb.celltypes[cellid].as_str(),
-                    "DFF" | "$__RAMGEM_SYNC_") {
+        if matches!(
+            netlistdb.celltypes[cellid].as_str(),
+            "DFF" | "$__RAMGEM_SYNC_"
+        ) {
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if matches!(netlistdb.pinnames[pinid].1.as_str(),
-                            "Q" | "PORT_R_RD_DATA") {
+                if matches!(netlistdb.pinnames[pinid].1.as_str(), "Q" | "PORT_R_RD_DATA") {
                     topo_vis[pinid] = true;
                     // do not add them to topo, but treat them separately before prop.
                 }
@@ -288,27 +296,31 @@ fn main() {
             srams.insert(cellid, vec![0u32; 1 << 13]);
         }
     }
-    fn dfs_topo(netlistdb: &NetlistDB, topo_vis: &mut Vec<bool>, topo_instack: &mut Vec<bool>, topo: &mut Vec<usize>, pinid: usize) {
+    fn dfs_topo(
+        netlistdb: &NetlistDB,
+        topo_vis: &mut Vec<bool>,
+        topo_instack: &mut Vec<bool>,
+        topo: &mut Vec<usize>,
+        pinid: usize,
+    ) {
         if topo_instack[pinid] {
             panic!("circuit has loop!");
         }
-        if topo_vis[pinid] { return }
+        if topo_vis[pinid] {
+            return;
+        }
         topo_vis[pinid] = true;
         topo_instack[pinid] = true;
         if netlistdb.pindirect[pinid] == Direction::I {
             let netid = netlistdb.pin2net[pinid];
             if Some(netid) != netlistdb.net_zero && Some(netid) != netlistdb.net_one {
-                let root = netlistdb.net2pin.items[
-                    netlistdb.net2pin.start[netid]
-                ];
+                let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
                 dfs_topo(netlistdb, topo_vis, topo_instack, topo, root);
             }
-        }
-        else {
+        } else {
             let cellid = netlistdb.pin2cell[pinid];
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if matches!(netlistdb.pinnames[pinid].1.as_str(),
-                            "A" | "B") {
+                if matches!(netlistdb.pinnames[pinid].1.as_str(), "A" | "B") {
                     dfs_topo(netlistdb, topo_vis, topo_instack, topo, pinid);
                 }
             }
@@ -319,16 +331,32 @@ fn main() {
     // start from all comb. circuit outputs
     for pinid in netlistdb.cell2pin.iter_set(0) {
         if netlistdb.pindirect[pinid] == Direction::I {
-            dfs_topo(&netlistdb, &mut topo_vis, &mut topo_instack, &mut topo, pinid);
+            dfs_topo(
+                &netlistdb,
+                &mut topo_vis,
+                &mut topo_instack,
+                &mut topo,
+                pinid,
+            );
         }
     }
     for cellid in 1..netlistdb.num_cells {
-        if matches!(netlistdb.celltypes[cellid].as_str(),
-                    "DFF" | "$__RAMGEM_SYNC_") {
+        if matches!(
+            netlistdb.celltypes[cellid].as_str(),
+            "DFF" | "$__RAMGEM_SYNC_"
+        ) {
             for pinid in netlistdb.cell2pin.iter_set(cellid) {
-                if matches!(netlistdb.pinnames[pinid].1.as_str(),
-                            "D" | "PORT_R_ADDR" | "PORT_W_WR_EN" | "PORT_W_ADDR" | "PORT_W_WR_DATA") {
-                    dfs_topo(&netlistdb, &mut topo_vis, &mut topo_instack, &mut topo, pinid);
+                if matches!(
+                    netlistdb.pinnames[pinid].1.as_str(),
+                    "D" | "PORT_R_ADDR" | "PORT_W_WR_EN" | "PORT_W_ADDR" | "PORT_W_WR_DATA"
+                ) {
+                    dfs_topo(
+                        &netlistdb,
+                        &mut topo_vis,
+                        &mut topo_instack,
+                        &mut topo,
+                        pinid,
+                    );
                 }
             }
         }
@@ -361,25 +389,37 @@ fn main() {
     for &scope in &output_vcd_scope {
         writer.add_module(scope).unwrap();
     }
-    let mut out2vcd = netlistdb.cell2pin.iter_set(0).filter_map(|i| {
-        if netlistdb.pindirect[i] == Direction::I {
-            Some((i, writer.add_wire(
-                1, &format!("{}", netlistdb.pinnames[i].dbg_fmt_pin())).unwrap()))
-        }
-        else { None }
-    }).collect::<Vec<_>>();
+    let mut out2vcd = netlistdb
+        .cell2pin
+        .iter_set(0)
+        .filter_map(|i| {
+            if netlistdb.pindirect[i] == Direction::I {
+                Some((
+                    i,
+                    writer
+                        .add_wire(1, &format!("{}", netlistdb.pinnames[i].dbg_fmt_pin()))
+                        .unwrap(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     if args.include_wires {
         out2vcd.extend((0..netlistdb.num_nets).filter_map(|i| {
             if Some(i) == netlistdb.net_zero || Some(i) == netlistdb.net_one {
-                return None
+                return None;
             }
             let root = netlistdb.net2pin.items[netlistdb.net2pin.start[i]];
             if netlistdb.pindirect[root] != Direction::O {
-                return None
+                return None;
             }
-            Some((root, writer.add_wire(
-                1, &format!("{}", netlistdb.netnames[i].dbg_fmt_pin())
-            ).unwrap()))
+            Some((
+                root,
+                writer
+                    .add_wire(1, &format!("{}", netlistdb.netnames[i].dbg_fmt_pin()))
+                    .unwrap(),
+            ))
         }));
     }
     let mut last_val = vec![2; out2vcd.len()];
@@ -395,7 +435,9 @@ fn main() {
     while let Some(tok) = vcdflow.next_token().unwrap() {
         match tok {
             FastFlowToken::Timestamp(t) => {
-                if t == vcd_time { continue }
+                if t == vcd_time {
+                    continue;
+                }
                 if last_vcd_time_rising_edge {
                     clilog::debug!("simulating t={}", vcd_time);
                     // latch the regs and srams.
@@ -411,8 +453,7 @@ fn main() {
                                 }
                             }
                             circ_state[pinid_q] = circ_state[pinid_d];
-                        }
-                        else if netlistdb.celltypes[cellid].as_str() == "$__RAMGEM_SYNC_" {
+                        } else if netlistdb.celltypes[cellid].as_str() == "$__RAMGEM_SYNC_" {
                             let sram = srams.get_mut(&cellid).unwrap();
                             let mut port_r_addr = 0usize;
                             let mut port_w_addr = 0usize;
@@ -438,9 +479,12 @@ fn main() {
                             }
                             let port_r_rd_data = sram[port_r_addr];
                             let port_w_old_data = sram[port_w_addr];
-                            let port_w_data = (port_w_old_data & (!port_w_wr_en)) | (port_w_wr_data & port_w_wr_en);
+                            let port_w_data = (port_w_old_data & (!port_w_wr_en))
+                                | (port_w_wr_data & port_w_wr_en);
                             sram[port_w_addr] = port_w_data;
-                            if netlistdb.cellnames[cellid].dbg_fmt_hier().as_str() == "cpu.instruction_unit.icache.memories[0].way_0_data_ram.mem.0.0" {
+                            if netlistdb.cellnames[cellid].dbg_fmt_hier().as_str()
+                                == "cpu.instruction_unit.icache.memories[0].way_0_data_ram.mem.0.0"
+                            {
                                 println!("our sram at time {vcd_time} port_r_addr {port_r_addr} port_w_addr {port_w_addr} port_w_wr_data {port_w_wr_data} -> port_r_rd_data {port_r_rd_data}");
                             }
                             for pinid in netlistdb.cell2pin.iter_set(cellid) {
@@ -467,17 +511,15 @@ fn main() {
                         // }
                         if netlistdb.pindirect[pinid] == Direction::I {
                             let netid = netlistdb.pin2net[pinid];
-                            if Some(netid) != netlistdb.net_zero && Some(netid) != netlistdb.net_one {
-                                let root = netlistdb.net2pin.items[
-                                    netlistdb.net2pin.start[netid]
-                                ];
+                            if Some(netid) != netlistdb.net_zero && Some(netid) != netlistdb.net_one
+                            {
+                                let root = netlistdb.net2pin.items[netlistdb.net2pin.start[netid]];
                                 circ_state[pinid] = circ_state[root];
                                 // if netlistdb.pin2cell[pinid] == 0 {
                                 //     println!("changing output for pin {} to {}", netlistdb.pinnames[pinid].dbg_fmt_pin(), circ_state[pinid]);
                                 // }
                             }
-                        }
-                        else {
+                        } else {
                             let cellid = netlistdb.pin2cell[pinid];
                             let mut vala = 0;
                             let mut valb = 0;
@@ -485,8 +527,8 @@ fn main() {
                                 match netlistdb.pinnames[pinid_inp].1.as_str() {
                                     "A" => vala = circ_state[pinid_inp],
                                     "B" => valb = circ_state[pinid_inp],
-                                    "Y" => {},
-                                    _ => unreachable!()
+                                    "Y" => {}
+                                    _ => unreachable!(),
                                 }
                             }
                             circ_state[pinid] = match netlistdb.celltypes[cellid].as_str() {
@@ -497,7 +539,7 @@ fn main() {
                                 "AND2_11_1" => vala | valb,
                                 "INV" => vala ^ 1,
                                 "BUF" => vala,
-                                _ => unreachable!()
+                                _ => unreachable!(),
                             };
                             // if netlistdb.pin2net[pinid] == 1039 {
                             //     println!("d_we_o input gate: {} {} type {}", vala, valb, netlistdb.celltypes[cellid].as_str());
@@ -510,13 +552,18 @@ fn main() {
                         use vcd_ng::Value;
                         let value_new = circ_state[pinid];
                         if value_new == last_val[i] {
-                            continue
+                            continue;
                         }
                         last_val[i] = value_new;
-                        writer.change_scalar(vid, match value_new {
-                            1 => Value::V1,
-                            _ => Value::V0
-                        }).unwrap();
+                        writer
+                            .change_scalar(
+                                vid,
+                                match value_new {
+                                    1 => Value::V1,
+                                    _ => Value::V0,
+                                },
+                            )
+                            .unwrap();
                     }
                 }
                 // reset for next timestamp
@@ -525,17 +572,16 @@ fn main() {
                 for &clk in &posedge_monitor {
                     circ_state[clk] = 0;
                 }
-            },
+            }
             FastFlowToken::Value(FFValueChange { id, bits }) => {
                 for (pos, &b) in bits.iter().enumerate() {
-                    if let Some(&pin) = vcd2inp.get(
-                        &(id.0, pos)
-                    ) {
+                    if let Some(&pin) = vcd2inp.get(&(id.0, pos)) {
                         if b == b'1' && posedge_monitor.contains(&pin) {
                             last_vcd_time_rising_edge = true;
                         }
                         circ_state[pin] = match b {
-                            b'1' => 1, _ => 0
+                            b'1' => 1,
+                            _ => 0,
                         };
                     }
                 }

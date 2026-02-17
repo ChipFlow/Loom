@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::path::PathBuf;
+use gem::aig::{DriverType, AIG};
 use gem::aigpdk::AIGPDKLeafPins;
-use gem::aig::{AIG, DriverType};
 use netlistdb::NetlistDB;
+use std::path::PathBuf;
 
 #[derive(clap::Parser, Debug)]
 struct SimulatorArgs {
@@ -28,8 +28,9 @@ fn main() {
     let netlistdb = NetlistDB::from_sverilog_file(
         &args.netlist_verilog,
         args.top_module.as_deref(),
-        &AIGPDKLeafPins()
-    ).expect("cannot build netlist");
+        &AIGPDKLeafPins(),
+    )
+    .expect("cannot build netlist");
 
     let aig = AIG::from_netlistdb(&netlistdb);
 
