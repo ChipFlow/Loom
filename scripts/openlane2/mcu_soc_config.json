@@ -9,6 +9,7 @@
     "FP_CORE_UTIL": 25,
     "PL_TARGET_DENSITY_PCT": 30,
     "GRT_ADJUSTMENT": 0.25,
+    "PL_RESIZER_HOLD_MAX_BUFFER_PCT": 25,
     "RUN_LINTER": false,
     "SYNTH_ELABORATE_ONLY": true,
     "MACROS": {
