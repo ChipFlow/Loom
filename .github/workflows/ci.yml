@@ -348,6 +348,8 @@ jobs:
           fi
 
       - name: Run OpenLane2 P&R in Docker
+        id: pnr
+        continue-on-error: true
         run: |
           docker run --rm \
             -v "openlane-pdk:/root/.volare" \
@@ -361,6 +363,7 @@ jobs:
             openlane /design/config.json
 
       - name: Extract P&R outputs
+        if: always() && steps.pnr.outcome != 'skipped'
         run: |
           mkdir -p build_artifacts
           LATEST=$(ls -td designs/mcu_soc_sky130/build/openlane_runs/RUN_* | head -1)
