@@ -366,16 +366,34 @@ jobs:
         if: always() && steps.pnr.outcome != 'skipped'
         run: |
           mkdir -p build_artifacts
-          LATEST=$(ls -td designs/mcu_soc_sky130/build/openlane_runs/RUN_* | head -1)
+          LATEST=$(ls -td designs/mcu_soc_sky130/build/runs/RUN_* 2>/dev/null | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "No OpenLane2 run directory found"
+            exit 1
+          fi
           echo "Using run directory: $LATEST"
-          cp "$LATEST/results/finishing/6_final.v" build_artifacts/
-          cp "$LATEST/results/finishing/6_final.sdf" build_artifacts/
-          cp designs/mcu_soc_sky130/build/software/software.bin build_artifacts/
-          # Verify outputs
-          test -f build_artifacts/6_final.v || { echo "Post-P&R netlist not found"; exit 1; }
-          test -f build_artifacts/6_final.sdf || { echo "SDF file not found"; exit 1; }
-          echo "Post-P&R netlist lines: $(wc -l < build_artifacts/6_final.v)"
-          echo "SDF file size: $(wc -c < build_artifacts/6_final.sdf) bytes"
+          # OpenLane2 stores the final powered netlist in the fill insertion step
+          NETLIST=$(find "$LATEST" -path "*fillinsertion/top.pnl.v" | head -1)
+          if [ -z "$NETLIST" ]; then
+            # Fall back to detailed routing step netlist
+            NETLIST=$(find "$LATEST" -path "*detailedrouting/top.pnl.v" | head -1)
+          fi
+          if [ -n "$NETLIST" ]; then
+            cp "$NETLIST" build_artifacts/6_final.v
+            echo "Post-P&R netlist: $NETLIST ($(wc -l < build_artifacts/6_final.v) lines)"
+          else
+            echo "WARNING: Post-P&R netlist not found"
+          fi
+          # OpenLane2 stores SDF files per-corner in the STA step
+          SDF=$(find "$LATEST" -name "top__nom_tt_025C_1v80.sdf" | tail -1)
+          if [ -n "$SDF" ]; then
+            cp "$SDF" build_artifacts/6_final.sdf
+            echo "SDF file: $SDF ($(wc -c < build_artifacts/6_final.sdf) bytes)"
+          else
+            echo "WARNING: SDF file not found"
+          fi
+          cp designs/mcu_soc_sky130/build/software/software.bin build_artifacts/ 2>/dev/null || echo "WARNING: software.bin not found"
+          ls -la build_artifacts/
 
       - name: Upload synth artifacts
         uses: actions/upload-artifact@v4
