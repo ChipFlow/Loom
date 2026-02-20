@@ -70,6 +70,8 @@ pub struct Session {
     offsets_timestamps: Arc<Vec<(usize, u64)>>,
     /// Timescale in femtoseconds.
     timescale_fs: u64,
+    /// Events queued to be sent after the current command response.
+    pending_events: Vec<serde_json::Value>,
 }
 
 impl Session {
@@ -98,6 +100,7 @@ impl Session {
             state_size: script.reg_io_state_size,
             offsets_timestamps,
             timescale_fs,
+            pending_events: Vec::new(),
         }
     }
 
@@ -163,6 +166,11 @@ impl Session {
                 Ok(cmd) => {
                     let response = self.handle_command(cmd);
                     self.conn.send_message(&response)?;
+                    // Send any queued async events after the response
+                    let events: Vec<_> = self.pending_events.drain(..).collect();
+                    for event in events {
+                        self.conn.send_message(&event)?;
+                    }
                 }
                 Err(e) => {
                     let err = response_error("invalid_command", &e);
@@ -246,30 +254,49 @@ impl Session {
             }
 
             Command::RunSimulation {
-                until_time,
-                until_diagnostics,
-                sample_item_values,
+                until_time: _,
+                until_diagnostics: _,
+                sample_item_values: _,
             } => {
-                let target_cycle = match until_time {
-                    Some(ref t) => SimControl::time_to_cycle(
-                        &TimePoint(t.clone()),
+                // In replay buffer mode (simulation already finished), we
+                // send the response and then immediately send a finished event.
+                // For future incremental simulation, this would dispatch to
+                // the simulation thread instead.
+                if self.sim_ctrl.status() == SimulationStatus::Finished {
+                    // Send the response first, then the event
+                    let resp = response_run_simulation();
+                    // Queue the finished event to be sent after the response
+                    let current_cycle = self.sim_ctrl.current_cycle();
+                    let time = SimControl::cycle_to_time(
+                        current_cycle,
                         &self.offsets_timestamps,
                         self.timescale_fs,
-                    ),
-                    None => self.offsets_timestamps.len() as u64,
-                };
-
-                self.sim_ctrl
-                    .request_run(target_cycle, sample_item_values, until_diagnostics);
-
-                // The response is sent immediately; the simulation runs asynchronously.
-                // We'll send events when it pauses/finishes.
-                response_run_simulation()
+                    );
+                    self.pending_events
+                        .push(event_simulation_finished(&time));
+                    resp
+                } else {
+                    let target_cycle = self.offsets_timestamps.len() as u64;
+                    self.sim_ctrl
+                        .request_run(target_cycle, true, Vec::new());
+                    response_run_simulation()
+                }
             }
 
             Command::PauseSimulation => {
+                // In replay mode, simulation is already finished — just report
+                // the final time.
+                if self.sim_ctrl.status() == SimulationStatus::Finished {
+                    let current_cycle = self.sim_ctrl.current_cycle();
+                    let time = SimControl::cycle_to_time(
+                        current_cycle,
+                        &self.offsets_timestamps,
+                        self.timescale_fs,
+                    );
+                    return response_pause_simulation(&time);
+                }
+
                 self.sim_ctrl.request_pause();
-                // Wait for the simulation thread to actually pause
                 self.sim_ctrl.wait_for_pause();
                 let current_cycle = self.sim_ctrl.current_cycle();
                 let time = SimControl::cycle_to_time(

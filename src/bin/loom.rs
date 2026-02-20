@@ -1192,28 +1192,61 @@ fn cmd_serve(args: ServeArgs) {
     );
 
     let offsets_timestamps = Arc::new(parsed.offsets_timestamps);
-    let states = Arc::new(RwLock::new(parsed.input_states));
-    let sim_ctrl = cxxrtl_server::sim_control::SimControl::new();
+    let input_states = parsed.input_states;
+    let num_cycles = offsets_timestamps.len();
 
-    let config = cxxrtl_server::ServerConfig {
-        bind_addr: args.bind.clone(),
-        timescale_fs,
-    };
+    // Run GPU simulation to populate state buffer with output values.
+    // Without this, only input values are in the buffer.
+    let timing_constraints = setup::build_timing_constraints(&design.script);
 
-    clilog::info!(
-        "Starting CXXRTL server on {} ({} input cycles loaded)",
-        args.bind,
-        offsets_timestamps.len()
-    );
+    clilog::info!("Running GPU simulation for {} cycles...", num_cycles);
 
-    cxxrtl_server::serve(
-        &config,
-        &design.netlistdb,
-        &design.aig,
-        &design.script,
-        sim_ctrl,
-        states,
-        offsets_timestamps,
-    )
-    .unwrap();
+    #[cfg(not(any(feature = "metal", feature = "cuda")))]
+    {
+        eprintln!(
+            "loom serve requires GPU support. Build with:\n\
+             \n  cargo build -r --features metal --bin loom   (macOS)\n\
+             \n  cargo build -r --features cuda --bin loom    (Linux/NVIDIA)\n"
+        );
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "metal")]
+    let gpu_states = sim_metal(&design, &input_states, &offsets_timestamps, &timing_constraints);
+
+    #[cfg(all(feature = "cuda", not(feature = "metal")))]
+    let gpu_states = sim_cuda(&design, &input_states, &offsets_timestamps, &timing_constraints);
+
+    // The simulation is complete. Now serve the pre-computed results
+    // via the CXXRTL protocol (replay buffer model).
+    #[cfg(any(feature = "metal", feature = "cuda"))]
+    {
+        let sim_ctrl = cxxrtl_server::sim_control::SimControl::new();
+        // Mark simulation as finished with all cycles completed
+        sim_ctrl.report_finished(num_cycles as u64);
+
+        let states = Arc::new(RwLock::new(gpu_states));
+
+        let config = cxxrtl_server::ServerConfig {
+            bind_addr: args.bind.clone(),
+            timescale_fs,
+        };
+
+        clilog::info!(
+            "Starting CXXRTL server on {} ({} cycles simulated, ready for queries)",
+            args.bind,
+            num_cycles
+        );
+
+        cxxrtl_server::serve(
+            &config,
+            &design.netlistdb,
+            &design.aig,
+            &design.script,
+            sim_ctrl,
+            states,
+            offsets_timestamps,
+        )
+        .unwrap();
+    }
 }
