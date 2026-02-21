@@ -9,11 +9,22 @@
 //!
 //! # Architecture
 //!
-//! The server runs two threads:
-//! - **Protocol thread**: handles TCP connection, parses commands, builds responses
-//! - **Simulation thread**: runs the GPU dispatch loop, controlled by run/pause commands
+//! Currently operates in **replay buffer mode**: the full GPU simulation runs
+//! to completion before the server starts, and clients query pre-computed results.
 //!
-//! Communication between threads uses atomic state in [`sim_control::SimControl`].
+//! The protocol thread handles the TCP connection, parses commands, and reads
+//! from the completed state buffer. The [`sim_control::SimControl`] infrastructure
+//! is in place for future incremental simulation.
+//!
+//! # TODO: Incremental simulation
+//!
+//! Replace the batch-then-serve model with on-demand GPU dispatch:
+//! - Run the simulation thread alongside the protocol thread
+//! - `run_simulation` dispatches GPU cycles up to the requested time
+//! - `pause_simulation` stops the GPU loop between cycles
+//! - The GPU dispatch loop (currently in `sim_metal`/`sim_cuda`) would
+//!   check `SimControl::should_stop()` after each cycle
+//! - This would eliminate the upfront wait for large simulations
 
 pub mod design;
 pub mod protocol;
