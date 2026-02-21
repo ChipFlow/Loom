@@ -1,8 +1,9 @@
 // Blackbox stub for CF_SRAM_1024x32 (ChipFoundry sky130 SRAM macro).
 // Used during Yosys synthesis so the cell is preserved as a blackbox.
-// Only functional pins - no power pins (GEM simulation doesn't need them).
+// Includes power pins so OpenLane2 PDN can connect them.
 module CF_SRAM_1024x32 (DO, ScanOutCC, AD, BEN, CLKin, DI, EN, R_WB,
-    ScanInCC, ScanInDL, ScanInDR, SM, TM, WLBI, WLOFF, vpwrac, vpwrpc);
+    ScanInCC, ScanInDL, ScanInDR, SM, TM, WLBI, WLOFF,
+    vgnd, vnb, vpb, vpwra, vpwrac, vpwrm, vpwrp, vpwrpc);
     output [31:0] DO;
     output ScanOutCC;
     input [31:0] DI;
@@ -20,4 +21,10 @@ module CF_SRAM_1024x32 (DO, ScanOutCC, AD, BEN, CLKin, DI, EN, R_WB,
     input ScanInDR;
     input vpwrac;
     input vpwrpc;
+    input vgnd;
+    input vnb;
+    input vpb;
+    input vpwra;
+    input vpwrm;
+    input vpwrp;
 endmodule
