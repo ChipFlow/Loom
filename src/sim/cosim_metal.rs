@@ -178,6 +178,16 @@ struct WbTraceChannel {
 /// Batch size for GPU-only simulation (no per-tick CPU interaction).
 const BATCH_SIZE: usize = 1024;
 
+/// Pre-allocated Metal buffers for each schedule position's fall/rise ops.
+struct ScheduleBuffers {
+    /// Per-schedule-tick: (fall_params, fall_ops, rise_params, rise_ops).
+    tick_buffers: Vec<(metal::Buffer, metal::Buffer, metal::Buffer, metal::Buffer)>,
+    /// Number of fall ops per schedule tick (for CPU verification).
+    fall_ops_lens: Vec<usize>,
+    /// Number of rise ops per schedule tick (for CPU verification).
+    rise_ops_lens: Vec<usize>,
+}
+
 // ── Metal Simulator ──────────────────────────────────────────────────────────
 
 struct MetalSimulator {
@@ -496,10 +506,8 @@ impl MetalSimulator {
         sram_data_buffer: &metal::Buffer,
         states_buffer: &metal::Buffer,
         event_buffer_metal: &metal::Buffer,
-        fall_prep_params_buffer: &metal::Buffer,
-        fall_ops_buffer: &metal::Buffer,
-        rise_prep_params_buffer: &metal::Buffer,
-        rise_ops_buffer: &metal::Buffer,
+        schedule_buffers: &ScheduleBuffers,
+        schedule_offset: usize,
         flash_state_buffer: &metal::Buffer,
         flash_din_params_buffer: &metal::Buffer,
         flash_model_params_buffer: &metal::Buffer,
@@ -513,10 +521,15 @@ impl MetalSimulator {
     ) -> u64 {
         let batch_done = self.event_counter.get() + 1;
         let cb = self.command_queue.new_command_buffer();
+        let schedule_len = schedule_buffers.tick_buffers.len();
 
-        for _tick_offset in 0..batch_size {
+        for tick_offset in 0..batch_size {
+            let sched_idx = (schedule_offset + tick_offset) % schedule_len;
+            let (ref fall_params, ref fall_ops, ref rise_params, ref rise_ops) =
+                schedule_buffers.tick_buffers[sched_idx];
+
             // ── Falling edge: state_prep + flash_din + simulate ──
-            self.encode_state_prep(cb, states_buffer, fall_prep_params_buffer, fall_ops_buffer);
+            self.encode_state_prep(cb, states_buffer, fall_params, fall_ops);
             self.encode_apply_flash_din(
                 cb,
                 states_buffer,
@@ -550,7 +563,7 @@ impl MetalSimulator {
             );
 
             // ── Rising edge: state_prep + flash_din + simulate ──
-            self.encode_state_prep(cb, states_buffer, rise_prep_params_buffer, rise_ops_buffer);
+            self.encode_state_prep(cb, states_buffer, rise_params, rise_ops);
             self.encode_apply_flash_din(
                 cb,
                 states_buffer,
@@ -614,10 +627,7 @@ impl MetalSimulator {
         sram_data_buffer: &metal::Buffer,
         states_buffer: &metal::Buffer,
         event_buffer_metal: &metal::Buffer,
-        fall_prep_params_buffer: &metal::Buffer,
-        fall_ops_buffer: &metal::Buffer,
-        rise_prep_params_buffer: &metal::Buffer,
-        rise_ops_buffer: &metal::Buffer,
+        schedule_buffers: &ScheduleBuffers,
         flash_state_buffer: &metal::Buffer,
         flash_din_params_buffer: &metal::Buffer,
         flash_model_params_buffer: &metal::Buffer,
@@ -629,6 +639,9 @@ impl MetalSimulator {
         wb_trace_params_buffer: &metal::Buffer,
         timing_constraints_buffer: Option<&metal::Buffer>,
     ) {
+        // Use schedule position 0 for profiling (all patterns have same kernel cost)
+        let (ref fall_prep_params_buffer, ref fall_ops_buffer, ref rise_prep_params_buffer, ref rise_ops_buffer) =
+            schedule_buffers.tick_buffers[0];
         #[inline]
         fn gpu_times(cb: &metal::CommandBufferRef) -> (f64, f64) {
             unsafe {
@@ -1016,18 +1029,54 @@ impl MetalSimulator {
 
 // ── GPIO ↔ State Buffer Mapping ──────────────────────────────────────────────
 
+/// Per-clock-domain flag bit positions in the packed state buffer.
+///
+/// Each clock domain (identified by its netlistdb pin ID) has its own set of
+/// posedge/negedge flag bits that gate DFF writeout for that domain.
+struct ClockDomainFlags {
+    /// Netlistdb pin ID for this clock (key from `clock_pin2aigpins`).
+    #[allow(dead_code)]
+    clock_pinid: usize,
+    /// Human-readable name from pin (e.g. "io$clk$i").
+    name: String,
+    /// State positions for this domain's posedge flags.
+    posedge_flag_bits: Vec<u32>,
+    /// State positions for this domain's negedge flags.
+    negedge_flag_bits: Vec<u32>,
+    /// State position of the clock input port itself (if it's a primary input).
+    clock_input_pos: Option<u32>,
+    /// GPIO index if this clock is driven from a GPIO.
+    clock_gpio: Option<usize>,
+}
+
 /// Maps GPIO pin indices to bit positions in the packed u32 state buffer.
 pub(crate) struct GpioMapping {
     /// gpio_in[idx] → (aigpin, state bit position)
     input_bits: HashMap<usize, u32>,
     /// gpio_out[idx] → state bit position in output_map
     output_bits: HashMap<usize, u32>,
-    /// Posedge clock flag bit positions (one per clock pin)
-    posedge_flag_bits: Vec<u32>,
-    /// Negedge clock flag bit positions
-    negedge_flag_bits: Vec<u32>,
+    /// Per-clock-domain flag bit positions (grouped by netlistdb pin ID).
+    clock_domains: Vec<ClockDomainFlags>,
     /// Named input port → state bit position (for non-GPIO ports like por_l, resetb_h)
     named_input_bits: HashMap<String, u32>,
+}
+
+impl GpioMapping {
+    /// All posedge flag bit positions across all clock domains.
+    fn all_posedge_flag_bits(&self) -> Vec<u32> {
+        self.clock_domains
+            .iter()
+            .flat_map(|d| d.posedge_flag_bits.iter().copied())
+            .collect()
+    }
+
+    /// All negedge flag bit positions across all clock domains.
+    fn all_negedge_flag_bits(&self) -> Vec<u32> {
+        self.clock_domains
+            .iter()
+            .flat_map(|d| d.negedge_flag_bits.iter().copied())
+            .collect()
+    }
 }
 
 /// Set a single bit in a packed u32 state buffer.
@@ -1062,9 +1111,10 @@ pub(crate) fn build_gpio_mapping(
 ) -> GpioMapping {
     let mut input_bits: HashMap<usize, u32> = HashMap::new();
     let mut output_bits: HashMap<usize, u32> = HashMap::new();
-    let mut posedge_flag_bits: Vec<u32> = Vec::new();
-    let mut negedge_flag_bits: Vec<u32> = Vec::new();
     let mut named_input_bits: HashMap<String, u32> = HashMap::new();
+
+    // Group clock flags by pinid → ClockDomainFlags
+    let mut clock_domain_map: HashMap<usize, (Vec<u32>, Vec<u32>)> = HashMap::new();
 
     // Build reverse lookup: port_name → gpio_index for port_mapping mode
     let input_name_to_gpio: HashMap<String, usize> = port_mapping
@@ -1112,16 +1162,20 @@ pub(crate) fn build_gpio_mapping(
             }
             DriverType::InputClockFlag(pinid, is_negedge) => {
                 if let Some(&pos) = script.input_map.get(&aigpin_idx) {
+                    let entry = clock_domain_map
+                        .entry(*pinid)
+                        .or_insert_with(|| (Vec::new(), Vec::new()));
                     if *is_negedge == 0 {
-                        posedge_flag_bits.push(pos);
+                        entry.0.push(pos);
                     } else {
-                        negedge_flag_bits.push(pos);
+                        entry.1.push(pos);
                     }
                     let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
                     clilog::debug!(
-                        "ClockFlag aigpin={} pin={} negedge={} pos={}",
+                        "ClockFlag aigpin={} pin={} (pinid={}) negedge={} pos={}",
                         aigpin_idx,
                         pin_name,
+                        pinid,
                         is_negedge,
                         pos
                     );
@@ -1187,12 +1241,61 @@ pub(crate) fn build_gpio_mapping(
         }
     }
 
+    // Build ClockDomainFlags from grouped clock flags
+    // Also resolve GPIO index for each clock domain by looking up the clock pin
+    // in the input_bits mapping.
+    let mut clock_domains: Vec<ClockDomainFlags> = Vec::new();
+    // Build reverse: pinid → (pin_name, gpio_idx, state_pos) from input_bits
+    let mut pinid_to_input_info: HashMap<usize, (String, Option<usize>, Option<u32>)> =
+        HashMap::new();
+    for (aigpin_idx, driv) in aig.drivers.iter().enumerate() {
+        if let DriverType::InputPort(pinid) = driv {
+            let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
+            let gpio_idx = input_name_to_gpio
+                .get(&pin_name)
+                .copied()
+                .or_else(|| parse_gpio_index(&pin_name, "gpio_in"));
+            let pos = script.input_map.get(&aigpin_idx).copied();
+            pinid_to_input_info.insert(*pinid, (pin_name, gpio_idx, pos));
+        }
+    }
+
+    for (pinid, (posedge_bits, negedge_bits)) in &clock_domain_map {
+        let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
+        // Try to find the GPIO index and state position for this clock pin
+        let (clock_gpio, clock_input_pos) =
+            if let Some((_, gpio_idx, pos)) = pinid_to_input_info.get(pinid) {
+                (*gpio_idx, *pos)
+            } else {
+                (None, None)
+            };
+        clock_domains.push(ClockDomainFlags {
+            clock_pinid: *pinid,
+            name: pin_name.clone(),
+            posedge_flag_bits: posedge_bits.clone(),
+            negedge_flag_bits: negedge_bits.clone(),
+            clock_input_pos,
+            clock_gpio,
+        });
+        clilog::info!(
+            "Clock domain '{}' (pinid={}): {} posedge flags, {} negedge flags, gpio={:?}",
+            pin_name,
+            pinid,
+            posedge_bits.len(),
+            negedge_bits.len(),
+            clock_gpio
+        );
+    }
+
+    let total_posedge: usize = clock_domains.iter().map(|d| d.posedge_flag_bits.len()).sum();
+    let total_negedge: usize = clock_domains.iter().map(|d| d.negedge_flag_bits.len()).sum();
     clilog::info!(
-        "GPIO mapping: {} inputs, {} outputs, {} posedge flags, {} negedge flags",
+        "GPIO mapping: {} inputs, {} outputs, {} clock domains ({} posedge flags, {} negedge flags)",
         input_bits.len(),
         output_bits.len(),
-        posedge_flag_bits.len(),
-        negedge_flag_bits.len()
+        clock_domains.len(),
+        total_posedge,
+        total_negedge
     );
 
     clilog::info!("Named input ports: {} mapped", named_input_bits.len());
@@ -1200,8 +1303,7 @@ pub(crate) fn build_gpio_mapping(
     GpioMapping {
         input_bits,
         output_bits,
-        posedge_flag_bits,
-        negedge_flag_bits,
+        clock_domains,
         named_input_bits,
     }
 }
@@ -1404,15 +1506,15 @@ fn build_falling_edge_ops(
         position: gpio_map.input_bits[&reset_gpio],
         value: reset_val as u32,
     });
-    // Negedge flag = 1
-    for &pos in &gpio_map.negedge_flag_bits {
+    // Negedge flag = 1 (all domains)
+    for pos in gpio_map.all_negedge_flag_bits() {
         ops.push(BitOp {
             position: pos,
             value: 1,
         });
     }
-    // Posedge flag = 0
-    for &pos in &gpio_map.posedge_flag_bits {
+    // Posedge flag = 0 (all domains)
+    for pos in gpio_map.all_posedge_flag_bits() {
         ops.push(BitOp {
             position: pos,
             value: 0,
@@ -1469,15 +1571,15 @@ fn build_rising_edge_ops(
         position: gpio_map.input_bits[&reset_gpio],
         value: reset_val as u32,
     });
-    // Posedge flag = 1
-    for &pos in &gpio_map.posedge_flag_bits {
+    // Posedge flag = 1 (all domains)
+    for pos in gpio_map.all_posedge_flag_bits() {
         ops.push(BitOp {
             position: pos,
             value: 1,
         });
     }
-    // Negedge flag = 0
-    for &pos in &gpio_map.negedge_flag_bits {
+    // Negedge flag = 0 (all domains)
+    for pos in gpio_map.all_negedge_flag_bits() {
         ops.push(BitOp {
             position: pos,
             value: 0,
@@ -1504,6 +1606,271 @@ fn build_rising_edge_ops(
         }
     }
     ops
+}
+
+// ── Multi-Clock Scheduler ────────────────────────────────────────────────────
+
+/// Per-tick edge activity for each clock domain.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TickEdges {
+    /// For each domain index: (has_falling_edge, has_rising_edge).
+    domain_edges: Vec<(bool, bool)>,
+}
+
+/// Schedules clock edges across multiple domains at GCD granularity.
+///
+/// For N clock domains with half-periods H1, H2, ..., the GCD tick is
+/// `gcd(H1, H2, ...)` and the schedule repeats every `lcm(H1, H2, ...) / gcd` ticks.
+/// Each tick in the schedule records which domains have falling/rising edges.
+struct MultiClockScheduler {
+    /// GCD of all half-periods in picoseconds.
+    #[allow(dead_code)]
+    gcd_ps: u64,
+    /// One entry per GCD tick in the LCM cycle.
+    schedule: Vec<TickEdges>,
+}
+
+/// Compute GCD of two numbers.
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Compute LCM of two numbers.
+fn lcm(a: u64, b: u64) -> u64 {
+    a / gcd(a, b) * b
+}
+
+/// A clock domain's timing parameters for scheduling.
+struct ClockDomainTiming {
+    /// Half-period in picoseconds (period_ps / 2).
+    half_period_ps: u64,
+    /// Phase offset in picoseconds.
+    phase_offset_ps: u64,
+    /// Index into GpioMapping::clock_domains.
+    domain_index: usize,
+}
+
+impl MultiClockScheduler {
+    /// Build a scheduler from clock domain timings.
+    ///
+    /// For a single clock with no phase offset, produces a schedule of length 1
+    /// where every tick has the same falling+rising pattern — identical to the
+    /// legacy single-clock behavior.
+    fn new(timings: &[ClockDomainTiming]) -> Self {
+        assert!(!timings.is_empty(), "At least one clock domain is required");
+
+        // Compute GCD of all half-periods
+        let mut gcd_ps = timings[0].half_period_ps;
+        for t in &timings[1..] {
+            gcd_ps = gcd(gcd_ps, t.half_period_ps);
+        }
+
+        // Compute LCM of all half-periods
+        let mut lcm_ps = timings[0].half_period_ps;
+        for t in &timings[1..] {
+            lcm_ps = lcm(lcm_ps, t.half_period_ps);
+        }
+
+        let schedule_len = (lcm_ps / gcd_ps) as usize;
+        assert!(
+            schedule_len <= 1_000_000,
+            "Multi-clock schedule too large ({} ticks). \
+             Clock periods may not be commensurable at this resolution.",
+            schedule_len
+        );
+
+        let num_domains = timings.len();
+        let mut schedule = Vec::with_capacity(schedule_len);
+
+        for tick in 0..schedule_len {
+            let tick_ps = tick as u64 * gcd_ps;
+            let mut domain_edges = vec![(false, false); num_domains];
+
+            for (i, timing) in timings.iter().enumerate() {
+                let hp = timing.half_period_ps;
+                let offset = timing.phase_offset_ps;
+                // Adjust tick_ps by phase offset
+                if tick_ps < offset {
+                    continue;
+                }
+                let adjusted = tick_ps - offset;
+                if adjusted % hp != 0 {
+                    continue;
+                }
+                let edge_count = adjusted / hp;
+                // Even edge_count = falling, odd = rising
+                if edge_count % 2 == 0 {
+                    domain_edges[i].0 = true; // falling edge
+                } else {
+                    domain_edges[i].1 = true; // rising edge
+                }
+            }
+
+            schedule.push(TickEdges { domain_edges });
+        }
+
+        clilog::info!(
+            "MultiClockScheduler: gcd={}ps, schedule_len={} ticks, {} domains",
+            gcd_ps,
+            schedule_len,
+            num_domains
+        );
+
+        Self { gcd_ps, schedule }
+    }
+
+    /// Build the falling-edge BitOps for a given schedule tick.
+    ///
+    /// Only toggles flags for domains that have a falling edge at this tick.
+    /// Also sets clock input port values and constants.
+    fn build_tick_fall_ops(
+        &self,
+        tick_idx: usize,
+        gpio_map: &GpioMapping,
+        reset_gpio: usize,
+        reset_val: u8,
+        constant_inputs: &HashMap<String, u8>,
+        constant_ports: &HashMap<String, u8>,
+    ) -> Vec<BitOp> {
+        let tick = &self.schedule[tick_idx % self.schedule.len()];
+        let mut ops = Vec::new();
+
+        // Reset
+        ops.push(BitOp {
+            position: gpio_map.input_bits[&reset_gpio],
+            value: reset_val as u32,
+        });
+
+        // Per-domain clock flags
+        for (i, domain) in gpio_map.clock_domains.iter().enumerate() {
+            let (has_fall, _has_rise) = tick.domain_edges[i];
+
+            // Set clock input port value: falling = 0
+            if has_fall {
+                if let Some(pos) = domain.clock_input_pos {
+                    ops.push(BitOp {
+                        position: pos,
+                        value: 0,
+                    });
+                }
+            }
+
+            // Set negedge flags = 1 for domains with falling edge, 0 otherwise
+            for &pos in &domain.negedge_flag_bits {
+                ops.push(BitOp {
+                    position: pos,
+                    value: if has_fall { 1 } else { 0 },
+                });
+            }
+            // Clear posedge flags for domains with falling edge
+            for &pos in &domain.posedge_flag_bits {
+                ops.push(BitOp {
+                    position: pos,
+                    value: 0,
+                });
+            }
+        }
+
+        // Constant inputs
+        for (gpio_str, val) in constant_inputs {
+            if let Ok(gpio_idx) = gpio_str.parse::<usize>() {
+                if let Some(&pos) = gpio_map.input_bits.get(&gpio_idx) {
+                    ops.push(BitOp {
+                        position: pos,
+                        value: *val as u32,
+                    });
+                }
+            }
+        }
+        // Named constant ports
+        for (port_name, val) in constant_ports {
+            if let Some(&pos) = gpio_map.named_input_bits.get(port_name) {
+                ops.push(BitOp {
+                    position: pos,
+                    value: *val as u32,
+                });
+            }
+        }
+
+        ops
+    }
+
+    /// Build the rising-edge BitOps for a given schedule tick.
+    fn build_tick_rise_ops(
+        &self,
+        tick_idx: usize,
+        gpio_map: &GpioMapping,
+        reset_gpio: usize,
+        reset_val: u8,
+        constant_inputs: &HashMap<String, u8>,
+        constant_ports: &HashMap<String, u8>,
+    ) -> Vec<BitOp> {
+        let tick = &self.schedule[tick_idx % self.schedule.len()];
+        let mut ops = Vec::new();
+
+        // Reset
+        ops.push(BitOp {
+            position: gpio_map.input_bits[&reset_gpio],
+            value: reset_val as u32,
+        });
+
+        // Per-domain clock flags
+        for (i, domain) in gpio_map.clock_domains.iter().enumerate() {
+            let (_has_fall, has_rise) = tick.domain_edges[i];
+
+            // Set clock input port value: rising = 1
+            if has_rise {
+                if let Some(pos) = domain.clock_input_pos {
+                    ops.push(BitOp {
+                        position: pos,
+                        value: 1,
+                    });
+                }
+            }
+
+            // Set posedge flags = 1 for domains with rising edge, 0 otherwise
+            for &pos in &domain.posedge_flag_bits {
+                ops.push(BitOp {
+                    position: pos,
+                    value: if has_rise { 1 } else { 0 },
+                });
+            }
+            // Clear negedge flags for domains with rising edge
+            for &pos in &domain.negedge_flag_bits {
+                ops.push(BitOp {
+                    position: pos,
+                    value: 0,
+                });
+            }
+        }
+
+        // Constant inputs
+        for (gpio_str, val) in constant_inputs {
+            if let Ok(gpio_idx) = gpio_str.parse::<usize>() {
+                if let Some(&pos) = gpio_map.input_bits.get(&gpio_idx) {
+                    ops.push(BitOp {
+                        position: pos,
+                        value: *val as u32,
+                    });
+                }
+            }
+        }
+        // Named constant ports
+        for (port_name, val) in constant_ports {
+            if let Some(&pos) = gpio_map.named_input_bits.get(port_name) {
+                ops.push(BitOp {
+                    position: pos,
+                    value: *val as u32,
+                });
+            }
+        }
+
+        ops
+    }
 }
 
 /// Create a Metal buffer containing a StatePrepParams struct.
@@ -2284,44 +2651,167 @@ pub fn run_cosim(
     let reset_val_active = if config.reset_active_high { 1u8 } else { 0u8 };
     let reset_val_inactive = if config.reset_active_high { 0u8 } else { 1u8 };
 
-    // Build initial falling/rising edge BitOp arrays (no flash_din — handled by GPU)
-    let fall_ops = build_falling_edge_ops(
-        &gpio_map,
-        clock_gpio,
-        reset_gpio,
-        reset_val_active,
-        &config.constant_inputs,
-        &config.constant_ports,
-    );
-    let rise_ops = build_rising_edge_ops(
-        &gpio_map,
-        clock_gpio,
-        reset_gpio,
-        reset_val_active,
-        &config.constant_inputs,
-        &config.constant_ports,
-    );
-    let fall_ops_len = fall_ops.len();
-    let rise_ops_len = rise_ops.len();
+    // ── Build multi-clock scheduler ────────────────────────────────────────
+    let effective_clocks = config.effective_clocks();
+    let clock_timings: Vec<ClockDomainTiming> = effective_clocks
+        .iter()
+        .enumerate()
+        .filter_map(|(cfg_idx, clk_cfg)| {
+            // Find the clock domain in gpio_map that matches this clock's GPIO
+            let domain_idx = gpio_map
+                .clock_domains
+                .iter()
+                .position(|d| d.clock_gpio == Some(clk_cfg.gpio));
+            if let Some(di) = domain_idx {
+                Some(ClockDomainTiming {
+                    half_period_ps: clk_cfg.period_ps / 2,
+                    phase_offset_ps: clk_cfg.phase_offset_ps,
+                    domain_index: di,
+                })
+            } else {
+                clilog::warn!(
+                    "Clock config[{}] gpio={} ({:?}): no matching clock domain found, skipping",
+                    cfg_idx,
+                    clk_cfg.gpio,
+                    clk_cfg.name
+                );
+                None
+            }
+        })
+        .collect();
 
-    let fall_ops_buffer = create_ops_buffer(&simulator.device, &fall_ops);
-    let rise_ops_buffer = create_ops_buffer(&simulator.device, &rise_ops);
+    // If no clock domains were matched, fall back to legacy single-clock behavior
+    // using all flag bits (same as before multi-clock support)
+    let use_legacy_single_clock = clock_timings.is_empty();
+    if use_legacy_single_clock {
+        clilog::info!(
+            "No clock domains matched from config; using legacy single-clock mode \
+             (all {} posedge + {} negedge flags toggle together)",
+            gpio_map.all_posedge_flag_bits().len(),
+            gpio_map.all_negedge_flag_bits().len()
+        );
+    } else {
+        for (i, clk_cfg) in effective_clocks.iter().enumerate() {
+            if let Some(timing) = clock_timings.iter().find(|t| {
+                gpio_map.clock_domains[t.domain_index].clock_gpio == Some(clk_cfg.gpio)
+            }) {
+                let domain = &gpio_map.clock_domains[timing.domain_index];
+                clilog::info!(
+                    "Clock '{}' (gpio {}, period {}ps, phase {}ps) → domain '{}' \
+                     ({} posedge flags, {} negedge flags)",
+                    clk_cfg.name.as_deref().unwrap_or("?"),
+                    clk_cfg.gpio,
+                    clk_cfg.period_ps,
+                    clk_cfg.phase_offset_ps,
+                    domain.name,
+                    domain.posedge_flag_bits.len(),
+                    domain.negedge_flag_bits.len()
+                );
+            }
+            let _ = i; // suppress unused warning
+        }
+    }
 
-    // Create StatePrepParams buffers
-    let fall_prep_params_buffer = create_prep_params_buffer(
-        &simulator.device,
-        state_size as u32,
-        fall_ops.len() as u32,
-        0,
-        0,
-    );
-    let rise_prep_params_buffer = create_prep_params_buffer(
-        &simulator.device,
-        state_size as u32,
-        rise_ops.len() as u32,
-        0,
-        0,
-    );
+    // Build per-schedule-tick BitOp buffers
+    let schedule_buffers = if use_legacy_single_clock {
+        // Legacy: single schedule entry, all flags toggle together
+        let fall_ops = build_falling_edge_ops(
+            &gpio_map,
+            clock_gpio,
+            reset_gpio,
+            reset_val_active,
+            &config.constant_inputs,
+            &config.constant_ports,
+        );
+        let rise_ops = build_rising_edge_ops(
+            &gpio_map,
+            clock_gpio,
+            reset_gpio,
+            reset_val_active,
+            &config.constant_inputs,
+            &config.constant_ports,
+        );
+        let fall_len = fall_ops.len();
+        let rise_len = rise_ops.len();
+        let fall_ops_buf = create_ops_buffer(&simulator.device, &fall_ops);
+        let rise_ops_buf = create_ops_buffer(&simulator.device, &rise_ops);
+        let fall_params = create_prep_params_buffer(
+            &simulator.device,
+            state_size as u32,
+            fall_ops.len() as u32,
+            0,
+            0,
+        );
+        let rise_params = create_prep_params_buffer(
+            &simulator.device,
+            state_size as u32,
+            rise_ops.len() as u32,
+            0,
+            0,
+        );
+        ScheduleBuffers {
+            tick_buffers: vec![(fall_params, fall_ops_buf, rise_params, rise_ops_buf)],
+            fall_ops_lens: vec![fall_len],
+            rise_ops_lens: vec![rise_len],
+        }
+    } else {
+        let scheduler = MultiClockScheduler::new(&clock_timings);
+        let mut tick_buffers = Vec::with_capacity(scheduler.schedule.len());
+        let mut fall_ops_lens = Vec::with_capacity(scheduler.schedule.len());
+        let mut rise_ops_lens = Vec::with_capacity(scheduler.schedule.len());
+
+        for tick_idx in 0..scheduler.schedule.len() {
+            let fall_ops = scheduler.build_tick_fall_ops(
+                tick_idx,
+                &gpio_map,
+                reset_gpio,
+                reset_val_active,
+                &config.constant_inputs,
+                &config.constant_ports,
+            );
+            let rise_ops = scheduler.build_tick_rise_ops(
+                tick_idx,
+                &gpio_map,
+                reset_gpio,
+                reset_val_active,
+                &config.constant_inputs,
+                &config.constant_ports,
+            );
+            let fall_len = fall_ops.len();
+            let rise_len = rise_ops.len();
+            let fall_ops_buf = create_ops_buffer(&simulator.device, &fall_ops);
+            let rise_ops_buf = create_ops_buffer(&simulator.device, &rise_ops);
+            let fall_params = create_prep_params_buffer(
+                &simulator.device,
+                state_size as u32,
+                fall_ops.len() as u32,
+                0,
+                0,
+            );
+            let rise_params = create_prep_params_buffer(
+                &simulator.device,
+                state_size as u32,
+                rise_ops.len() as u32,
+                0,
+                0,
+            );
+            tick_buffers.push((fall_params, fall_ops_buf, rise_params, rise_ops_buf));
+            fall_ops_lens.push(fall_len);
+            rise_ops_lens.push(rise_len);
+        }
+
+        clilog::info!(
+            "Multi-clock schedule: {} ticks, {} Metal buffer sets",
+            scheduler.schedule.len(),
+            tick_buffers.len()
+        );
+
+        ScheduleBuffers {
+            tick_buffers,
+            fall_ops_lens,
+            rise_ops_lens,
+        }
+    };
 
     // ── GPU Flash IO buffers ────────────────────────────────────────────
 
@@ -2540,10 +3030,7 @@ pub fn run_cosim(
             &sram_data_buffer,
             &states_buffer,
             &event_buffer_metal,
-            &fall_prep_params_buffer,
-            &fall_ops_buffer,
-            &rise_prep_params_buffer,
-            &rise_ops_buffer,
+            &schedule_buffers,
             &flash_state_buffer,
             &flash_din_params_buffer,
             &flash_model_params_buffer,
@@ -2575,22 +3062,30 @@ pub fn run_cosim(
     let timer_sim = clilog::stimer!("simulation");
     let sim_start = std::time::Instant::now();
 
-    // Helper: update reset value in both ops buffers
+    // Helper: update reset value in all schedule ops buffers
     let update_reset_in_ops = |reset_val: u8| {
         let reset_pos = gpio_map.input_bits[&reset_gpio];
-        for (buf, len) in [
-            (&fall_ops_buffer, fall_ops_len),
-            (&rise_ops_buffer, rise_ops_len),
-        ] {
-            let ops: &mut [BitOp] =
-                unsafe { std::slice::from_raw_parts_mut(buf.contents() as *mut BitOp, len) };
-            for op in ops.iter_mut() {
-                if op.position == reset_pos {
-                    op.value = reset_val as u32;
+        for (sched_idx, (ref fall_params, ref fall_buf, ref rise_params, ref rise_buf)) in
+            schedule_buffers.tick_buffers.iter().enumerate()
+        {
+            let _ = (fall_params, rise_params); // params don't contain reset
+            for (buf, len) in [
+                (fall_buf, schedule_buffers.fall_ops_lens[sched_idx]),
+                (rise_buf, schedule_buffers.rise_ops_lens[sched_idx]),
+            ] {
+                let ops: &mut [BitOp] =
+                    unsafe { std::slice::from_raw_parts_mut(buf.contents() as *mut BitOp, len) };
+                for op in ops.iter_mut() {
+                    if op.position == reset_pos {
+                        op.value = reset_val as u32;
+                    }
                 }
             }
         }
     };
+
+    // Track schedule position across batches
+    let mut schedule_offset: usize = 0;
 
     // Verify flash state hasn't been corrupted before main loop
     unsafe {
@@ -2745,10 +3240,8 @@ pub fn run_cosim(
             &sram_data_buffer,
             &states_buffer,
             &event_buffer_metal,
-            &fall_prep_params_buffer,
-            &fall_ops_buffer,
-            &rise_prep_params_buffer,
-            &rise_ops_buffer,
+            &schedule_buffers,
+            schedule_offset,
             &flash_state_buffer,
             &flash_din_params_buffer,
             &flash_model_params_buffer,
@@ -2760,6 +3253,7 @@ pub fn run_cosim(
             &wb_trace_params_buffer,
             timing_constraints_buffer.as_ref(),
         );
+        schedule_offset = (schedule_offset + batch) % schedule_buffers.tick_buffers.len();
         prof_batch_encode += t_encode.elapsed().as_nanos() as u64;
 
         // Wait for GPU batch to complete
@@ -2791,10 +3285,15 @@ pub fn run_cosim(
         // ── CPU verification: simulate same tick on CPU and compare ──
         if opts.check_with_cpu && tick < cpu_check_max_ticks && batch == 1 {
             // CPU state_prep(fall): copy output → input, apply fall_ops
-            // Read from the Metal buffer (updated by update_reset_in_ops each tick)
+            // Use schedule position 0 for CPU verification (single-clock backward compat)
+            let cpu_sched_idx = 0;
             cpu_states.copy_within(state_size..2 * state_size, 0);
+            let (_, ref cpu_fall_buf, _, _) = schedule_buffers.tick_buffers[cpu_sched_idx];
             let cpu_fall_ops: &[BitOp] = unsafe {
-                std::slice::from_raw_parts(fall_ops_buffer.contents() as *const BitOp, fall_ops_len)
+                std::slice::from_raw_parts(
+                    cpu_fall_buf.contents() as *const BitOp,
+                    schedule_buffers.fall_ops_lens[cpu_sched_idx],
+                )
             };
             for op in cpu_fall_ops {
                 let word_idx = op.position as usize >> 5;
@@ -2857,10 +3356,13 @@ pub fn run_cosim(
             }
 
             // CPU state_prep(rise): copy output → input, apply rise_ops
-            // Read from the Metal buffer (updated by update_reset_in_ops each tick)
             cpu_states.copy_within(state_size..2 * state_size, 0);
+            let (_, _, _, ref cpu_rise_buf) = schedule_buffers.tick_buffers[cpu_sched_idx];
             let cpu_rise_ops: &[BitOp] = unsafe {
-                std::slice::from_raw_parts(rise_ops_buffer.contents() as *const BitOp, rise_ops_len)
+                std::slice::from_raw_parts(
+                    cpu_rise_buf.contents() as *const BitOp,
+                    schedule_buffers.rise_ops_lens[cpu_sched_idx],
+                )
             };
             for op in cpu_rise_ops {
                 let word_idx = op.position as usize >> 5;

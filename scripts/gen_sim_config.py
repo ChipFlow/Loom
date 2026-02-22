@@ -109,6 +109,43 @@ def _build_port_mapping(
     return input_map, output_map, constant_inputs
 
 
+def _find_additional_clocks(
+    pins_lock: dict, process: str, primary_clock_gpio: int,
+    primary_period_ps: int,
+) -> list[dict]:
+    """Detect additional clock sources from pins.lock (e.g. JTAG TCK).
+
+    Returns a list of clock config dicts for non-primary clocks.
+    """
+    clocks = []
+    ports = pins_lock["port_map"]["ports"]
+    soc = ports.get("soc", {})
+
+    for periph_name, periph in sorted(soc.items()):
+        if not isinstance(periph, dict):
+            continue
+        # Look for JTAG TCK
+        if periph_name.startswith("jtag"):
+            tck_info = periph.get("tck")
+            if tck_info and isinstance(tck_info, dict) and "pins" in tck_info:
+                tck_gpio = extract_pin_index(tck_info["pins"][0], process)
+                if tck_gpio != primary_clock_gpio:
+                    # JTAG TCK typically runs at a slower frequency
+                    # Default to 10MHz (100000ps) — can be overridden
+                    clocks.append({
+                        "gpio": tck_gpio,
+                        "period_ps": 100000,  # 10MHz default for JTAG
+                        "phase_offset_ps": 0,
+                        "name": f"{periph_name}_tck",
+                    })
+                    log.info(
+                        f"Additional clock: {periph_name}_tck "
+                        f"(gpio {tck_gpio}, period 100000ps)"
+                    )
+
+    return clocks
+
+
 def gen_sim_config(
     pins_lock: dict,
     *,
@@ -122,6 +159,7 @@ def gen_sim_config(
     output_events: str | None = None,
     events_reference: str | None = None,
     port_mapping: bool = False,
+    multi_clock: bool = False,
 ) -> dict:
     """Generate sim_config.json content from pins.lock data."""
     process = pins_lock.get("process", "unknown")
@@ -217,6 +255,25 @@ def gen_sim_config(
                  f"{len(output_map)} outputs, "
                  f"{len(const_inputs)} constants")
 
+    # Multi-clock domain support
+    if multi_clock:
+        additional_clocks = _find_additional_clocks(
+            pins_lock, process, clock_gpio, clock_period_ps
+        )
+        if additional_clocks:
+            # Build clocks array: primary clock + additional clocks
+            clocks = [
+                {
+                    "gpio": clock_gpio,
+                    "period_ps": clock_period_ps,
+                    "phase_offset_ps": 0,
+                    "name": "sys_clk",
+                },
+                *additional_clocks,
+            ]
+            config["clocks"] = clocks
+            log.info(f"Multi-clock: {len(clocks)} clock domains configured")
+
     log.info(f"Process: {process}")
     log.info(f"Clock: gpio {clock_gpio}")
     log.info(f"Reset: gpio {reset_gpio} (active_high={reset_active_high})")
@@ -254,6 +311,9 @@ def main() -> int:
     parser.add_argument("--port-mapping", action="store_true",
                         help="Generate port_mapping for named-port designs "
                         "(ChipFlow io$signal$dir convention)")
+    parser.add_argument("--multi-clock", action="store_true",
+                        help="Auto-detect and configure multiple clock domains "
+                        "(e.g. system clock + JTAG TCK)")
 
     args = parser.parse_args()
 
@@ -271,6 +331,7 @@ def main() -> int:
         output_events=args.output_events,
         events_reference=args.events_reference,
         port_mapping=args.port_mapping,
+        multi_clock=args.multi_clock,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

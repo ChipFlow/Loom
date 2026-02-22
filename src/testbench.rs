@@ -183,6 +183,25 @@ impl Default for PeripheralControl {
     }
 }
 
+// ── Clock domain configuration ───────────────────────────────────────────────
+
+/// Configuration for a single clock domain.
+///
+/// When multiple clocks are specified, the simulator schedules edges
+/// independently for each domain based on their period and phase offset.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClockConfig {
+    /// GPIO index driving this clock.
+    pub gpio: usize,
+    /// Clock period in picoseconds (e.g. 40000 for 25MHz).
+    pub period_ps: u64,
+    /// Phase offset in picoseconds from time zero (default: 0).
+    #[serde(default)]
+    pub phase_offset_ps: u64,
+    /// Human-readable name for this clock domain (optional).
+    pub name: Option<String>,
+}
+
 // ── Testbench configuration (loaded from JSON) ──────────────────────────────
 
 /// Testbench configuration loaded from JSON.
@@ -219,6 +238,31 @@ pub struct TestbenchConfig {
     /// to be driven to a fixed value every tick.
     #[serde(default)]
     pub constant_ports: HashMap<String, u8>,
+    /// Multi-clock domain configuration.
+    /// When set, overrides `clock_gpio` / `clock_period_ps` for scheduling.
+    /// Each entry defines an independent clock domain with its own period and phase.
+    #[serde(default)]
+    pub clocks: Option<Vec<ClockConfig>>,
+}
+
+impl TestbenchConfig {
+    /// Return the effective clock configurations.
+    ///
+    /// If `clocks` is set, returns it directly. Otherwise synthesizes a
+    /// single-clock entry from the legacy `clock_gpio` + `clock_period_ps` fields.
+    /// This ensures full backward compatibility with existing single-clock configs.
+    pub fn effective_clocks(&self) -> Vec<ClockConfig> {
+        if let Some(ref clocks) = self.clocks {
+            clocks.clone()
+        } else {
+            vec![ClockConfig {
+                gpio: self.clock_gpio,
+                period_ps: self.clock_period_ps.unwrap_or(40000),
+                phase_offset_ps: 0,
+                name: Some("sys_clk".to_string()),
+            }]
+        }
+    }
 }
 
 /// Configuration for post-layout timing simulation with SDF back-annotation.
