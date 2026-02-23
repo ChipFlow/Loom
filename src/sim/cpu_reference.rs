@@ -302,7 +302,7 @@ pub fn simulate_block_v1_xprop(
     output_xmask: &mut [u32],
     sram_data: &mut [u32],
     sram_xmask: &mut [u32],
-    debug_verbose: bool,
+    _debug_verbose: bool,
 ) {
     let mut script_pi = 0;
     loop {
@@ -315,7 +315,7 @@ pub fn simulate_block_v1_xprop(
         let num_global_read_rounds = script[script_pi + 6];
         let num_output_duplicates = script[script_pi + 7];
         let is_x_capable = script[script_pi + 8] != 0;
-        let xmask_state_offset = script[script_pi + 9] as usize;
+        let _xmask_state_offset = script[script_pi + 9] as usize;
         let mut writeout_hooks = vec![0; 256];
         for i in 0..128 {
             let t = script[script_pi + 128 + i];
