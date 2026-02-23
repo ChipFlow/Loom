@@ -2284,6 +2284,348 @@ impl std::fmt::Display for TimingReport {
     }
 }
 
+// === X-Propagation Static Analysis ===
+
+/// Statistics from X-propagation analysis.
+#[derive(Debug, Clone)]
+pub struct XPropStats {
+    /// Number of X sources (DFF Q outputs + SRAM read data ports).
+    pub num_x_sources: usize,
+    /// Number of X-capable AIG pins after forward propagation.
+    pub num_x_capable_pins: usize,
+    /// Total number of AIG pins.
+    pub total_pins: usize,
+    /// Number of fixpoint iterations needed.
+    pub fixpoint_iterations: usize,
+}
+
+impl AIG {
+    /// Identify DFF Q outputs and SRAM read data ports as X sources.
+    ///
+    /// Returns a boolean vector indexed by aigpin (0..=num_aigpins).
+    /// `x_sources[i] == true` means aigpin `i` is an X source at cycle 0.
+    pub fn compute_x_sources(&self) -> Vec<bool> {
+        let mut x_sources = vec![false; self.num_aigpins + 1];
+
+        // DFF Q outputs are X sources (unknown at power-on)
+        for dff in self.dffs.values() {
+            assert!(dff.q >= 1 && dff.q <= self.num_aigpins);
+            x_sources[dff.q] = true;
+        }
+
+        // SRAM read data ports are X sources (memory contents undefined)
+        for sram in self.srams.values() {
+            for &rd_pin in &sram.port_r_rd_data {
+                assert!(rd_pin >= 1 && rd_pin <= self.num_aigpins);
+                x_sources[rd_pin] = true;
+            }
+        }
+
+        x_sources
+    }
+
+    /// Compute the full set of X-capable AIG pins via forward cone propagation
+    /// and DFF fixpoint iteration.
+    ///
+    /// Returns `(x_capable, stats)` where `x_capable[i]` is true if aigpin `i`
+    /// can carry an X value during simulation.
+    ///
+    /// Algorithm:
+    /// 1. Mark all X sources (DFF Q, SRAM read data)
+    /// 2. Forward pass through AND gates (pins are in topological order)
+    /// 3. Fixpoint: if any DFF's D-input is X-capable but its Q is not,
+    ///    mark Q and re-run forward pass from newly-marked pins.
+    pub fn compute_x_capable_pins(&self) -> (Vec<bool>, XPropStats) {
+        let mut x_capable = self.compute_x_sources();
+        let num_x_sources = x_capable.iter().filter(|&&v| v).count();
+
+        let mut fixpoint_iterations = 0;
+
+        loop {
+            // Forward pass: propagate X through AND gates.
+            // AIG pins are guaranteed to be in topological order.
+            for aigpin in 1..=self.num_aigpins {
+                if x_capable[aigpin] {
+                    continue; // already marked
+                }
+                if let DriverType::AndGate(a_iv, b_iv) = self.drivers[aigpin] {
+                    let a = a_iv >> 1;
+                    let b = b_iv >> 1;
+                    if x_capable[a] || x_capable[b] {
+                        x_capable[aigpin] = true;
+                    }
+                }
+            }
+
+            // Check fixpoint: do any DFF D-inputs feed X back to an
+            // unmarked Q output?
+            let mut changed = false;
+            for dff in self.dffs.values() {
+                let d_pin = dff.d_iv >> 1;
+                if x_capable[d_pin] && !x_capable[dff.q] {
+                    x_capable[dff.q] = true;
+                    changed = true;
+                }
+            }
+
+            fixpoint_iterations += 1;
+
+            if !changed {
+                break;
+            }
+        }
+
+        let num_x_capable_pins = x_capable.iter().filter(|&&v| v).count();
+        let stats = XPropStats {
+            num_x_sources,
+            num_x_capable_pins,
+            total_pins: self.num_aigpins,
+            fixpoint_iterations,
+        };
+
+        (x_capable, stats)
+    }
+}
+
+#[cfg(test)]
+mod xprop_tests {
+    use super::*;
+
+    /// Create an AIG with proper Tie0 initialization (matching from_netlistdb_impl).
+    fn new_test_aig() -> AIG {
+        AIG {
+            drivers: vec![DriverType::Tie0],
+            aigpin_cell_origins: vec![Vec::new()],
+            ..Default::default()
+        }
+    }
+
+    /// Build a minimal AIG with no DFFs or SRAMs (pure combinational).
+    fn build_comb_only_aig() -> AIG {
+        let mut aig = new_test_aig();
+        // pin 1 = InputPort
+        aig.add_aigpin(DriverType::InputPort(0));
+        // pin 2 = InputPort
+        aig.add_aigpin(DriverType::InputPort(1));
+        // pin 3 = AND(pin1, pin2) — no inversion: a_iv=2, b_iv=4
+        aig.add_aigpin(DriverType::AndGate(1 << 1, 2 << 1));
+        aig
+    }
+
+    #[test]
+    fn test_x_capable_no_dffs() {
+        let aig = build_comb_only_aig();
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+        // No DFFs, no SRAMs → no X sources, no X-capable pins
+        assert_eq!(stats.num_x_sources, 0);
+        assert_eq!(stats.num_x_capable_pins, 0);
+        assert_eq!(stats.fixpoint_iterations, 1);
+        for v in &x_capable {
+            assert!(!v);
+        }
+    }
+
+    #[test]
+    fn test_x_capable_dff_forward_cone() {
+        // Build AIG: InputPort(1), DFF Q(2), AND(1,2)=3, AND(3,1)=4
+        let mut aig = new_test_aig();
+        aig.add_aigpin(DriverType::InputPort(0)); // pin 1
+        aig.add_aigpin(DriverType::DFF(0)); // pin 2
+        aig.add_aigpin(DriverType::AndGate(1 << 1, 2 << 1)); // pin 3 = AND(1,2)
+        aig.add_aigpin(DriverType::AndGate(3 << 1, 1 << 1)); // pin 4 = AND(3,1)
+
+        // Register the DFF: D input is pin 3, Q output is pin 2
+        aig.dffs.insert(
+            0,
+            DFF {
+                d_iv: 3 << 1, // pin 3, no inversion
+                en_iv: 0,     // always enabled
+                q: 2,
+            },
+        );
+
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+
+        assert_eq!(stats.num_x_sources, 1); // Just the DFF Q
+        // Pin 2 (DFF Q) is X source, pin 3 (AND(1,2)) is X-capable,
+        // pin 4 (AND(3,1)) is X-capable
+        assert!(!x_capable[0]); // Tie0
+        assert!(!x_capable[1]); // InputPort — not X
+        assert!(x_capable[2]); // DFF Q — X source
+        assert!(x_capable[3]); // AND(1,2) — b is X
+        assert!(x_capable[4]); // AND(3,1) — a is X (via pin 3)
+        assert_eq!(stats.num_x_capable_pins, 3);
+    }
+
+    #[test]
+    fn test_x_capable_fixpoint() {
+        // DFF feedback loop: DFF Q(1) -> AND(1, input) -> DFF2 Q(3) -> AND(3, input) -> back to DFF D
+        // This tests that fixpoint converges when X propagates through DFF cycles.
+        let mut aig = new_test_aig();
+        aig.add_aigpin(DriverType::InputPort(0)); // pin 1
+        aig.add_aigpin(DriverType::DFF(0)); // pin 2 (DFF0 Q)
+        aig.add_aigpin(DriverType::AndGate(2 << 1, 1 << 1)); // pin 3 = AND(2,1)
+        aig.add_aigpin(DriverType::DFF(1)); // pin 4 (DFF1 Q)
+        aig.add_aigpin(DriverType::AndGate(4 << 1, 1 << 1)); // pin 5 = AND(4,1)
+
+        // DFF0: D=pin5, Q=pin2
+        aig.dffs.insert(
+            0,
+            DFF {
+                d_iv: 5 << 1,
+                en_iv: 0,
+                q: 2,
+            },
+        );
+        // DFF1: D=pin3, Q=pin4
+        aig.dffs.insert(
+            1,
+            DFF {
+                d_iv: 3 << 1,
+                en_iv: 0,
+                q: 4,
+            },
+        );
+
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+
+        // Both DFFs are initially X sources, their forward cones too
+        assert!(x_capable[2]); // DFF0 Q
+        assert!(x_capable[3]); // AND(2,1)
+        assert!(x_capable[4]); // DFF1 Q
+        assert!(x_capable[5]); // AND(4,1)
+        assert!(!x_capable[1]); // InputPort
+        assert_eq!(stats.num_x_sources, 2);
+        // Should converge in 1 iteration since both DFFs are already X sources
+        assert_eq!(stats.fixpoint_iterations, 1);
+    }
+
+    #[test]
+    fn test_x_capable_fixpoint_indirect() {
+        // Test case where fixpoint needs >1 iteration:
+        // InputPort(1), AND(1,1)=2, DFF0 Q=3 (D=2), AND(3,1)=4, DFF1 Q=5 (D=4)
+        // DFF1 is initially NOT an X source if we only mark DFF0.
+        // But wait — ALL DFFs are X sources by definition. So fixpoint always
+        // converges in 1 iteration for the current algorithm.
+        //
+        // The fixpoint >1 case would only arise if we selectively excluded
+        // some DFFs from X sources (e.g., reset-aware analysis). For now,
+        // verify that the algorithm handles the general case correctly.
+        let mut aig = new_test_aig();
+        aig.add_aigpin(DriverType::InputPort(0)); // pin 1
+        aig.add_aigpin(DriverType::DFF(0)); // pin 2 (initially X)
+        aig.add_aigpin(DriverType::AndGate(2 << 1, 1 << 1)); // pin 3 = AND(2,1)
+        aig.add_aigpin(DriverType::DFF(1)); // pin 4 (initially X)
+
+        aig.dffs.insert(
+            0,
+            DFF {
+                d_iv: 1 << 1,
+                en_iv: 0,
+                q: 2,
+            },
+        );
+        aig.dffs.insert(
+            1,
+            DFF {
+                d_iv: 3 << 1,
+                en_iv: 0,
+                q: 4,
+            },
+        );
+
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+        assert!(x_capable[2]); // DFF0 Q — X source
+        assert!(x_capable[3]); // AND(2,1) — X via DFF0
+        assert!(x_capable[4]); // DFF1 Q — X source
+        assert!(!x_capable[1]); // InputPort
+        assert_eq!(stats.fixpoint_iterations, 1);
+    }
+
+    #[test]
+    fn test_x_sources_sram() {
+        // Test that SRAM read data ports are marked as X sources
+        let mut aig = new_test_aig();
+        aig.add_aigpin(DriverType::InputPort(0)); // pin 1
+
+        // Create 32 SRAM read data pins
+        let mut rd_data = [0usize; 32];
+        for i in 0..32 {
+            let pin = aig.add_aigpin(DriverType::SRAM(0)); // pins 2..33
+            rd_data[i] = pin;
+        }
+
+        aig.srams.insert(
+            0,
+            RAMBlock {
+                port_r_addr_iv: [0; AIGPDK_SRAM_ADDR_WIDTH],
+                port_r_en_iv: 0,
+                port_r_rd_data: rd_data,
+                port_w_addr_iv: [0; AIGPDK_SRAM_ADDR_WIDTH],
+                port_w_wr_en_iv: [0; 32],
+                port_w_wr_data_iv: [0; 32],
+            },
+        );
+
+        let x_sources = aig.compute_x_sources();
+        assert!(!x_sources[0]); // Tie0
+        assert!(!x_sources[1]); // InputPort
+        for i in 0..32 {
+            assert!(x_sources[rd_data[i]], "SRAM rd_data[{i}] should be X source");
+        }
+
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+        assert_eq!(stats.num_x_sources, 32);
+        assert_eq!(stats.num_x_capable_pins, 32);
+        // Verify forward propagation through AND gate
+        // Add an AND gate that depends on SRAM read data
+        // (already tested via the basic structure above)
+        drop(x_capable);
+    }
+
+    #[test]
+    fn test_x_prop_with_inv_chain() {
+        // Integration test using the real inv_chain.v design
+        let verilog_path =
+            std::path::PathBuf::from("tests/timing_test/sky130_timing/inv_chain.v");
+        if !verilog_path.exists() {
+            eprintln!("Skipping test_x_prop_with_inv_chain: inv_chain.v not found");
+            return;
+        }
+        use crate::sky130::SKY130LeafPins;
+        let netlistdb = NetlistDB::from_sverilog_file(&verilog_path, None, &SKY130LeafPins)
+            .expect("cannot build netlist");
+        let aig = AIG::from_netlistdb(&netlistdb);
+
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+
+        // inv_chain has 2 DFFs, so at least 2 X sources
+        assert!(stats.num_x_sources >= 2, "Expected at least 2 X sources from DFFs, got {}", stats.num_x_sources);
+        // The forward cone should propagate X through the inverter chain
+        assert!(stats.num_x_capable_pins >= stats.num_x_sources,
+            "X-capable pins ({}) should be >= X sources ({})",
+            stats.num_x_capable_pins, stats.num_x_sources);
+        // Sanity: not everything should be X-capable (inputs are known)
+        assert!(stats.num_x_capable_pins < stats.total_pins,
+            "Not all pins should be X-capable");
+
+        println!(
+            "inv_chain X-prop: {}/{} pins ({:.1}%) X-capable, {} fixpoint iterations",
+            stats.num_x_capable_pins,
+            stats.total_pins,
+            100.0 * stats.num_x_capable_pins as f64 / stats.total_pins as f64,
+            stats.fixpoint_iterations
+        );
+
+        // Verify no input ports are X-capable
+        for (aigpin, driver) in aig.drivers.iter().enumerate() {
+            if matches!(driver, DriverType::InputPort(_) | DriverType::InputClockFlag(_, _)) {
+                assert!(!x_capable[aigpin], "Input port aigpin {} should not be X-capable", aigpin);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod sdf_integration_tests {
     use super::*;
