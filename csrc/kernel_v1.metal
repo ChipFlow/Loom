@@ -53,9 +53,12 @@ inline void simulate_block_v1(
     device const u32* input_state,
     device u32* output_state,
     device u32* sram_data,
+    device u32* sram_xmask,  // X-mask shadow for SRAM (null if xprop disabled)
     threadgroup u32* shared_metadata,
     threadgroup u32* shared_writeouts,
     threadgroup u32* shared_state,
+    threadgroup u32* shared_writeouts_x,  // X-mask sideband for writeouts
+    threadgroup u32* shared_state_x,      // X-mask sideband for state
     // Arrival times in raw picoseconds (ushort), max representable 65,535ps.
     // Gate delays are stored as u16 in the script padding slots.
     // No quantization needed — 512 bytes of threadgroup memory per block is negligible.
@@ -90,6 +93,8 @@ inline void simulate_block_v1(
         int sram_offset = shared_metadata[5];
         int num_global_read_rounds = shared_metadata[6];
         int num_output_duplicates = shared_metadata[7];
+        bool is_x_capable = (shared_metadata[8] != 0);
+        int xmask_state_offset = (int)shared_metadata[9];
 
         u32 writeout_hook_i = shared_metadata[128 + tid / 2];
         if (tid % 2 == 0) {
@@ -105,6 +110,7 @@ inline void simulate_block_v1(
         t4_5 = read_vec4(script + script_pi + 256 * 2 * num_global_read_rounds + 256 * 4 * 4, tid);
 
         u32 t_global_rd_state = 0;
+        u32 t_global_rd_state_x = 0;
         for (int gr_i = 0; gr_i < num_global_read_rounds; gr_i += 2) {
             u32 idx = t2_1.c1;
             u32 mask = t2_1.c2;
@@ -113,14 +119,24 @@ inline void simulate_block_v1(
 
             if (mask) {
                 device const u32* real_input_array;
-                if (idx >> 31) real_input_array = output_state - (1u << 31);
-                else real_input_array = input_state;
+                device const u32* real_xmask_array;
+                if (idx >> 31) {
+                    real_input_array = output_state - (1u << 31);
+                    real_xmask_array = output_state + xmask_state_offset - (1u << 31);
+                } else {
+                    real_input_array = input_state;
+                    real_xmask_array = input_state + xmask_state_offset;
+                }
                 u32 value = real_input_array[idx];
-                while (mask) {
+                u32 xmval = is_x_capable ? real_xmask_array[idx] : 0;
+                u32 m = mask;
+                while (m) {
                     t_global_rd_state <<= 1;
-                    u32 lowbit = mask & -mask;
+                    t_global_rd_state_x <<= 1;
+                    u32 lowbit = m & -m;
                     if (value & lowbit) t_global_rd_state |= 1;
-                    mask ^= lowbit;
+                    if (xmval & lowbit) t_global_rd_state_x |= 1;
+                    m ^= lowbit;
                 }
             }
 
@@ -132,32 +148,48 @@ inline void simulate_block_v1(
 
             if (mask) {
                 device const u32* real_input_array;
-                if (idx >> 31) real_input_array = output_state - (1u << 31);
-                else real_input_array = input_state;
+                device const u32* real_xmask_array;
+                if (idx >> 31) {
+                    real_input_array = output_state - (1u << 31);
+                    real_xmask_array = output_state + xmask_state_offset - (1u << 31);
+                } else {
+                    real_input_array = input_state;
+                    real_xmask_array = input_state + xmask_state_offset;
+                }
                 u32 value = real_input_array[idx];
-                while (mask) {
+                u32 xmval = is_x_capable ? real_xmask_array[idx] : 0;
+                u32 m = mask;
+                while (m) {
                     t_global_rd_state <<= 1;
-                    u32 lowbit = mask & -mask;
+                    t_global_rd_state_x <<= 1;
+                    u32 lowbit = m & -m;
                     if (value & lowbit) t_global_rd_state |= 1;
-                    mask ^= lowbit;
+                    if (xmval & lowbit) t_global_rd_state_x |= 1;
+                    m ^= lowbit;
                 }
             }
         }
         shared_state[tid] = t_global_rd_state;
+        shared_state_x[tid] = t_global_rd_state_x;
         // Initialize arrival times to 0 (inputs have zero arrival)
         shared_arrival[tid] = 0;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (int bs_i = 0; bs_i < num_stages; ++bs_i) {
-            u32 hier_input = 0, hier_flag_xora = 0, hier_flag_xorb = 0, hier_flag_orb = 0;
+            u32 hier_input = 0, hier_input_x = 0;
+            u32 hier_flag_xora = 0, hier_flag_xorb = 0, hier_flag_orb = 0;
 
-            // Macro-like inline expansion for shuffle input
+            // Macro-like inline expansion for shuffle input (value + X-mask)
             #define SHUF_INPUT_K(k_outer, k_inner, t_shuffle) { \
                 u32 k = k_outer * 4 + k_inner; \
                 u32 t_shuffle_1_idx = t_shuffle & ((1 << 16) - 1); \
                 u32 t_shuffle_2_idx = t_shuffle >> 16; \
                 hier_input |= (shared_state[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
                 hier_input |= (shared_state[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+                if (is_x_capable) { \
+                    hier_input_x |= (shared_state_x[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
+                    hier_input_x |= (shared_state_x[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+                } \
             }
 
             script_pi += 256 * 4 * 5;
@@ -190,6 +222,7 @@ inline void simulate_block_v1(
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
             shared_state[tid] = hier_input;
+            shared_state_x[tid] = hier_input_x;
             shared_arrival[tid] = 0;  // Reset arrival for shuffle inputs
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -197,8 +230,18 @@ inline void simulate_block_v1(
             if (tid >= 128) {
                 u32 hier_input_a = shared_state[tid - 128];
                 u32 hier_input_b = hier_input;
-                u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+                u32 a_eff = hier_input_a ^ hier_flag_xora;
+                u32 b_eff = (hier_input_b ^ hier_flag_xorb) | hier_flag_orb;
+                u32 ret = a_eff & b_eff;
                 shared_state[tid] = ret;
+
+                if (is_x_capable) {
+                    u32 a_x = shared_state_x[tid - 128];
+                    u32 b_x = hier_input_x;
+                    u32 b_eff_x = b_x & ~hier_flag_orb;
+                    u32 ret_x = (a_x | b_eff_x) & (a_eff | a_x) & (b_eff | b_eff_x);
+                    shared_state_x[tid] = ret_x;
+                }
 
                 // Arrival tracking: max(input_a, input_b) + gate_delay
                 // Pass-through (orb == 0xFFFFFFFF) means no gate, just wire
@@ -212,15 +255,27 @@ inline void simulate_block_v1(
 
             // hier[1..3]: shared memory reduction + arrival tracking
             u32 tmp_cur_hi = 0;
+            u32 tmp_cur_hi_x = 0;
             ushort tmp_cur_arr = 0;
             for (int hi = 1; hi <= 3; ++hi) {
                 int hier_width = 1 << (7 - hi);
                 if (tid >= (uint)hier_width && tid < (uint)(hier_width * 2)) {
                     u32 hier_input_a = shared_state[tid + hier_width];
                     u32 hier_input_b = shared_state[tid + hier_width * 2];
-                    u32 ret = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+                    u32 a_eff = hier_input_a ^ hier_flag_xora;
+                    u32 b_eff = (hier_input_b ^ hier_flag_xorb) | hier_flag_orb;
+                    u32 ret = a_eff & b_eff;
                     tmp_cur_hi = ret;
                     shared_state[tid] = ret;
+
+                    if (is_x_capable) {
+                        u32 a_x = shared_state_x[tid + hier_width];
+                        u32 b_x = shared_state_x[tid + hier_width * 2];
+                        u32 b_eff_x = b_x & ~hier_flag_orb;
+                        u32 ret_x = (a_x | b_eff_x) & (a_eff | a_x) & (b_eff | b_eff_x);
+                        tmp_cur_hi_x = ret_x;
+                        shared_state_x[tid] = ret_x;
+                    }
 
                     // Arrival tracking
                     ushort arr_a = (ushort)shared_arrival[tid + hier_width];
@@ -241,10 +296,18 @@ inline void simulate_block_v1(
                     int hier_width = 1 << (7 - hi);
                     u32 hier_input_a = simd_shuffle_down(tmp_cur_hi, hier_width);
                     u32 hier_input_b = simd_shuffle_down(tmp_cur_hi, hier_width * 2);
+                    u32 hier_a_x = is_x_capable ? simd_shuffle_down(tmp_cur_hi_x, hier_width) : 0;
+                    u32 hier_b_x = is_x_capable ? simd_shuffle_down(tmp_cur_hi_x, hier_width * 2) : 0;
                     u32 arr_a_u32 = simd_shuffle_down(tmp_cur_arr_u32, hier_width);
                     u32 arr_b_u32 = simd_shuffle_down(tmp_cur_arr_u32, hier_width * 2);
                     if (tid >= (uint)hier_width && tid < (uint)(hier_width * 2)) {
-                        tmp_cur_hi = (hier_input_a ^ hier_flag_xora) & ((hier_input_b ^ hier_flag_xorb) | hier_flag_orb);
+                        u32 a_eff = hier_input_a ^ hier_flag_xora;
+                        u32 b_eff = (hier_input_b ^ hier_flag_xorb) | hier_flag_orb;
+                        tmp_cur_hi = a_eff & b_eff;
+                        if (is_x_capable) {
+                            u32 b_eff_x = hier_b_x & ~hier_flag_orb;
+                            tmp_cur_hi_x = (hier_a_x | b_eff_x) & (a_eff | hier_a_x) & (b_eff | b_eff_x);
+                        }
                         // Arrival tracking
                         bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
                         ushort new_arr = is_pass ? (ushort)arr_a_u32 : (ushort)(max((ushort)arr_a_u32, (ushort)arr_b_u32) + (ushort)gate_delay);
@@ -252,19 +315,68 @@ inline void simulate_block_v1(
                     }
                 }
                 u32 v1 = simd_shuffle_down(tmp_cur_hi, 1);
+                u32 v1_x = is_x_capable ? simd_shuffle_down(tmp_cur_hi_x, 1) : 0;
                 // hier[8..12]: bit-level operations within single u32
                 // All 32 signals share one thread's arrival — arrival carries forward unchanged
                 if (tid == 0) {
+                    // Value lane
                     u32 r8 = ((v1 << 16) ^ hier_flag_xora) & ((v1 ^ hier_flag_xorb) | hier_flag_orb) & 0xffff0000;
                     u32 r9 = ((r8 >> 8) ^ hier_flag_xora) & (((r8 >> 16) ^ hier_flag_xorb) | hier_flag_orb) & 0xff00;
                     u32 r10 = ((r9 >> 4) ^ hier_flag_xora) & (((r9 >> 8) ^ hier_flag_xorb) | hier_flag_orb) & 0xf0;
                     u32 r11 = ((r10 >> 2) ^ hier_flag_xora) & (((r10 >> 4) ^ hier_flag_xorb) | hier_flag_orb) & 12;
                     u32 r12 = ((r11 >> 1) ^ hier_flag_xora) & (((r11 >> 2) ^ hier_flag_xorb) | hier_flag_orb) & 2;
                     tmp_cur_hi = r8 | r9 | r10 | r11 | r12;
-                    // Arrival from hier[7] thread 1 carries forward through bit-level ops
-                    // (conservative: same arrival for all 32 signals in this word)
+
+                    if (is_x_capable) {
+                        // X-mask lane: same structure but using X-prop AND formula
+                        #define XPROP_HIER_BIT(a_v, a_x, b_v, b_x, msk) { \
+                            u32 ae = a_v ^ hier_flag_xora; \
+                            u32 be = (b_v ^ hier_flag_xorb) | hier_flag_orb; \
+                            u32 bex = b_x & ~hier_flag_orb; \
+                            u32 rv = (ae & be) & msk; \
+                            u32 rx = ((a_x | bex) & (ae | a_x) & (be | bex)) & msk;
+                        u32 r8_x, r9_x, r10_x, r11_x, r12_x;
+                        {
+                            u32 ae = (v1 << 16) ^ hier_flag_xora;
+                            u32 be = (v1 ^ hier_flag_xorb) | hier_flag_orb;
+                            u32 bex = v1_x & ~hier_flag_orb;
+                            u32 ax = v1_x << 16;
+                            r8_x = ((ax | bex) & (ae | ax) & (be | bex)) & 0xffff0000u;
+                        }
+                        {
+                            u32 ae = (r8 >> 8) ^ hier_flag_xora;
+                            u32 be = ((r8 >> 16) ^ hier_flag_xorb) | hier_flag_orb;
+                            u32 ax = r8_x >> 8;
+                            u32 bex = (r8_x >> 16) & ~hier_flag_orb;
+                            r9_x = ((ax | bex) & (ae | ax) & (be | bex)) & 0xff00u;
+                        }
+                        {
+                            u32 ae = (r9 >> 4) ^ hier_flag_xora;
+                            u32 be = ((r9 >> 8) ^ hier_flag_xorb) | hier_flag_orb;
+                            u32 ax = r9_x >> 4;
+                            u32 bex = (r9_x >> 8) & ~hier_flag_orb;
+                            r10_x = ((ax | bex) & (ae | ax) & (be | bex)) & 0xf0u;
+                        }
+                        {
+                            u32 ae = (r10 >> 2) ^ hier_flag_xora;
+                            u32 be = ((r10 >> 4) ^ hier_flag_xorb) | hier_flag_orb;
+                            u32 ax = r10_x >> 2;
+                            u32 bex = (r10_x >> 4) & ~hier_flag_orb;
+                            r11_x = ((ax | bex) & (ae | ax) & (be | bex)) & 0xcu;
+                        }
+                        {
+                            u32 ae = (r11 >> 1) ^ hier_flag_xora;
+                            u32 be = ((r11 >> 2) ^ hier_flag_xorb) | hier_flag_orb;
+                            u32 ax = r11_x >> 1;
+                            u32 bex = (r11_x >> 2) & ~hier_flag_orb;
+                            r12_x = ((ax | bex) & (ae | ax) & (be | bex)) & 0x2u;
+                        }
+                        tmp_cur_hi_x = r8_x | r9_x | r10_x | r11_x | r12_x;
+                        #undef XPROP_HIER_BIT
+                    }
                 }
                 shared_state[tid] = tmp_cur_hi;
+                shared_state_x[tid] = tmp_cur_hi_x;
                 shared_arrival[tid] = (ushort)tmp_cur_arr_u32;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -272,6 +384,9 @@ inline void simulate_block_v1(
             // write out
             if ((writeout_hook_i >> 8) == (uint)bs_i) {
                 shared_writeouts[tid] = shared_state[writeout_hook_i & 255];
+                if (is_x_capable) {
+                    shared_writeouts_x[tid] = shared_state_x[writeout_hook_i & 255];
+                }
                 shared_writeout_arrival[tid] = shared_arrival[writeout_hook_i & 255];
             }
         }
@@ -279,6 +394,7 @@ inline void simulate_block_v1(
 
         // sram & duplicate permutation
         u32 sram_duplicate_t = 0;
+        u32 sram_duplicate_t_x = 0;
 
         #define SHUF_SRAM_DUPL_K(k_outer, k_inner, t_shuffle) { \
             u32 k = k_outer * 4 + k_inner; \
@@ -286,6 +402,10 @@ inline void simulate_block_v1(
             u32 t_shuffle_2_idx = t_shuffle >> 16; \
             sram_duplicate_t |= (shared_writeouts[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
             sram_duplicate_t |= (shared_writeouts[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+            if (is_x_capable) { \
+                sram_duplicate_t_x |= (shared_writeouts_x[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
+                sram_duplicate_t_x |= (shared_writeouts_x[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+            } \
         }
 
         script_pi += 256 * 4 * 5;
@@ -308,18 +428,26 @@ inline void simulate_block_v1(
         #undef SHUF_SRAM_DUPL_K
 
         sram_duplicate_t = (sram_duplicate_t & ~t4_5.c2) ^ t4_5.c1;
+        if (is_x_capable) {
+            sram_duplicate_t_x = sram_duplicate_t_x & ~t4_5.c2; // set0 clears X too
+        }
         t4_5 = read_vec4(script + script_pi + 256 * 4 * 4, tid);
 
         // sram read
         device u32* ram = nullptr;
-        u32 r = 0, w0 = 0;
+        device u32* ram_x = nullptr;
+        u32 r = 0, w0 = 0, r_x = 0, w0_x = 0;
         u32 port_w_addr_iv = 0, port_w_wr_en = 0, port_w_wr_data_iv = 0;
+        u32 port_w_wr_data_x = 0;
 
         if (tid < (uint)(num_srams * 4)) {
             u32 addrs = sram_duplicate_t;
             // SIMD shuffle for SRAM operations
             port_w_wr_en = simd_shuffle_down(sram_duplicate_t, 1);
             port_w_wr_data_iv = simd_shuffle_down(sram_duplicate_t, 2);
+            if (is_x_capable) {
+                port_w_wr_data_x = simd_shuffle_down(sram_duplicate_t_x, 2);
+            }
 
             if (tid % 4 == 0) {
                 u32 sram_i = tid / 4;
@@ -330,11 +458,17 @@ inline void simulate_block_v1(
                 ram = sram_data + sram_st;
                 r = ram[port_r_addr_iv];
                 w0 = ram[port_w_addr_iv];
+                if (is_x_capable && sram_xmask != nullptr) {
+                    ram_x = sram_xmask + sram_st;
+                    r_x = ram_x[port_r_addr_iv];
+                    w0_x = ram_x[port_w_addr_iv];
+                }
             }
         }
 
         // clock enable permutation
         u32 clken_perm = 0;
+        u32 clken_perm_x = 0;
 
         #define SHUF_CLKEN_K(k_outer, k_inner, t_shuffle) { \
             u32 k = k_outer * 4 + k_inner; \
@@ -342,6 +476,10 @@ inline void simulate_block_v1(
             u32 t_shuffle_2_idx = t_shuffle >> 16; \
             clken_perm |= (shared_writeouts[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
             clken_perm |= (shared_writeouts[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+            if (is_x_capable) { \
+                clken_perm_x |= (shared_writeouts_x[t_shuffle_1_idx >> 5] >> (t_shuffle_1_idx & 31) & 1) << (k * 2); \
+                clken_perm_x |= (shared_writeouts_x[t_shuffle_2_idx >> 5] >> (t_shuffle_2_idx & 31) & 1) << (k * 2 + 1); \
+            } \
         }
 
         script_pi += 256 * 4 * 5;
@@ -362,21 +500,44 @@ inline void simulate_block_v1(
                 u32 sram_i = tid / 4;
                 shared_writeouts[num_ios - num_srams + sram_i] = r;
                 ram[port_w_addr_iv] = (w0 & ~port_w_wr_en) | (port_w_wr_data_iv & port_w_wr_en);
+                if (is_x_capable) {
+                    shared_writeouts_x[num_ios - num_srams + sram_i] = r_x;
+                    if (ram_x != nullptr) {
+                        ram_x[port_w_addr_iv] = (w0_x & ~port_w_wr_en) | (port_w_wr_data_x & port_w_wr_en);
+                    }
+                }
             }
         } else if (tid < (uint)(num_srams * 4 + num_output_duplicates)) {
             shared_writeouts[num_ios - num_srams - num_output_duplicates + (tid - num_srams * 4)] = sram_duplicate_t;
+            if (is_x_capable) {
+                shared_writeouts_x[num_ios - num_srams - num_output_duplicates + (tid - num_srams * 4)] = sram_duplicate_t_x;
+            }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         u32 writeout_inv = shared_writeouts[tid];
+        u32 writeout_inv_x = is_x_capable ? shared_writeouts_x[tid] : 0;
 
         clken_perm = (clken_perm & ~t4_5.c2) ^ t4_5.c1;
+        if (is_x_capable) {
+            clken_perm_x = clken_perm_x & ~t4_5.c2; // set0 clears X
+        }
         writeout_inv ^= t4_5.c3;
+        // data_inv (t4_5.c3) doesn't affect X-mask (inversion preserves X)
 
         if (tid < (uint)num_ios) {
             u32 old_wo = input_state[io_offset + tid];
             u32 wo = (old_wo & ~clken_perm) | (writeout_inv & clken_perm);
             output_state[io_offset + tid] = wo;
+
+            if (is_x_capable) {
+                u32 old_x = input_state[xmask_state_offset + io_offset + tid];
+                // X-mask DFF gating: X clken → output is X
+                u32 wo_x = (old_x & ~clken_perm & ~clken_perm_x)
+                         | (writeout_inv_x & clken_perm & ~clken_perm_x)
+                         | clken_perm_x;
+                output_state[xmask_state_offset + io_offset + tid] = wo_x;
+            }
         }
 
         // DFF timing violation check (per writeout word)
@@ -419,6 +580,7 @@ kernel void simulate_v1_stage(
     constant SimParams& params [[buffer(4)]],
     device struct EventBuffer* event_buffer [[buffer(5)]],
     device const u32* timing_constraints [[buffer(6)]],
+    device u32* sram_xmask [[buffer(7)]],  // X-mask shadow for SRAM (null if xprop disabled)
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
@@ -426,9 +588,13 @@ kernel void simulate_v1_stage(
     threadgroup u32 shared_metadata[256];
     threadgroup u32 shared_writeouts[256];
     threadgroup u32 shared_state[256];
+    threadgroup u32 shared_writeouts_x[256];  // X-mask sideband for writeouts
+    threadgroup u32 shared_state_x[256];      // X-mask sideband for state
     threadgroup ushort shared_arrival[256];  // Per-thread-position arrival times (raw picoseconds)
     threadgroup ushort shared_writeout_arrival[256];  // Arrival times captured at writeout
     shared_writeout_arrival[tid] = 0;  // Must initialize — only writeout threads update this
+    shared_state_x[tid] = 0;
+    shared_writeouts_x[tid] = 0;
 
     usize stage_i = params.current_stage;
     usize cycle_i = params.current_cycle;
@@ -458,9 +624,12 @@ kernel void simulate_v1_stage(
         input_state,
         output_state,
         sram_data,
+        sram_xmask,
         shared_metadata,
         shared_writeouts,
         shared_state,
+        shared_writeouts_x,
+        shared_state_x,
         shared_arrival,
         shared_writeout_arrival,
         constraints_data,

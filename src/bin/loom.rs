@@ -547,11 +547,23 @@ fn sim_metal(
     let mut input_states_uvec: UVec<_> = input_states.to_vec().into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage: UVec<u32> = UVec::new_zeroed(script.sram_storage_size as usize, device);
+    // SRAM X-mask shadow: all 0xFFFFFFFF (unknown) initially when xprop enabled
+    let sram_xmask_size = if script.xprop_enabled {
+        script.sram_storage_size as usize
+    } else {
+        1 // Metal requires non-zero buffer; kernel checks is_x_capable before reading
+    };
+    let mut sram_xmask: UVec<u32> = if script.xprop_enabled {
+        UVec::new_filled(0xFFFF_FFFFu32, sram_xmask_size, device)
+    } else {
+        UVec::new_zeroed(sram_xmask_size, device)
+    };
 
     // Get Metal buffer pointers
     let blocks_start_ptr = script.blocks_start.as_uptr(device);
     let blocks_data_ptr = script.blocks_data.as_uptr(device);
     let sram_data_ptr = sram_storage.as_mut_uptr(device);
+    let sram_xmask_ptr = sram_xmask.as_mut_uptr(device);
     let states_ptr = input_states_uvec.as_mut_uptr(device);
 
     let blocks_start_buffer = mtl_device.new_buffer_with_bytes_no_copy(
@@ -575,6 +587,12 @@ fn sim_metal(
     let states_buffer = mtl_device.new_buffer_with_bytes_no_copy(
         states_ptr as *mut _ as *const _,
         (input_states_uvec.len() * std::mem::size_of::<u32>()) as u64,
+        MTLResourceOptions::StorageModeShared,
+        None,
+    );
+    let sram_xmask_buffer = mtl_device.new_buffer_with_bytes_no_copy(
+        sram_xmask_ptr as *mut _ as *const _,
+        (sram_xmask.len() * std::mem::size_of::<u32>()) as u64,
         MTLResourceOptions::StorageModeShared,
         None,
     );
@@ -648,6 +666,8 @@ fn sim_metal(
             encoder.set_buffer(5, Some(&event_buffer_metal), 0);
             // Buffer slot 6: timing constraints (THE GAP FIX)
             encoder.set_buffer(6, timing_buffer.as_ref().map(|v| &**v), 0);
+            // Buffer slot 7: SRAM X-mask shadow
+            encoder.set_buffer(7, Some(&sram_xmask_buffer), 0);
 
             let threads_per_threadgroup = MTLSize::new(256, 1, 1);
             let threadgroups = MTLSize::new(script.num_blocks as u64, 1, 1);
@@ -838,6 +858,18 @@ fn sim_cuda(
     let mut input_states_uvec: UVec<_> = input_states.to_vec().into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage = UVec::new_zeroed(script.sram_storage_size as usize, device);
+    // SRAM X-mask shadow: all 0xFFFFFFFF (unknown) initially when xprop enabled
+    let sram_xmask_size = if script.xprop_enabled {
+        script.sram_storage_size as usize
+    } else {
+        1 // Kernel checks is_x_capable before reading
+    };
+    let mut sram_xmask: UVec<u32> = UVec::new_zeroed(sram_xmask_size, device);
+    if script.xprop_enabled {
+        for v in sram_xmask.as_mut_slice() {
+            *v = 0xFFFF_FFFF;
+        }
+    }
 
     // Launch GPU simulation
     device.synchronize();
@@ -860,6 +892,7 @@ fn sim_cuda(
         &script.blocks_start,
         &script.blocks_data,
         &mut sram_storage,
+        &mut sram_xmask,
         num_cycles,
         script.reg_io_state_size as usize,
         &mut input_states_uvec,
