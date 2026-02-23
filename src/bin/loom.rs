@@ -482,14 +482,35 @@ fn cmd_sim(args: SimArgs) {
     // CPU sanity check
     #[cfg(any(feature = "metal", feature = "cuda"))]
     if args.check_with_cpu {
-        // TODO: When GPU xprop kernels are implemented (Stage 5), use
-        // sanity_check_cpu_xprop when design.script.xprop_enabled is true.
-        gem::sim::cpu_reference::sanity_check_cpu(
-            &design.script,
-            &input_states,
-            &gpu_states[..],
-            num_cycles,
-        );
+        if design.script.xprop_enabled {
+            let rio = design.script.reg_io_state_size as usize;
+            let (gpu_values, gpu_xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
+            // Build input X-masks: same initial template as expand_states_for_xprop
+            let num_input_snaps = input_states.len() / rio;
+            let mut xmask_template = vec![0xFFFF_FFFFu32; rio];
+            for &pos in design.script.input_map.values() {
+                xmask_template[(pos >> 5) as usize] &= !(1u32 << (pos & 31));
+            }
+            let mut input_xmasks = Vec::with_capacity(num_input_snaps * rio);
+            for _ in 0..num_input_snaps {
+                input_xmasks.extend_from_slice(&xmask_template);
+            }
+            gem::sim::cpu_reference::sanity_check_cpu_xprop(
+                &design.script,
+                &input_states,
+                &gpu_values,
+                &input_xmasks,
+                &gpu_xmasks,
+                num_cycles,
+            );
+        } else {
+            gem::sim::cpu_reference::sanity_check_cpu(
+                &design.script,
+                &input_states,
+                &gpu_states[..],
+                num_cycles,
+            );
+        }
     }
 
     // Post-simulation timing analysis
@@ -500,12 +521,54 @@ fn cmd_sim(args: SimArgs) {
 
     // Write output VCD
     #[cfg(any(feature = "metal", feature = "cuda"))]
-    vcd_io::write_output_vcd(
-        &mut writer,
-        &output_mapping,
-        &offsets_timestamps,
-        &gpu_states[..],
-    );
+    if design.script.xprop_enabled {
+        let rio = design.script.reg_io_state_size as usize;
+        let (values, xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
+        vcd_io::write_output_vcd_xprop(
+            &mut writer,
+            &output_mapping,
+            &offsets_timestamps,
+            &values,
+            &xmasks,
+        );
+
+        // X-propagation report: count X bits at primary outputs
+        let eff = design.script.effective_state_size() as usize;
+        let num_snapshots = gpu_states.len() / eff;
+        let mut first_x_free_cycle: Option<usize> = None;
+        for snap_i in 1..num_snapshots {
+            let xmask_base = snap_i * eff + rio;
+            let mut has_x = false;
+            for &(_aigpin, pos, _vid) in &output_mapping.out2vcd {
+                if pos == u32::MAX {
+                    continue;
+                }
+                let x = gpu_states[xmask_base + (pos >> 5) as usize] >> (pos & 31) & 1;
+                if x != 0 {
+                    has_x = true;
+                    break;
+                }
+            }
+            if !has_x && first_x_free_cycle.is_none() {
+                first_x_free_cycle = Some(snap_i - 1);
+            }
+        }
+        if let Some(cycle) = first_x_free_cycle {
+            clilog::info!("All primary outputs X-free at cycle {}", cycle);
+        } else if num_snapshots > 1 {
+            clilog::warn!(
+                "Primary outputs still have X values at final cycle {}",
+                num_snapshots - 2
+            );
+        }
+    } else {
+        vcd_io::write_output_vcd(
+            &mut writer,
+            &output_mapping,
+            &offsets_timestamps,
+            &gpu_states[..],
+        );
+    }
 }
 
 #[cfg(feature = "metal")]
@@ -544,7 +607,13 @@ fn sim_metal(
     let device = Device::Metal(0);
     let num_cycles = offsets_timestamps.len();
 
-    let mut input_states_uvec: UVec<_> = input_states.to_vec().into();
+    // When xprop is enabled, expand the value-only state buffer to include X-mask
+    let expanded_states = if script.xprop_enabled {
+        gem::sim::vcd_io::expand_states_for_xprop(input_states, script)
+    } else {
+        input_states.to_vec()
+    };
+    let mut input_states_uvec: UVec<_> = expanded_states.into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage: UVec<u32> = UVec::new_zeroed(script.sram_storage_size as usize, device);
     // SRAM X-mask shadow: all 0xFFFFFFFF (unknown) initially when xprop enabled
@@ -643,7 +712,7 @@ fn sim_metal(
                 num_blocks: script.num_blocks as u64,
                 num_major_stages: script.num_major_stages as u64,
                 num_cycles: num_cycles as u64,
-                state_size: script.reg_io_state_size as u64,
+                state_size: script.effective_state_size() as u64,
                 current_cycle: cycle_i as u64,
                 current_stage: stage_i as u64,
             };
@@ -683,7 +752,7 @@ fn sim_metal(
         if !script.assertion_positions.is_empty() {
             let states_slice =
                 unsafe { std::slice::from_raw_parts(states_ptr, input_states_uvec.len()) };
-            let cycle_output_offset = (cycle_i + 1) * script.reg_io_state_size as usize;
+            let cycle_output_offset = (cycle_i + 1) * script.effective_state_size() as usize;
 
             for &(cell_id, pos, message_id, control_type) in &script.assertion_positions {
                 let word_idx = (pos >> 5) as usize;
@@ -727,7 +796,7 @@ fn sim_metal(
         if !script.display_positions.is_empty() {
             let states_slice =
                 unsafe { std::slice::from_raw_parts(states_ptr, input_states_uvec.len()) };
-            let cycle_output_offset = (cycle_i + 1) * script.reg_io_state_size as usize;
+            let cycle_output_offset = (cycle_i + 1) * script.effective_state_size() as usize;
 
             for (cell_id, enable_pos, format, arg_positions, arg_widths) in
                 &script.display_positions
@@ -855,7 +924,13 @@ fn sim_cuda(
     let device = Device::CUDA(0);
     let num_cycles = offsets_timestamps.len();
 
-    let mut input_states_uvec: UVec<_> = input_states.to_vec().into();
+    // When xprop is enabled, expand the value-only state buffer to include X-mask
+    let expanded_states = if script.xprop_enabled {
+        gem::sim::vcd_io::expand_states_for_xprop(input_states, script)
+    } else {
+        input_states.to_vec()
+    };
+    let mut input_states_uvec: UVec<_> = expanded_states.into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage = UVec::new_zeroed(script.sram_storage_size as usize, device);
     // SRAM X-mask shadow: all 0xFFFFFFFF (unknown) initially when xprop enabled
@@ -864,12 +939,11 @@ fn sim_cuda(
     } else {
         1 // Kernel checks is_x_capable before reading
     };
-    let mut sram_xmask: UVec<u32> = UVec::new_zeroed(sram_xmask_size, device);
-    if script.xprop_enabled {
-        for v in sram_xmask.as_mut_slice() {
-            *v = 0xFFFF_FFFF;
-        }
-    }
+    let mut sram_xmask: UVec<u32> = if script.xprop_enabled {
+        UVec::new_filled(0xFFFF_FFFFu32, sram_xmask_size, device)
+    } else {
+        UVec::new_zeroed(sram_xmask_size, device)
+    };
 
     // Launch GPU simulation
     device.synchronize();
@@ -894,7 +968,7 @@ fn sim_cuda(
         &mut sram_storage,
         &mut sram_xmask,
         num_cycles,
-        script.reg_io_state_size as usize,
+        script.effective_state_size() as usize,
         &mut input_states_uvec,
         device,
     );
@@ -909,9 +983,10 @@ fn sim_cuda(
             script.display_positions.len()
         );
 
-        let states_slice = &input_states_uvec[(script.reg_io_state_size as usize)..];
+        let eff_size = script.effective_state_size() as usize;
+        let states_slice = &input_states_uvec[eff_size..];
         for cycle_i in 0..num_cycles {
-            let cycle_offset = cycle_i * script.reg_io_state_size as usize;
+            let cycle_offset = cycle_i * eff_size;
             for (_cell_id, enable_pos, format, arg_positions, arg_widths) in
                 &script.display_positions
             {
@@ -949,9 +1024,10 @@ fn sim_cuda(
         let assert_config = AssertConfig::default();
         let mut sim_stats = SimStats::default();
 
-        let states_slice = &input_states_uvec[(script.reg_io_state_size as usize)..];
+        let eff_size = script.effective_state_size() as usize;
+        let states_slice = &input_states_uvec[eff_size..];
         for cycle_i in 0..num_cycles {
-            let cycle_offset = cycle_i * script.reg_io_state_size as usize;
+            let cycle_offset = cycle_i * eff_size;
             for &(_cell_id, pos, _message_id, control_type) in &script.assertion_positions {
                 let word_idx = (pos >> 5) as usize;
                 let bit_idx = pos & 31;

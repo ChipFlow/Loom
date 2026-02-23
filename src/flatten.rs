@@ -1405,6 +1405,19 @@ fn build_flattened_script_v1(
 }
 
 impl FlattenedScriptV1 {
+    /// Effective per-cycle state size for GPU dispatch.
+    ///
+    /// When X-propagation is enabled, the state buffer is doubled:
+    /// `[values (reg_io_state_size) | xmask (reg_io_state_size)]`.
+    /// The kernel indexes into the X-mask section at offset `xprop_state_offset`.
+    pub fn effective_state_size(&self) -> u32 {
+        if self.xprop_enabled {
+            self.reg_io_state_size * 2
+        } else {
+            self.reg_io_state_size
+        }
+    }
+
     /// build a flattened script.
     ///
     /// `init_parts` give the partitions to flatten.

@@ -443,6 +443,61 @@ pub fn parse_input_vcd(
     }
 }
 
+// ── X-propagation state buffer helpers ───────────────────────────────────────
+
+/// Expand value-only state buffer into a doubled buffer with X-mask for GPU dispatch.
+///
+/// The input `value_states` has `(num_cycles + 1)` snapshots of `reg_io_state_size` words.
+/// The output has `(num_cycles + 1)` snapshots of `2 * reg_io_state_size` words:
+/// `[values | xmask]` where X-mask is 0xFFFFFFFF for DFF output positions (unknown)
+/// and 0 for primary input positions (known from VCD).
+pub fn expand_states_for_xprop(
+    value_states: &[u32],
+    script: &FlattenedScriptV1,
+) -> Vec<u32> {
+    let rio = script.reg_io_state_size as usize;
+    let num_snapshots = value_states.len() / rio;
+    assert_eq!(value_states.len(), num_snapshots * rio);
+
+    // Build X-mask template: 0xFFFFFFFF for DFF positions, 0 for inputs
+    let mut xmask_template = vec![0xFFFF_FFFFu32; rio];
+    for &pos in script.input_map.values() {
+        xmask_template[(pos >> 5) as usize] &= !(1u32 << (pos & 31));
+    }
+
+    let mut expanded = Vec::with_capacity(num_snapshots * rio * 2);
+    for snap_i in 0..num_snapshots {
+        // Value portion
+        expanded.extend_from_slice(&value_states[snap_i * rio..(snap_i + 1) * rio]);
+        // X-mask portion
+        expanded.extend_from_slice(&xmask_template);
+    }
+    expanded
+}
+
+/// Extract value-only states from a doubled GPU output buffer.
+///
+/// Input has `(num_cycles + 1)` snapshots of `2 * reg_io_state_size` words.
+/// Returns separate value and X-mask arrays, each with the same layout as the
+/// original value-only state buffer (indexed by `offsets_timestamps` offsets).
+pub fn split_xprop_states(
+    gpu_states: &[u32],
+    reg_io_state_size: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let eff = reg_io_state_size * 2;
+    let num_snapshots = gpu_states.len() / eff;
+    assert_eq!(gpu_states.len(), num_snapshots * eff);
+
+    let mut values = Vec::with_capacity(num_snapshots * reg_io_state_size);
+    let mut xmasks = Vec::with_capacity(num_snapshots * reg_io_state_size);
+    for snap_i in 0..num_snapshots {
+        let base = snap_i * eff;
+        values.extend_from_slice(&gpu_states[base..base + reg_io_state_size]);
+        xmasks.extend_from_slice(&gpu_states[base + reg_io_state_size..base + eff]);
+    }
+    (values, xmasks)
+}
+
 // ── VCD output writing ──────────────────────────────────────────────────────
 
 /// Information needed to write output VCD.
