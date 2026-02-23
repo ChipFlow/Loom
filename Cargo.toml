@@ -54,3 +54,7 @@ criterion = "0.5"
 [[bench]]
 name = "event_buffer"
 harness = false
+
+[[bench]]
+name = "xprop"
+harness = false
