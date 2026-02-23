@@ -211,6 +211,24 @@ pub struct FlattenedScriptV1 {
     /// Used by load_timing() / load_timing_from_sdf() to patch the script
     /// with per-thread-position max gate delays.
     pub delay_patch_map: Vec<(usize, Vec<usize>)>,
+
+    // === X-Propagation Fields ===
+
+    /// Whether X-propagation is enabled for this design.
+    /// When true, the state buffer is doubled (value + X-mask) and
+    /// X-capable partitions use dual-lane computation.
+    pub xprop_enabled: bool,
+
+    /// Per-partition X-capability flag.
+    /// Indexed by a flat partition index across all stages/blocks.
+    /// When `xprop_enabled && partition_x_capable[i]`, partition `i`
+    /// runs the X-aware kernel variant.
+    pub partition_x_capable: Vec<bool>,
+
+    /// Offset into the state buffer where X-mask words begin.
+    /// Equal to `reg_io_state_size` (the X-mask mirrors the value section).
+    /// Only meaningful when `xprop_enabled == true`.
+    pub xprop_state_offset: u32,
 }
 
 fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
@@ -994,6 +1012,7 @@ fn build_flattened_script_v1(
     parts_in_stages: &[&[Partition]],
     num_blocks: usize,
     input_layout: Vec<usize>,
+    x_capable_pins: Option<&[bool]>,
 ) -> FlattenedScriptV1 {
     // determine the output position.
     // this is the prerequisite for generating the read
@@ -1233,6 +1252,132 @@ fn build_flattened_script_v1(
         }
     }
 
+    // === X-Propagation: Partition Classification ===
+    let xprop_enabled = x_capable_pins.is_some();
+    let mut partition_x_capable = Vec::new();
+    let xprop_state_offset = sum_state_start;
+
+    if let Some(x_pins) = x_capable_pins {
+        // Classify each partition: X-capable if any of its AIG pins are X-capable.
+        // We iterate over all parts in stage/block order.
+        let mut part_x_flags: Vec<Vec<bool>> = Vec::new();
+
+        for (stage_parts, &staged) in parts_in_stages.iter().copied().zip(stageds.iter()) {
+            let mut stage_flags = vec![false; stage_parts.len()];
+            for (part_id, part) in stage_parts.iter().enumerate() {
+                // Check all hier levels in all stages of this partition
+                'outer: for bs in &part.stages {
+                    for hi in &bs.hier {
+                        for &pin in hi {
+                            if pin != usize::MAX && pin < x_pins.len() && x_pins[pin] {
+                                stage_flags[part_id] = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+            part_x_flags.push(stage_flags);
+        }
+
+        // Fixpoint: if a partition reads from an X-capable partition's output,
+        // it becomes X-capable too (inter-partition X propagation).
+        loop {
+            let mut changed = false;
+            for (stage_idx, stage_parts) in parts_in_stages.iter().copied().enumerate() {
+                for (part_id, part) in stage_parts.iter().enumerate() {
+                    if part_x_flags[stage_idx][part_id] {
+                        continue;
+                    }
+                    // Check if this partition reads from any X-capable state words
+                    // by looking at its global read indices.
+                    for bs in &part.stages {
+                        for &pin in &bs.hier[0] {
+                            if pin == usize::MAX {
+                                continue;
+                            }
+                            // Check if this input pin is in the output of an X-capable partition
+                            if let Some(&out_pos) = output_map.get(&pin) {
+                                let out_word = out_pos >> 5;
+                                // Find which partition owns this output word
+                                for (s_idx, s_parts) in parts_in_stages.iter().copied().enumerate() {
+                                    for (p_idx, _p) in s_parts.iter().enumerate() {
+                                        if part_x_flags[s_idx][p_idx] {
+                                            let fp = &stages_flattening_parts[s_idx][p_idx];
+                                            let fp_start = fp.state_start;
+                                            let fp_end = fp_start + fp.num_writeouts;
+                                            if out_word >= fp_start && out_word < fp_end {
+                                                part_x_flags[stage_idx][part_id] = true;
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        // Flatten into a single vec matching the stages_blocks_parts layout
+        for (stage_idx, blocks_parts) in stages_blocks_parts.iter().enumerate() {
+            for block_parts in blocks_parts {
+                for &part_id in block_parts {
+                    partition_x_capable.push(part_x_flags[stage_idx][part_id]);
+                }
+            }
+        }
+
+        // Encode X-prop metadata into partition scripts (words 8 and 9).
+        // Word 8: is_x_capable flag (0 or 1)
+        // Word 9: X-mask state offset
+        // Post-process: patch metadata words 8 and 9 in blocks_data
+        // Walk through the blocks_data to find each partition's metadata section.
+        for (stage_idx, blocks_parts) in stages_blocks_parts.iter().enumerate() {
+            for (block_id, block_parts) in blocks_parts.iter().enumerate() {
+                let block_start = blocks_start[stage_idx * num_blocks + block_id];
+                let mut offset = block_start;
+                for &part_id in block_parts {
+                    let is_x = part_x_flags[stage_idx][part_id];
+                    // Patch word 8: is_x_capable
+                    blocks_data[offset + 8] = if is_x { 1 } else { 0 };
+                    // Patch word 9: X-mask state offset
+                    blocks_data[offset + 9] = xprop_state_offset;
+                    // Advance past this partition's script to the next partition.
+                    // The partition script size is determined by reading num_stages:
+                    // if num_stages == 0, it's just 256 words (dummy).
+                    let num_stages = blocks_data[offset] as usize;
+                    if num_stages == 0 {
+                        offset += NUM_THREADS_V1;
+                        break; // dummy partition means no more in this block
+                    }
+                    let num_gr_rounds = blocks_data[offset + 6] as usize;
+                    let num_srams = blocks_data[offset + 4] as usize;
+                    let num_ios = blocks_data[offset + 2] as usize;
+                    let num_dup = blocks_data[offset + 7] as usize;
+                    // Script size = metadata(256) + global_read(2*rounds*256) +
+                    //   boomerang(num_stages * 5*256*4) + sram_dup(5*256*4) + clken(5*256*4)
+                    offset += NUM_THREADS_V1; // metadata
+                    offset += 2 * num_gr_rounds * NUM_THREADS_V1; // global read
+                    offset += num_stages * 5 * NUM_THREADS_V1 * 4; // boomerang stages
+                    offset += 5 * NUM_THREADS_V1 * 4; // sram+dup permutation
+                    offset += 5 * NUM_THREADS_V1 * 4; // clock enable permutation
+                }
+            }
+        }
+
+        let num_x = partition_x_capable.iter().filter(|&&v| v).count();
+        clilog::info!(
+            "X-propagation: {}/{} partitions X-capable",
+            num_x,
+            partition_x_capable.len()
+        );
+    }
+
     FlattenedScriptV1 {
         num_blocks,
         num_major_stages,
@@ -1252,6 +1397,10 @@ fn build_flattened_script_v1(
         clock_period_ps: 1000, // Default 1ns
         timing_enabled: false,
         delay_patch_map,
+        // X-propagation fields
+        xprop_enabled,
+        partition_x_capable,
+        xprop_state_offset,
     }
 }
 
@@ -1276,7 +1425,30 @@ impl FlattenedScriptV1 {
         num_blocks: usize,
         input_layout: Vec<usize>,
     ) -> FlattenedScriptV1 {
-        build_flattened_script_v1(aig, stageds, parts_in_stages, num_blocks, input_layout)
+        build_flattened_script_v1(aig, stageds, parts_in_stages, num_blocks, input_layout, None)
+    }
+
+    /// Build a flattened script with X-propagation support.
+    ///
+    /// `x_capable_pins` is the result of `AIG::compute_x_capable_pins()`.
+    /// When provided, partitions containing X-capable pins will be flagged
+    /// and their script metadata will include X-propagation offsets.
+    pub fn from_with_xprop(
+        aig: &AIG,
+        stageds: &[&StagedAIG],
+        parts_in_stages: &[&[Partition]],
+        num_blocks: usize,
+        input_layout: Vec<usize>,
+        x_capable_pins: &[bool],
+    ) -> FlattenedScriptV1 {
+        build_flattened_script_v1(
+            aig,
+            stageds,
+            parts_in_stages,
+            num_blocks,
+            input_layout,
+            Some(x_capable_pins),
+        )
     }
 
     /// Load timing data from a Liberty library and AIG.
@@ -1712,6 +1884,9 @@ mod sdf_delay_tests {
             clock_period_ps: 1000,
             timing_enabled: false,
             delay_patch_map: Vec::new(),
+            xprop_enabled: false,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: 0,
         }
     }
 
@@ -1962,6 +2137,9 @@ mod sdf_delay_tests {
             clock_period_ps: 10000,
             timing_enabled: true,
             delay_patch_map: patch_map,
+            xprop_enabled: false,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: 0,
         }
     }
 
@@ -2217,6 +2395,9 @@ mod constraint_buffer_tests {
             clock_period_ps,
             timing_enabled: true,
             delay_patch_map: Vec::new(),
+            xprop_enabled: false,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: 0,
         }
     }
 
