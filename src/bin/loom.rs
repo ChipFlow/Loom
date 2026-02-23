@@ -623,7 +623,9 @@ fn sim_metal(
         1 // Metal requires non-zero buffer; kernel checks is_x_capable before reading
     };
     let mut sram_xmask: UVec<u32> = if script.xprop_enabled {
-        UVec::new_filled(0xFFFF_FFFFu32, sram_xmask_size, device)
+        // Build on CPU then transfer to GPU — UVec::new_filled() doesn't support Metal/CUDA devices
+        let v: UVec<u32> = vec![0xFFFF_FFFFu32; sram_xmask_size].into();
+        v
     } else {
         UVec::new_zeroed(sram_xmask_size, device)
     };
@@ -940,7 +942,9 @@ fn sim_cuda(
         1 // Kernel checks is_x_capable before reading
     };
     let mut sram_xmask: UVec<u32> = if script.xprop_enabled {
-        UVec::new_filled(0xFFFF_FFFFu32, sram_xmask_size, device)
+        // Build on CPU then transfer to GPU — UVec::new_filled() doesn't support Metal/CUDA devices
+        let v: UVec<u32> = vec![0xFFFF_FFFFu32; sram_xmask_size].into();
+        v
     } else {
         UVec::new_zeroed(sram_xmask_size, device)
     };
@@ -1226,6 +1230,7 @@ fn cmd_cosim(args: CosimArgs) {
             sdf_corner,
             sdf_debug,
             clock_period_ps,
+            xprop: false, // cosim doesn't support xprop yet
         };
 
         let mut design = setup::load_design(&design_args);

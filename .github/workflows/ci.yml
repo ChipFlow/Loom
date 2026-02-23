@@ -122,6 +122,28 @@ jobs:
             echo "Note: Minor differences may be acceptable depending on signal timing"
           fi
 
+      - name: Run Metal simulation with X-propagation
+        run: |
+          cargo run --release --features metal --bin loom -- map \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test_xprop.gemparts \
+            --xprop
+          cargo run --release --features metal --bin loom -- sim \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test_xprop.gemparts \
+            tests/timing_test/dff_test.vcd \
+            tests/timing_test/ci_xprop_output.vcd \
+            1 --xprop 2>&1 | tee metal_xprop.txt
+
+      - name: Verify X-propagation output
+        run: |
+          # The dff_test has 1 DFF, so Q should start as X then become known
+          if grep -q 'x' tests/timing_test/ci_xprop_output.vcd; then
+            echo "X-propagation VCD contains X values as expected"
+          else
+            echo "WARNING: No X values in xprop output VCD"
+          fi
+
       - name: Upload VCD artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -129,7 +151,10 @@ jobs:
           name: vcd-outputs
           path: |
             tests/timing_test/ci_output.vcd
+            tests/timing_test/ci_xprop_output.vcd
             metal_timing.txt
+            metal_xprop.txt
+            perf_metrics/
 
   # Build and run CUDA simulation on NVIDIA GPU
   cuda:
@@ -188,6 +213,27 @@ jobs:
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Run CUDA simulation with X-propagation
+        run: |
+          cargo run --release --features cuda --bin loom -- map \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test_xprop.gemparts \
+            --xprop
+          cargo run --release --features cuda --bin loom -- sim \
+            tests/timing_test/dff_test_synth.gv \
+            tests/timing_test/dff_test_xprop.gemparts \
+            tests/timing_test/dff_test.vcd \
+            tests/timing_test/ci_cuda_xprop_output.vcd \
+            1 --xprop 2>&1 | tee cuda_xprop.txt
+
+      - name: Verify CUDA X-propagation output
+        run: |
+          if grep -q 'x' tests/timing_test/ci_cuda_xprop_output.vcd; then
+            echo "X-propagation VCD contains X values as expected"
+          else
+            echo "WARNING: No X values in CUDA xprop output VCD"
+          fi
+
       - name: Upload CUDA artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -195,7 +241,10 @@ jobs:
           name: cuda-outputs
           path: |
             tests/timing_test/ci_cuda_output.vcd
+            tests/timing_test/ci_cuda_xprop_output.vcd
             cuda_timing.txt
+            cuda_xprop.txt
+            perf_metrics/
 
   # Check formatting and clippy
   # Note: Currently set to warn-only due to existing issues in codebase
@@ -255,15 +304,17 @@ jobs:
             ${{ runner.os }}-cargo-bench-
 
       - name: Run benchmarks
-        run: cargo bench --bench event_buffer -- --noplot 2>&1 | tee benchmark_results.txt
+        run: |
+          cargo bench --bench event_buffer -- --noplot 2>&1 | tee benchmark_results.txt
+          cargo bench --bench xprop -- --noplot 2>&1 | tee -a benchmark_results.txt
 
       - name: Extract benchmark summary
         run: |
           {
             echo "## Benchmark Results"
             echo "\`\`\`"
-            grep -E "^(event_buffer|buffer_ops)" benchmark_results.txt | head -20 || true
-            grep -E "time:" benchmark_results.txt | head -20 || true
+            grep -E "^(event_buffer|buffer_ops|xprop)" benchmark_results.txt | head -30 || true
+            grep -E "time:" benchmark_results.txt | head -30 || true
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
 

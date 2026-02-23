@@ -655,3 +655,172 @@ fn write_output_vcd_impl(
         );
     }
 }
+
+#[cfg(test)]
+mod xprop_tests {
+    use super::*;
+    use indexmap::IndexMap;
+
+    /// Build a minimal FlattenedScriptV1 for xprop buffer tests.
+    ///
+    /// `input_positions`: bit positions in the state that are primary inputs
+    /// `output_positions`: bit positions in the state that are DFF outputs
+    /// `rio`: reg_io_state_size in u32 words
+    fn make_xprop_test_script(
+        rio: u32,
+        input_positions: &[u32],
+        output_positions: &[u32],
+    ) -> FlattenedScriptV1 {
+        let mut input_map = IndexMap::new();
+        for (i, &pos) in input_positions.iter().enumerate() {
+            // Use distinct AIG pin IDs (even numbers for non-inverted)
+            input_map.insert(i * 2 + 100, pos);
+        }
+        let mut output_map = IndexMap::new();
+        for (i, &pos) in output_positions.iter().enumerate() {
+            output_map.insert(i * 2 + 200, pos);
+        }
+        FlattenedScriptV1 {
+            num_blocks: 0,
+            num_major_stages: 0,
+            blocks_start: Vec::<usize>::new().into(),
+            blocks_data: Vec::<u32>::new().into(),
+            reg_io_state_size: rio,
+            sram_storage_size: 0,
+            input_layout: Vec::new(),
+            output_map,
+            input_map,
+            stages_blocks_parts: Vec::new(),
+            assertion_positions: Vec::new(),
+            display_positions: Vec::new(),
+            gate_delays: Vec::new(),
+            dff_constraints: Vec::new(),
+            clock_period_ps: 1000,
+            timing_enabled: false,
+            delay_patch_map: Vec::new(),
+            xprop_enabled: true,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: rio,
+        }
+    }
+
+    #[test]
+    fn test_expand_split_roundtrip() {
+        // 2-word state, 1 input at bit 0, 1 DFF output at bit 32
+        let rio = 2;
+        let script = make_xprop_test_script(rio, &[0], &[32]);
+
+        // 3 snapshots (2 cycles + trailing), value states only
+        let value_states: Vec<u32> = vec![
+            0x0000_0001, 0x0000_0000, // snap 0: input bit 0 = 1
+            0x0000_0001, 0x0000_0001, // snap 1: input bit 0 = 1, dff bit 0 = 1
+            0x0000_0000, 0x0000_0001, // snap 2: input bit 0 = 0, dff bit 0 = 1
+        ];
+
+        let expanded = expand_states_for_xprop(&value_states, &script);
+        assert_eq!(expanded.len(), 3 * rio as usize * 2);
+
+        // Split back
+        let (values, xmasks) = split_xprop_states(&expanded, rio as usize);
+        assert_eq!(values.len(), value_states.len());
+        assert_eq!(values, value_states, "values should match original");
+
+        // X-mask template: bit 0 = input → cleared (0), bit 32 = DFF → set (1)
+        // Word 0 of xmask: bit 0 cleared → 0xFFFF_FFFE
+        // Word 1 of xmask: all bits set → 0xFFFF_FFFF (DFF output at bit 0 of word 1)
+        for snap in 0..3 {
+            let xm_word0 = xmasks[snap * rio as usize];
+            let xm_word1 = xmasks[snap * rio as usize + 1];
+            assert_eq!(
+                xm_word0, 0xFFFF_FFFE,
+                "snap {}: word 0 should have bit 0 cleared (input)",
+                snap
+            );
+            assert_eq!(
+                xm_word1, 0xFFFF_FFFF,
+                "snap {}: word 1 should be all-X (DFF output)",
+                snap
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_preserves_cycle_structure() {
+        let rio = 3usize;
+        let num_snaps = 4usize;
+        let eff = rio * 2;
+
+        // Build a doubled buffer manually with known patterns
+        let mut gpu_states = Vec::with_capacity(num_snaps * eff);
+        for snap in 0..num_snaps {
+            // Value section: fill with snap index
+            for w in 0..rio {
+                gpu_states.push((snap * 100 + w) as u32);
+            }
+            // Xmask section: fill with snap index + 1000
+            for w in 0..rio {
+                gpu_states.push((snap * 100 + w + 1000) as u32);
+            }
+        }
+
+        let (values, xmasks) = split_xprop_states(&gpu_states, rio);
+        assert_eq!(values.len(), num_snaps * rio);
+        assert_eq!(xmasks.len(), num_snaps * rio);
+
+        for snap in 0..num_snaps {
+            for w in 0..rio {
+                assert_eq!(
+                    values[snap * rio + w],
+                    (snap * 100 + w) as u32,
+                    "snap {} word {} value mismatch",
+                    snap,
+                    w
+                );
+                assert_eq!(
+                    xmasks[snap * rio + w],
+                    (snap * 100 + w + 1000) as u32,
+                    "snap {} word {} xmask mismatch",
+                    snap,
+                    w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_expand_xmask_template() {
+        // 4-word state with various input/output positions
+        let rio = 4;
+        // Inputs at bits 0, 5, 64 (word 0 bits 0,5; word 2 bit 0)
+        // DFF outputs at bits 32, 33, 96 (word 1 bits 0,1; word 3 bit 0)
+        let script = make_xprop_test_script(rio, &[0, 5, 64], &[32, 33, 96]);
+
+        let value_states = vec![0u32; rio as usize]; // 1 snapshot, all zeros
+        let expanded = expand_states_for_xprop(&value_states, &script);
+
+        assert_eq!(expanded.len(), 2 * rio as usize);
+
+        // Check xmask template (second half of expanded)
+        let xmask = &expanded[rio as usize..];
+
+        // Word 0: bits 0 and 5 are inputs → should be cleared
+        let expected_word0 = 0xFFFF_FFFF & !(1u32 << 0) & !(1u32 << 5);
+        assert_eq!(
+            xmask[0], expected_word0,
+            "word 0: input bits 0,5 should be cleared"
+        );
+
+        // Word 1: no inputs → all 0xFFFFFFFF
+        assert_eq!(xmask[1], 0xFFFF_FFFF, "word 1: no inputs, all X");
+
+        // Word 2: bit 0 is input → cleared
+        let expected_word2 = 0xFFFF_FFFF & !(1u32 << 0);
+        assert_eq!(
+            xmask[2], expected_word2,
+            "word 2: input bit 0 should be cleared"
+        );
+
+        // Word 3: no inputs → all 0xFFFFFFFF
+        assert_eq!(xmask[3], 0xFFFF_FFFF, "word 3: no inputs, all X");
+    }
+}

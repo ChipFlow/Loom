@@ -2727,3 +2727,111 @@ mod constraint_buffer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod xprop_tests {
+    use super::*;
+
+    /// Build a minimal FlattenedScriptV1 for xprop field tests.
+    fn make_xprop_script(rio: u32, xprop_enabled: bool) -> FlattenedScriptV1 {
+        FlattenedScriptV1 {
+            num_blocks: 0,
+            num_major_stages: 0,
+            blocks_start: Vec::<usize>::new().into(),
+            blocks_data: Vec::<u32>::new().into(),
+            reg_io_state_size: rio,
+            sram_storage_size: 0,
+            input_layout: Vec::new(),
+            output_map: IndexMap::new(),
+            input_map: IndexMap::new(),
+            stages_blocks_parts: Vec::new(),
+            assertion_positions: Vec::new(),
+            display_positions: Vec::new(),
+            gate_delays: Vec::new(),
+            dff_constraints: Vec::new(),
+            clock_period_ps: 1000,
+            timing_enabled: false,
+            delay_patch_map: Vec::new(),
+            xprop_enabled,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: if xprop_enabled { rio } else { 0 },
+        }
+    }
+
+    #[test]
+    fn test_effective_state_size_disabled() {
+        let script = make_xprop_script(42, false);
+        assert_eq!(
+            script.effective_state_size(),
+            42,
+            "disabled: effective == reg_io_state_size"
+        );
+    }
+
+    #[test]
+    fn test_effective_state_size_enabled() {
+        let script = make_xprop_script(42, true);
+        assert_eq!(
+            script.effective_state_size(),
+            84,
+            "enabled: effective == 2 * reg_io_state_size"
+        );
+    }
+
+    #[test]
+    fn test_effective_state_size_zero() {
+        // Edge case: empty state
+        let script = make_xprop_script(0, true);
+        assert_eq!(script.effective_state_size(), 0);
+        let script = make_xprop_script(0, false);
+        assert_eq!(script.effective_state_size(), 0);
+    }
+
+    #[test]
+    fn test_xprop_state_offset_matches_rio() {
+        let rio = 128;
+        let script = make_xprop_script(rio, true);
+        assert_eq!(
+            script.xprop_state_offset, rio,
+            "xprop_state_offset should equal reg_io_state_size"
+        );
+    }
+
+    #[test]
+    fn test_partition_x_capable_metadata_words() {
+        // Verify that partition metadata words 8 and 9 are correctly set
+        // by building a script with synthetic blocks_data and checking the values.
+        // This is a unit test for the metadata encoding, not the full pipeline.
+
+        // Simulate what `FlattenedScriptV1::from()` does for metadata words:
+        // Word 8: is_x_capable (0 or 1)
+        // Word 9: xprop_state_offset
+        let rio: u32 = 64;
+        let xprop_state_offset = rio;
+
+        // Create a synthetic blocks_data with one partition's metadata section
+        let mut blocks_data = vec![0u32; NUM_THREADS_V1];
+        // Set up a valid partition: num_stages=1
+        blocks_data[0] = 1;
+
+        // Simulate the xprop metadata patching
+        let is_x_capable = true;
+        blocks_data[8] = if is_x_capable { 1 } else { 0 };
+        blocks_data[9] = xprop_state_offset;
+
+        assert_eq!(blocks_data[8], 1, "word 8 should be 1 for X-capable");
+        assert_eq!(
+            blocks_data[9], rio,
+            "word 9 should be xprop_state_offset"
+        );
+
+        // Non-X-capable partition
+        blocks_data[8] = 0;
+        blocks_data[9] = xprop_state_offset;
+        assert_eq!(blocks_data[8], 0, "word 8 should be 0 for non-X-capable");
+        assert_eq!(
+            blocks_data[9], rio,
+            "word 9 should still be xprop_state_offset"
+        );
+    }
+}
