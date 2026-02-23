@@ -75,6 +75,13 @@ struct MapArgs {
     /// Default is 0, meaning no degradation is allowed.
     #[clap(long, default_value_t = 0)]
     max_stage_degrad: usize,
+
+    /// Enable selective X-propagation analysis (informational only at map time).
+    ///
+    /// Reports how many pins and partitions would be X-capable. The actual
+    /// X-propagation is enabled at simulation time with `loom sim --xprop`.
+    #[clap(long)]
+    xprop: bool,
 }
 
 #[derive(Parser)]
@@ -136,6 +143,14 @@ struct SimArgs {
     /// Enable SDF debug output.
     #[clap(long)]
     sdf_debug: bool,
+
+    /// Enable selective X-propagation.
+    ///
+    /// Tracks unknown (X) values through DFF and SRAM outputs. Only partitions
+    /// containing X-capable signals pay the overhead. X values appear in the
+    /// output VCD as 'x'.
+    #[clap(long)]
+    xprop: bool,
 
     /// Enable timing analysis after simulation.
     #[clap(long)]
@@ -261,6 +276,22 @@ fn cmd_map(args: MapArgs) {
         aig.and_gate_cache.len()
     );
 
+    if args.xprop {
+        let (_x_capable, stats) = aig.compute_x_capable_pins();
+        println!(
+            "X-propagation analysis: {}/{} pins ({:.1}%) X-capable, {} X-sources, {} fixpoint iterations",
+            stats.num_x_capable_pins,
+            stats.total_pins,
+            if stats.total_pins > 0 {
+                stats.num_x_capable_pins as f64 / stats.total_pins as f64 * 100.0
+            } else {
+                0.0
+            },
+            stats.num_x_sources,
+            stats.fixpoint_iterations,
+        );
+    }
+
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
     let stages_effective_parts = stageds
@@ -361,6 +392,7 @@ fn cmd_sim(args: SimArgs) {
         sdf_corner: args.sdf_corner.clone(),
         sdf_debug: args.sdf_debug,
         clock_period_ps: None,
+        xprop: args.xprop,
     };
 
     #[allow(unused_mut)]
@@ -450,6 +482,8 @@ fn cmd_sim(args: SimArgs) {
     // CPU sanity check
     #[cfg(any(feature = "metal", feature = "cuda"))]
     if args.check_with_cpu {
+        // TODO: When GPU xprop kernels are implemented (Stage 5), use
+        // sanity_check_cpu_xprop when design.script.xprop_enabled is true.
         gem::sim::cpu_reference::sanity_check_cpu(
             &design.script,
             &input_states,

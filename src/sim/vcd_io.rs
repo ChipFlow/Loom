@@ -522,36 +522,81 @@ pub fn write_output_vcd(
     offsets_timestamps: &[(usize, u64)],
     states: &[u32],
 ) {
+    write_output_vcd_impl(writer, output_mapping, offsets_timestamps, states, None)
+}
+
+/// Write simulation results to output VCD with X-propagation support.
+///
+/// When `xmask_states` is provided, bits with X-mask=1 are emitted as `Value::X`
+/// in the output VCD.
+pub fn write_output_vcd_xprop(
+    writer: &mut vcd_ng::Writer<std::io::BufWriter<std::fs::File>>,
+    output_mapping: &OutputVCDMapping,
+    offsets_timestamps: &[(usize, u64)],
+    states: &[u32],
+    xmask_states: &[u32],
+) {
+    write_output_vcd_impl(writer, output_mapping, offsets_timestamps, states, Some(xmask_states))
+}
+
+fn write_output_vcd_impl(
+    writer: &mut vcd_ng::Writer<std::io::BufWriter<std::fs::File>>,
+    output_mapping: &OutputVCDMapping,
+    offsets_timestamps: &[(usize, u64)],
+    states: &[u32],
+    xmask_states: Option<&[u32]>,
+) {
     use vcd_ng::Value;
 
     clilog::info!("write out vcd");
+    // Use 3 to represent X in the last_val tracker (0=V0, 1=V1, 2=initial, 3=X)
     let mut last_val = vec![2u32; output_mapping.out2vcd.len()];
+    let mut x_output_count = 0u64;
     for &(offset, timestamp) in offsets_timestamps {
         if timestamp == u64::MAX {
             continue;
         }
         writer.timestamp(timestamp).unwrap();
         for (i, &(output_aigpin, output_pos, vid)) in output_mapping.out2vcd.iter().enumerate() {
-            let value_new = match output_pos {
+            let (value_new, is_x) = match output_pos {
                 u32::MAX => {
                     assert!(output_aigpin <= 1);
-                    output_aigpin as u32
+                    (output_aigpin as u32, false)
                 }
-                output_pos => states[offset + (output_pos >> 5) as usize] >> (output_pos & 31) & 1,
+                output_pos => {
+                    let v = states[offset + (output_pos >> 5) as usize] >> (output_pos & 31) & 1;
+                    let x = xmask_states
+                        .map(|xm| xm[offset + (output_pos >> 5) as usize] >> (output_pos & 31) & 1 != 0)
+                        .unwrap_or(false);
+                    (v, x)
+                }
             };
-            if value_new == last_val[i] {
+
+            // Encode: 0=V0, 1=V1, 3=X
+            let encoded = if is_x { 3 } else { value_new };
+            if encoded == last_val[i] {
                 continue;
             }
-            last_val[i] = value_new;
+            last_val[i] = encoded;
+            if is_x {
+                x_output_count += 1;
+            }
             writer
                 .change_scalar(
                     vid,
-                    match value_new {
-                        1 => Value::V1,
+                    match (is_x, value_new) {
+                        (true, _) => Value::X,
+                        (false, 1) => Value::V1,
                         _ => Value::V0,
                     },
                 )
                 .unwrap();
         }
+    }
+    if x_output_count > 0 {
+        clilog::warn!(
+            "VCD output contains {} X-value transitions across all signals",
+            x_output_count
+        );
     }
 }

@@ -28,6 +28,8 @@ pub struct DesignArgs {
     pub sdf_debug: bool,
     /// Clock period in picoseconds for SDF timing. Defaults to 25000 if not set.
     pub clock_period_ps: Option<u64>,
+    /// Enable selective X-propagation.
+    pub xprop: bool,
 }
 
 /// Result of loading a design: everything needed for simulation.
@@ -112,19 +114,49 @@ pub fn load_design(args: &DesignArgs) -> LoadedDesign {
         }
     }
 
-    let mut script = FlattenedScriptV1::from(
-        &aig,
-        &stageds
-            .iter()
-            .map(|(_, _, staged)| staged)
-            .collect::<Vec<_>>(),
-        &parts_in_stages
-            .iter()
-            .map(|ps| ps.as_slice())
-            .collect::<Vec<_>>(),
-        args.num_blocks,
-        input_layout,
-    );
+    let staged_refs: Vec<_> = stageds.iter().map(|(_, _, staged)| staged).collect();
+    let parts_refs: Vec<_> = parts_in_stages.iter().map(|ps| ps.as_slice()).collect();
+
+    let mut script = if args.xprop {
+        let (x_capable, stats) = aig.compute_x_capable_pins();
+        clilog::info!(
+            "X-propagation: {}/{} pins ({:.1}%) X-capable, {} fixpoint iterations",
+            stats.num_x_capable_pins,
+            stats.total_pins,
+            if stats.total_pins > 0 {
+                stats.num_x_capable_pins as f64 / stats.total_pins as f64 * 100.0
+            } else {
+                0.0
+            },
+            stats.fixpoint_iterations
+        );
+        FlattenedScriptV1::from_with_xprop(
+            &aig,
+            &staged_refs,
+            &parts_refs,
+            args.num_blocks,
+            input_layout,
+            &x_capable,
+        )
+    } else {
+        FlattenedScriptV1::from(
+            &aig,
+            &staged_refs,
+            &parts_refs,
+            args.num_blocks,
+            input_layout,
+        )
+    };
+
+    if args.xprop {
+        let x_parts = script.partition_x_capable.iter().filter(|&&x| x).count();
+        let total_parts = script.partition_x_capable.len();
+        clilog::info!(
+            "X-propagation: {}/{} partitions X-aware",
+            x_parts,
+            total_parts
+        );
+    }
 
     // Load SDF timing data if provided
     if let Some(ref sdf_path) = args.sdf {
