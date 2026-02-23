@@ -1657,22 +1657,29 @@ struct ClockDomainTiming {
 impl MultiClockScheduler {
     /// Build a scheduler from clock domain timings.
     ///
-    /// For a single clock with no phase offset, produces a schedule of length 1
-    /// where every tick has the same falling+rising pattern — identical to the
-    /// legacy single-clock behavior.
+    /// For a single clock with no phase offset, produces a schedule of length 2
+    /// alternating between falling (posedge_flag=0) and rising (posedge_flag=1)
+    /// edges.
     fn new(timings: &[ClockDomainTiming]) -> Self {
         assert!(!timings.is_empty(), "At least one clock domain is required");
 
-        // Compute GCD of all half-periods
+        // Compute GCD of all half-periods and phase offsets
         let mut gcd_ps = timings[0].half_period_ps;
         for t in &timings[1..] {
             gcd_ps = gcd(gcd_ps, t.half_period_ps);
         }
+        // Include phase offsets in GCD (non-zero offsets need finer granularity)
+        for t in timings {
+            if t.phase_offset_ps > 0 {
+                gcd_ps = gcd(gcd_ps, t.phase_offset_ps);
+            }
+        }
 
-        // Compute LCM of all half-periods
-        let mut lcm_ps = timings[0].half_period_ps;
+        // Compute LCM of all full periods (= 2 * half_period)
+        // We need a full period to capture both falling and rising edges.
+        let mut lcm_ps = timings[0].half_period_ps * 2;
         for t in &timings[1..] {
-            lcm_ps = lcm(lcm_ps, t.half_period_ps);
+            lcm_ps = lcm(lcm_ps, t.half_period_ps * 2);
         }
 
         let schedule_len = (lcm_ps / gcd_ps) as usize;
