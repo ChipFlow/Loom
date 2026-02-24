@@ -37,7 +37,7 @@ The infrastructure for $stop/$finish support is in place:
    - write_sim_control_event() helper available
    - TODO: Actual event writing when script includes SimControl data
 
-4. **metal_test.rs**
+4. **loom.rs** (`loom sim`)
    - Event buffer allocation and processing
    - Simulation terminates on Finish, pauses on Stop
 

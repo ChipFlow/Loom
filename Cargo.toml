@@ -48,18 +48,6 @@ optional = true
 [[bin]]
 name = "loom"
 
-[[bin]]
-name = "cuda_test"
-required-features = ["cuda"]
-
-[[bin]]
-name = "cuda_dummy_test"
-required-features = ["cuda"]
-
-[[bin]]
-name = "metal_test"
-required-features = ["metal"]
-
 [dev-dependencies]
 criterion = "0.5"
 

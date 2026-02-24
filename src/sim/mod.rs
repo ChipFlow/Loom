@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared simulation infrastructure for GPU simulation binaries.
 //!
-//! This module extracts common code that was previously duplicated across
-//! `metal_test`, `cuda_test`, and `gpu_sim` binaries:
+//! This module provides common code used by the `loom sim` and `loom cosim`
+//! subcommands:
 //!
 //! - [`cpu_reference`] — CPU-side block simulator for validation
 //! - [`vcd_io`] — VCD input parsing and output writing utilities

@@ -84,7 +84,7 @@ pub enum DriverType {
 - Max 64 SRAM output groups
 
 **Process**:
-- Interactive partitioning (`cut_map_interactive`)
+- Interactive partitioning (`loom map`)
 - Tries 1 partition first, then increases if needed
 - Merges partitions to minimize inter-partition communication
 
@@ -212,10 +212,10 @@ Verilog $display() → Yosys $print cell → techmap gem_formal.v → GEM_DISPLA
 
 ```bash
 # Metal simulation with debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- <args>
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim <args>
 
 # CPU verification (slower but validates GPU results)
-cargo run -r --features metal --bin metal_test -- <args> --check-with-cpu
+cargo run -r --features metal --bin loom -- sim <args> --check-with-cpu
 ```
 
 ### Key Debug Messages
