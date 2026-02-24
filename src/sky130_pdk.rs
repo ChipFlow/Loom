@@ -148,22 +148,31 @@ pub struct DecompResult {
 
 /// Check if a cell type is a sequential element (DFF or latch).
 ///
-/// SKY130 sequential cell prefixes:
-/// - `df*`: D flip-flops (dfxtp, dfrtp, dfrbp, dfstp, dfbbp, dfbbn, dfxbp, dfrtn, dfsbp)
-/// - `dl*`: latches and clock-gating latches (dlxtp, dlxbn, dlxbp, dlxtn, dlrbn, dlrbp, dlrtn, dlrtp, dlclkp)
-/// - `sdf*`: scan D flip-flops (sdfxtp, sdfxbp, sdfrbp, sdfrtp, sdfrtn, sdfbbp, sdfbbn, sdfsbp, sdfstp)
-/// - `sdl*`: scan clock-gating latches (sdlclkp)
-/// - `edf*`: enable D flip-flops (edfxtp, edfxbp)
-/// - `sedf*`: scan enable D flip-flops (sedfxtp, sedfxbp)
-/// - `lpflow_inputisolatch`: low-power isolation latch
+/// This is the exhaustive list of sky130_fd_sc_hd cells containing DFF or
+/// latch UDPs in their behavioral Verilog models. Derived from the PDK by
+/// grepping for `udp_dff` and `udp_dlatch` primitives in behavioral.v files.
+///
+/// IMPORTANT: Do NOT use prefix matching here — `dlygate*` and `dlymetal*`
+/// are combinational delay buffers that happen to start with "dl".
+const SKY130_SEQUENTIAL_CELLS: &[&str] = &[
+    // D flip-flops
+    "dfbbn", "dfbbp", "dfrbp", "dfrtn", "dfrtp", "dfsbp", "dfstp", "dfxbp", "dfxtp",
+    // Latches and clock-gating latches
+    "dlclkp", "dlrbn", "dlrbp", "dlrtn", "dlrtp", "dlxbn", "dlxbp", "dlxtn", "dlxtp",
+    // Enable D flip-flops
+    "edfxbp", "edfxtp",
+    // Low-power isolation latch
+    "lpflow_inputisolatch",
+    // Scan D flip-flops
+    "sdfbbn", "sdfbbp", "sdfrbp", "sdfrtn", "sdfrtp", "sdfsbp", "sdfstp", "sdfxbp", "sdfxtp",
+    // Scan clock-gating latch
+    "sdlclkp",
+    // Scan enable D flip-flops
+    "sedfxbp", "sedfxtp",
+];
+
 pub fn is_sequential_cell(cell_type: &str) -> bool {
-    cell_type.starts_with("df")
-        || cell_type.starts_with("dl")
-        || cell_type.starts_with("sdf")
-        || cell_type.starts_with("sdl")
-        || cell_type.starts_with("edf")
-        || cell_type.starts_with("sedf")
-        || cell_type == "lpflow_inputisolatch"
+    SKY130_SEQUENTIAL_CELLS.contains(&cell_type)
 }
 
 /// Check if a cell is a tie cell (constant generator).
