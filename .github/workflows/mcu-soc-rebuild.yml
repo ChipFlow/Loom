@@ -1,0 +1,117 @@
+name: MCU SoC P&R Rebuild
+
+on:
+  repository_dispatch:
+    types: [librelane-updated]
+  push:
+    branches: [main]
+    paths:
+      - 'designs/mcu_soc_sky130/**'
+      - 'sram/**'
+      - 'scripts/openlane2/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebuild:
+    name: Rebuild MCU SoC Test Data
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Generate RTLIL
+        run: |
+          cd designs/mcu_soc_sky130
+          uv sync
+          uv run chipflow silicon prepare
+
+      - name: Install CF_SRAM IP
+        run: uv run --with cf-ipm -- ipm install CF_SRAM_1024x32
+
+      - name: Pull librelane image
+        run: docker pull ghcr.io/robtaylor/librelane:latest
+
+      - name: Synthesis (Yosys)
+        run: |
+          docker run --rm \
+            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
+            -v "$PWD/sram:/sram:ro" \
+            -v "$PWD/scripts/openlane2/synth.ys:/design/synth.ys:ro" \
+            ghcr.io/robtaylor/librelane:latest \
+            yosys /design/synth.ys
+
+      - name: Place and Route (librelane)
+        run: |
+          docker run --rm \
+            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
+            -v "$PWD/sram:/sram:ro" \
+            -v "$PWD/ip/CF_SRAM_1024x32:/sram_ip:ro" \
+            -v "$PWD/scripts/openlane2/mcu_soc_config.json:/design/config.json:ro" \
+            -w /design \
+            ghcr.io/robtaylor/librelane:latest \
+            librelane /design/config.json
+
+      - name: Extract artifacts
+        run: |
+          RUN_DIR=$(find designs/mcu_soc_sky130/build/runs -maxdepth 1 -name 'RUN_*' -type d | sort -r | head -1)
+          echo "Using run directory: $RUN_DIR"
+
+          # Post-P&R netlist (unpowered)
+          cp "$RUN_DIR"/final/nl/*.nl.v tests/mcu_soc/data/6_final_raw.v
+
+          # SDF timing (nom corner)
+          cp "$RUN_DIR"/final/sdf/*.sdf tests/mcu_soc/data/6_final.sdf 2>/dev/null || true
+
+          # SDC constraints
+          cp "$RUN_DIR"/final/sdc/*.sdc tests/mcu_soc/data/6_final.sdc 2>/dev/null || true
+
+          # Pre-P&R netlist (post-synthesis)
+          cp designs/mcu_soc_sky130/build/top_synth.v tests/mcu_soc/data/top_synth.v
+
+      - name: Wrap netlist
+        run: |
+          uv run scripts/wrap_openframe.py \
+            designs/mcu_soc_sky130/pins.lock \
+            tests/mcu_soc/data/6_final_raw.v \
+            tests/mcu_soc/data/6_final.v
+          rm tests/mcu_soc/data/6_final_raw.v
+
+      - name: Report artifact sizes
+        run: |
+          {
+            echo "## MCU SoC Rebuild Artifacts"
+            echo "| File | Size |"
+            echo "|------|------|"
+            for f in tests/mcu_soc/data/*; do
+              if [ -f "$f" ]; then
+                SIZE=$(du -h "$f" | cut -f1)
+                echo "| \`$(basename "$f")\` | $SIZE |"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: auto/update-mcu-soc-data
+          commit-message: "Update MCU SoC test data from librelane rebuild"
+          title: "Update MCU SoC post-P&R test data"
+          body: |
+            Automated rebuild of `tests/mcu_soc/data/` using librelane.
+
+            **Trigger:** `${{ github.event_name }}`
+
+            The `mcu-soc-metal` CI job will validate simulation.
+          labels: automated
+          delete-branch: true
+          add-paths: tests/mcu_soc/data/
