@@ -2123,7 +2123,7 @@ fn compare_aig_vs_flattened(
     }
 }
 
-/// CPU prototype partition executor (from metal_test.rs).
+/// CPU prototype partition executor.
 /// Used for --check-with-cpu verification.
 fn simulate_block_v1(
     script: &[u32],

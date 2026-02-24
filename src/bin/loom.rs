@@ -814,7 +814,7 @@ fn sim_cuda(
         // The EventBuffer struct contains AtomicU32, which doesn't impl Copy,
         // so UVec<EventBuffer> can't satisfy the UniversalCopy trait bound.
         // For now, the simple_scan variant passes nullptr for both timing_constraints
-        // and event_buffer on the C side, matching cuda_test.rs behavior.
+        // and event_buffer on the C side.
         clilog::warn!(
             "Timing constraints requested but CUDA timed kernel not yet wired; \
              running without GPU-side timing checks"
@@ -835,7 +835,7 @@ fn sim_cuda(
     device.synchronize();
     clilog::finish!(timer_sim);
 
-    // Process display outputs (post-sim scan, same as cuda_test)
+    // Process display outputs (post-sim scan)
     if !script.display_positions.is_empty() {
         clilog::info!(
             "Processing {} display nodes",

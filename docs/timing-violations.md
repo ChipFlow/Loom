@@ -14,7 +14,7 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 
 1. **SDF file** with back-annotated delays from your place-and-route tool
 2. **Gate-level netlist** synthesized to `aigpdk.lib` cells
-3. **Compiled `.gemparts`** file from `cut_map_interactive`
+3. **Compiled `.gemparts`** file from `loom map`
 
 ### Step-by-step
 
@@ -29,7 +29,7 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 
    **Metal (macOS)**:
    ```bash
-   cargo run -r --features metal --bin metal_test -- \
+   cargo run -r --features metal --bin loom -- sim \
        design.gv design.gemparts input.vcd output.vcd 1 \
        --sdf design.sdf \
        --sdf-corner typ
@@ -37,7 +37,7 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 
    **CUDA (NVIDIA)**:
    ```bash
-   cargo run -r --features cuda --bin cuda_test -- \
+   cargo run -r --features cuda --bin loom -- sim \
        design.gv design.gemparts input.vcd output.vcd 8 \
        --sdf design.sdf \
        --sdf-corner typ \
@@ -61,21 +61,21 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 | `--sdf <path>` | all | Path to SDF file with back-annotated delays |
 | `--sdf-corner <min\|typ\|max>` | all | Which SDF corner to use (default: `typ`) |
 | `--sdf-debug` | all | Print unmatched SDF instances for debugging |
-| `--enable-timing` | `cuda_test` | Enable timing analysis (arrival + violation checks) |
-| `--timing-clock-period <ps>` | `cuda_test` | Clock period in picoseconds (default: 1000) |
-| `--timing-report-violations` | `cuda_test` | Report all violations, not just summary |
-| `--liberty <path>` | `cuda_test` | Liberty library for timing data (optional, falls back to AIGPDK defaults) |
+| `--enable-timing` | `loom sim` | Enable timing analysis (arrival + violation checks) |
+| `--timing-clock-period <ps>` | `loom sim` | Clock period in picoseconds (default: 1000) |
+| `--timing-report-violations` | `loom sim` | Report all violations, not just summary |
+| `--liberty <path>` | `loom sim` | Liberty library for timing data (optional, falls back to AIGPDK defaults) |
 
 ### Example: inv_chain_pnr Test Case
 
 ```bash
 # Map the design
-cargo run -r --features metal --bin cut_map_interactive -- \
+cargo run -r --features metal --bin loom -- map \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts
 
 # Run with SDF timing
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts \
     tests/timing_test/inv_chain_pnr/input.vcd \

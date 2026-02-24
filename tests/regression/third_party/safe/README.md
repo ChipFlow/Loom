@@ -56,10 +56,10 @@ iverilog -DSYNTHESIS -o safe_iverilog safe.v safe_tb.v
 yosys -s synth_safe.tcl
 
 # Map to GPU partitions
-cargo run -r --bin cut_map_interactive -- safe_synth.gv safe_test.gemparts
+cargo run -r --bin loom -- map safe_synth.gv safe_test.gemparts
 
 # Simulate with Metal
-cargo run -r --features metal --bin metal_test -- safe_synth.gv safe_test.gemparts safe.vcd gem_output_safe.vcd 48 --input-vcd-scope safe_tb
+cargo run -r --features metal --bin loom -- sim safe_synth.gv safe_test.gemparts safe.vcd gem_output_safe.vcd 48 --input-vcd-scope safe_tb
 ```
 
 ## Files

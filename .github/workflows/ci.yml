@@ -438,7 +438,7 @@ jobs:
       - name: Compile gemparts
         timeout-minutes: 10
         run: |
-          cargo run --release --features metal --bin cut_map_interactive -- \
+          cargo run --release --features metal --bin loom -- map \
             build_artifacts/6_final.v build_artifacts/result.gemparts \
             --top-module top
 

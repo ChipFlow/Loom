@@ -8,7 +8,7 @@ This guide helps debug VCD input problems where GEM simulations produce incorrec
 
 ### How Auto-Detection Works
 
-When you run `metal_test` or `cuda_test` without specifying `--input-vcd-scope`, GEM:
+When you run `loom sim` without specifying `--input-vcd-scope`, GEM:
 
 1. Extracts the list of required input ports from your synthesized design
 2. Searches the VCD file for scopes containing all required ports
@@ -31,11 +31,11 @@ If auto-detection fails or selects the wrong scope, use `--input-vcd-scope` to s
 
 ```bash
 # Slash-separated path to the DUT scope
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "testbench/dut"
 
 # For nested hierarchies
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "top_tb/subsystem/my_module"
 ```
 
@@ -213,7 +213,7 @@ python3 flatten_vcd.py hierarchical.vcd flat.vcd
 GEM provides `--input-vcd-scope` to specify which module hierarchy to read:
 
 ```bash
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --input-vcd-scope module_name
 ```
@@ -300,7 +300,7 @@ After fixing VCD issues, validate GEM is reading inputs correctly:
 ### 1. Run with CPU Verification
 
 ```bash
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --check-with-cpu
 ```
@@ -328,7 +328,7 @@ grep '^[01]!' reference.vcd
 ### 3. Check Cycle Count
 
 ```bash
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     2>&1 | grep "total number of cycles"
 ```
@@ -474,7 +474,7 @@ grep '\$var' safe_flat.vcd
 
 1. **Enable debug logging**:
    ```bash
-   RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin metal_test -- <args> 2>&1 | tee debug.log
+   RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin loom -- sim <args> 2>&1 | tee debug.log
    ```
 
 2. **Check with minimal test**:

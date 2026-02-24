@@ -8,7 +8,7 @@ When input signals change at the **same VCD timestamp** as a clock edge, GEM cap
 
 ### Root Cause
 
-In `src/bin/cuda_test.rs` (and `metal_test.rs`), lines 630-664:
+In the `loom sim` implementation (`src/bin/loom.rs`):
 
 ```rust
 for pos in std::mem::take(&mut delayed_bit_changes) {
@@ -64,12 +64,12 @@ vvp dff_test.vvp
 yosys -s synth.tcl
 
 # Create GEM partitions
-cargo run -r --bin cut_map_interactive -- \
+cargo run -r --bin loom -- map \
     tests/timing_test/dff_test_synth.gv \
     tests/timing_test/dff_test.gemparts
 
 # Run GEM simulation
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/dff_test_synth.gv \
     tests/timing_test/dff_test.gemparts \
     tests/timing_test/dff_test.vcd \

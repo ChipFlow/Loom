@@ -52,10 +52,10 @@ end
 
 ```bash
 # Enable debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- <args>
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim <args>
 
 # Verify with CPU simulation
-cargo run -r --features metal --bin metal_test -- <args> --check-with-cpu
+cargo run -r --features metal --bin loom -- sim <args> --check-with-cpu
 
 # Check VCD structure
 grep '\$scope\|\$var' input.vcd | head -20

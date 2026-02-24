@@ -64,11 +64,7 @@ Loom operates in two phases:
 1. **Map** your synthesized gate-level netlist to a `.gemparts` file (one-time cost):
 
 ```sh
-# The `loom` binary works without GPU features:
 cargo run -r --bin loom -- map design.gv design.gemparts
-
-# Or with the legacy name (equivalent):
-cargo run -r --features metal --bin cut_map_interactive -- design.gv design.gemparts
 ```
 
 2. **Simulate** with a VCD input waveform:

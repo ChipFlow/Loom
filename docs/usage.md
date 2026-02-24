@@ -114,16 +114,17 @@ git submodule update --init --recursive
 
 Loom supports two GPU backends: **CUDA** (NVIDIA GPUs on Linux) and **Metal** (Apple Silicon Macs).
 
-Loom comes with a `cut_map_interactive` command and a simulator command (`cuda_test` or `metal_test`), that correspond to `compile` and `simulate` steps of a classical CPU simulator. See their help usage:
+All functionality is accessed through the `loom` CLI, which provides `map`, `sim`, and `cosim` subcommands:
 
 ``` sh
-# Metal (macOS)
-cargo run -r --features metal --bin cut_map_interactive -- --help
-cargo run -r --features metal --bin metal_test -- --help
+# Mapping (no GPU features needed)
+cargo run -r --bin loom -- map --help
 
-# CUDA (Linux, requires CUDA toolkit)
-cargo run -r --features cuda --bin cut_map_interactive -- --help
-cargo run -r --features cuda --bin cuda_test -- --help
+# Simulation (Metal - macOS)
+cargo run -r --features metal --bin loom -- sim --help
+
+# Simulation (CUDA - Linux, requires CUDA toolkit)
+cargo run -r --features cuda --bin loom -- sim --help
 ```
 
 ## Map the Design with Loom
@@ -133,11 +134,7 @@ Loom compiles and links to [mt-kahypar-sc](https://github.com/gzz2000/mt-kahypar
 Run the following command to start the Boolean processor mapping.
 
 ``` sh
-# Metal (macOS)
-cargo run -r --features metal --bin cut_map_interactive -- path/to/gatelevel.gv path/to/result.gemparts
-
-# CUDA (Linux)
-cargo run -r --features cuda --bin cut_map_interactive -- path/to/gatelevel.gv path/to/result.gemparts
+cargo run -r --bin loom -- map path/to/gatelevel.gv path/to/result.gemparts
 ```
 
 The mapped result will be stored in a binary file `result.gemparts`.
@@ -151,7 +148,7 @@ If the mapping failed due to failure to partition deep circuits (which often sho
 Use `NUM_BLOCKS=1` for Metal.
 
 ``` sh
-cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1
+cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1
 ```
 
 ### CUDA (Linux)
@@ -159,7 +156,7 @@ cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/r
 Replace `NUM_BLOCKS` with twice the number of physical streaming multiprocessors (SMs) of your GPU.
 
 ``` sh
-cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
+cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
 ```
 
 ### VCD Scope Handling
@@ -168,10 +165,10 @@ Loom automatically detects the correct VCD scope containing your design's ports.
 
 ``` sh
 # Metal
-cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
+cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
 
 # CUDA
-cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
+cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
 ```
 
 Use slash separators (`/`) for hierarchical paths, not dots. See [troubleshooting-vcd.md](troubleshooting-vcd.md) for details.

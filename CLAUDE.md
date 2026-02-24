@@ -18,34 +18,22 @@ Requires Rust toolchain (via rustup.rs) and either CUDA or Metal support.
 # Initialize submodules (required first time)
 git submodule update --init --recursive
 
-# --- Unified CLI (no GPU features needed for mapping) ---
-
-# Build and run mapping tool
+# Build and run mapping tool (no GPU features needed)
 cargo run -r --bin loom -- map --help
 
-# --- Metal (macOS) ---
+# Metal simulation (macOS)
+cargo run -r --features metal --bin loom -- sim --help
 
-# Build and run mapping tool (legacy name, equivalent to `loom map`)
-cargo run -r --features metal --bin cut_map_interactive -- --help
-
-# Build and run Metal simulator
-cargo run -r --features metal --bin metal_test -- --help
-
-# --- CUDA (Linux/NVIDIA) ---
-
-# Build and run mapping tool (legacy name, equivalent to `loom map`)
-cargo run -r --features cuda --bin cut_map_interactive -- --help
-
-# Build and run CUDA simulator
-cargo run -r --features cuda --bin cuda_test -- --help
+# CUDA simulation (Linux/NVIDIA)
+cargo run -r --features cuda --bin loom -- sim --help
 ```
 
 ## Typical Workflow
 
 1. **Memory synthesis** (Yosys): Map memories using `memlib_yosys.txt` → outputs `memory_mapped.v`
 2. **Logic synthesis** (DC or Yosys): Synthesize to `aigpdk.lib` cells → outputs `gatelevel.gv`
-3. **Loom mapping**: `loom map gatelevel.gv result.gemparts` (or `cut_map_interactive` for backward compat)
-4. **Simulation**: `cuda_test` (NVIDIA) or `metal_test` (macOS) with `gatelevel.gv result.gemparts input.vcd output.vcd NUM_BLOCKS`
+3. **Loom mapping**: `loom map gatelevel.gv result.gemparts`
+4. **Simulation**: `loom sim` with `gatelevel.gv result.gemparts input.vcd output.vcd NUM_BLOCKS`
 
 Set `NUM_BLOCKS` to 2× the number of GPU streaming multiprocessors (SMs) for CUDA, or 1 for Metal.
 
@@ -73,12 +61,9 @@ NetlistDB (Verilog) → AIG → StagedAIG → Partitions → FlattenedScript →
 
 ### Binary Tools (`src/bin/`)
 
-- **`loom.rs`**: Unified CLI entry point — `loom map` (partition mapping) and `loom sim` (stub, points to platform binaries)
-- **`cut_map_interactive.rs`**: Legacy mapping tool (equivalent to `loom map`), kept for backward compatibility
-- **`cuda_test.rs`**: CUDA simulator - runs GPU simulation with VCD I/O
-- **`metal_test.rs`**: Metal simulator - runs GPU simulation on macOS with VCD I/O
-- **`gpu_sim.rs`**: GPU co-simulation binary
-- Other `*_test.rs` files: Development/debugging utilities
+- **`loom.rs`**: Unified CLI — `loom map` (partition mapping), `loom sim` (GPU simulation), `loom cosim` (co-simulation)
+- **`timing_sim_cpu.rs`**: CPU-based timing simulation with SDF back-annotation (development tool)
+- **`timing_analysis.rs`**: Static timing analysis utility (development tool)
 
 ### Dependencies (`vendor/eda-infra-rs` submodule)
 
@@ -112,13 +97,13 @@ If mapping fails with "single endpoint cannot map", use `--level-split` to force
 
 ```bash
 # Run with CPU baseline verification (CUDA)
-cargo run -r --features cuda --bin cuda_test -- ... --check-with-cpu
+cargo run -r --features cuda --bin loom -- sim ... --check-with-cpu
 
 # Limit simulation cycles (CUDA)
-cargo run -r --features cuda --bin cuda_test -- ... --max-cycles 1000
+cargo run -r --features cuda --bin loom -- sim ... --max-cycles 1000
 
 # Metal equivalent
-cargo run -r --features metal --bin metal_test -- ... --max-cycles 1000
+cargo run -r --features metal --bin loom -- sim ... --max-cycles 1000
 ```
 
 ## Benchmarks
@@ -127,12 +112,12 @@ Pre-synthesized benchmark designs are in `benchmarks/dataset/` (git submodule). 
 
 ```bash
 # Generate partition file (NVDLA - smallest, good for testing)
-cargo run -r --features metal --bin cut_map_interactive -- \
+cargo run -r --bin loom -- map \
     benchmarks/dataset/nvdlaAIG.gv \
     benchmarks/nvdla.gemparts
 
 # Run Metal simulation benchmark
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     benchmarks/dataset/nvdlaAIG.gv \
     benchmarks/nvdla.gemparts \
     benchmarks/dataset/nvdla.pdp_16x6x16_4x2_split_max_int8_0.vcd \
