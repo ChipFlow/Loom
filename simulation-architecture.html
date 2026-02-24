@@ -234,7 +234,7 @@
 </ul>
 <p><strong>Process</strong>:</p>
 <ul>
-<li>Interactive partitioning (<code>cut_map_interactive</code>)</li>
+<li>Interactive partitioning (<code>loom map</code>)</li>
 <li>Tries 1 partition first, then increases if needed</li>
 <li>Merges partitions to minimize inter-partition communication</li>
 </ul>
@@ -340,10 +340,10 @@ $upscope $end
 <h2 id="debug-information"><a class="header" href="#debug-information">Debug Information</a></h2>
 <h3 id="enabling-debug-output"><a class="header" href="#enabling-debug-output">Enabling Debug Output</a></h3>
 <pre><code class="language-bash"># Metal simulation with debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- &lt;args&gt;
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim &lt;args&gt;
 
 # CPU verification (slower but validates GPU results)
-cargo run -r --features metal --bin metal_test -- &lt;args&gt; --check-with-cpu
+cargo run -r --features metal --bin loom -- sim &lt;args&gt; --check-with-cpu
 </code></pre>
 <h3 id="key-debug-messages"><a class="header" href="#key-debug-messages">Key Debug Messages</a></h3>
 <p><strong>AIG Construction</strong>:</p>

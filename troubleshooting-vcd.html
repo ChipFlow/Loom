@@ -160,7 +160,7 @@
 <h2 id="vcd-scope-auto-detection-recommended"><a class="header" href="#vcd-scope-auto-detection-recommended">VCD Scope Auto-Detection (Recommended)</a></h2>
 <p><strong>NEW</strong>: GEM now automatically detects the correct VCD scope containing your design's ports. In most cases, you don't need to specify <code>--input-vcd-scope</code> manually.</p>
 <h3 id="how-auto-detection-works"><a class="header" href="#how-auto-detection-works">How Auto-Detection Works</a></h3>
-<p>When you run <code>metal_test</code> or <code>cuda_test</code> without specifying <code>--input-vcd-scope</code>, GEM:</p>
+<p>When you run <code>loom sim</code> without specifying <code>--input-vcd-scope</code>, GEM:</p>
 <ol>
 <li>Extracts the list of required input ports from your synthesized design</li>
 <li>Searches the VCD file for scopes containing all required ports</li>
@@ -177,11 +177,11 @@ INFO Auto-detected VCD scope: safe_tb/uut (matched common pattern 'uut')
 <h3 id="manual-override"><a class="header" href="#manual-override">Manual Override</a></h3>
 <p>If auto-detection fails or selects the wrong scope, use <code>--input-vcd-scope</code> to specify manually:</p>
 <pre><code class="language-bash"># Slash-separated path to the DUT scope
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "testbench/dut"
 
 # For nested hierarchies
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "top_tb/subsystem/my_module"
 </code></pre>
 <p><strong>Note</strong>: Use slash separators (<code>/</code>), not dots (<code>.</code>).</p>
@@ -328,7 +328,7 @@ if __name__ == '__main__':
 </code></pre>
 <h2 id="solution-3-vcd-scope-option-experimental"><a class="header" href="#solution-3-vcd-scope-option-experimental">Solution 3: VCD Scope Option (Experimental)</a></h2>
 <p>GEM provides <code>--input-vcd-scope</code> to specify which module hierarchy to read:</p>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --input-vcd-scope module_name
 </code></pre>
@@ -380,7 +380,7 @@ if __name__ == '__main__':
 <h2 id="validation-steps"><a class="header" href="#validation-steps">Validation Steps</a></h2>
 <p>After fixing VCD issues, validate GEM is reading inputs correctly:</p>
 <h3 id="1-run-with-cpu-verification"><a class="header" href="#1-run-with-cpu-verification">1. Run with CPU Verification</a></h3>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --check-with-cpu
 </code></pre>
@@ -398,7 +398,7 @@ grep '^[01]!' gem_output.vcd
 grep '^[01]!' reference.vcd
 </code></pre>
 <h3 id="3-check-cycle-count"><a class="header" href="#3-check-cycle-count">3. Check Cycle Count</a></h3>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     2&gt;&amp;1 | grep "total number of cycles"
 </code></pre>
@@ -520,7 +520,7 @@ grep '\$var' safe_flat.vcd
 <ol>
 <li>
 <p><strong>Enable debug logging</strong>:</p>
-<pre><code class="language-bash">RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin metal_test -- &lt;args&gt; 2&gt;&amp;1 | tee debug.log
+<pre><code class="language-bash">RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin loom -- sim &lt;args&gt; 2&gt;&amp;1 | tee debug.log
 </code></pre>
 </li>
 <li>

@@ -208,10 +208,10 @@ end
 </code></pre>
 <h3 id="debug-commands"><a class="header" href="#debug-commands">Debug Commands</a></h3>
 <pre><code class="language-bash"># Enable debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- &lt;args&gt;
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim &lt;args&gt;
 
 # Verify with CPU simulation
-cargo run -r --features metal --bin metal_test -- &lt;args&gt; --check-with-cpu
+cargo run -r --features metal --bin loom -- sim &lt;args&gt; --check-with-cpu
 
 # Check VCD structure
 grep '\$scope\|\$var' input.vcd | head -20

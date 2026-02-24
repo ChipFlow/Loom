@@ -209,10 +209,10 @@ end
 </code></pre>
 <h3 id="debug-commands"><a class="header" href="#debug-commands">Debug Commands</a></h3>
 <pre><code class="language-bash"># Enable debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- &lt;args&gt;
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim &lt;args&gt;
 
 # Verify with CPU simulation
-cargo run -r --features metal --bin metal_test -- &lt;args&gt; --check-with-cpu
+cargo run -r --features metal --bin loom -- sim &lt;args&gt; --check-with-cpu
 
 # Check VCD structure
 grep '\$scope\|\$var' input.vcd | head -20
@@ -389,42 +389,39 @@ cd Loom
 git submodule update --init --recursive
 </code></pre>
 <p>Loom supports two GPU backends: <strong>CUDA</strong> (NVIDIA GPUs on Linux) and <strong>Metal</strong> (Apple Silicon Macs).</p>
-<p>Loom comes with a <code>cut_map_interactive</code> command and a simulator command (<code>cuda_test</code> or <code>metal_test</code>), that correspond to <code>compile</code> and <code>simulate</code> steps of a classical CPU simulator. See their help usage:</p>
-<pre><code class="language-sh"># Metal (macOS)
-cargo run -r --features metal --bin cut_map_interactive -- --help
-cargo run -r --features metal --bin metal_test -- --help
+<p>All functionality is accessed through the <code>loom</code> CLI, which provides <code>map</code>, <code>sim</code>, and <code>cosim</code> subcommands:</p>
+<pre><code class="language-sh"># Mapping (no GPU features needed)
+cargo run -r --bin loom -- map --help
 
-# CUDA (Linux, requires CUDA toolkit)
-cargo run -r --features cuda --bin cut_map_interactive -- --help
-cargo run -r --features cuda --bin cuda_test -- --help
+# Simulation (Metal - macOS)
+cargo run -r --features metal --bin loom -- sim --help
+
+# Simulation (CUDA - Linux, requires CUDA toolkit)
+cargo run -r --features cuda --bin loom -- sim --help
 </code></pre>
 <h2 id="map-the-design-with-loom"><a class="header" href="#map-the-design-with-loom">Map the Design with Loom</a></h2>
 <p>Loom compiles and links to <a href="https://github.com/gzz2000/mt-kahypar-sc">mt-kahypar-sc</a> for hypergraph partitioning automatically.</p>
 <p>Run the following command to start the Boolean processor mapping.</p>
-<pre><code class="language-sh"># Metal (macOS)
-cargo run -r --features metal --bin cut_map_interactive -- path/to/gatelevel.gv path/to/result.gemparts
-
-# CUDA (Linux)
-cargo run -r --features cuda --bin cut_map_interactive -- path/to/gatelevel.gv path/to/result.gemparts
+<pre><code class="language-sh">cargo run -r --bin loom -- map path/to/gatelevel.gv path/to/result.gemparts
 </code></pre>
 <p>The mapped result will be stored in a binary file <code>result.gemparts</code>.</p>
 <p>If the mapping failed due to failure to partition deep circuits (which often shows as trying to partition a circuit with only 0 or 1 endpoints), try adding a <code>--level-split</code> option to force a stage split. For example <code>--level-split 30</code> or <code>--level-split 20,40</code>. If you used this, remember to add the same <code>--level-split</code> option when you simulate.</p>
 <h2 id="simulate-the-design"><a class="header" href="#simulate-the-design">Simulate the Design</a></h2>
 <h3 id="metal-macos"><a class="header" href="#metal-macos">Metal (macOS)</a></h3>
 <p>Use <code>NUM_BLOCKS=1</code> for Metal.</p>
-<pre><code class="language-sh">cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1
+<pre><code class="language-sh">cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1
 </code></pre>
 <h3 id="cuda-linux"><a class="header" href="#cuda-linux">CUDA (Linux)</a></h3>
 <p>Replace <code>NUM_BLOCKS</code> with twice the number of physical streaming multiprocessors (SMs) of your GPU.</p>
-<pre><code class="language-sh">cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
+<pre><code class="language-sh">cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
 </code></pre>
 <h3 id="vcd-scope-handling"><a class="header" href="#vcd-scope-handling">VCD Scope Handling</a></h3>
 <p>Loom automatically detects the correct VCD scope containing your design's ports. In most cases, you don't need to specify <code>--input-vcd-scope</code>. If auto-detection fails or you need to override it, use:</p>
 <pre><code class="language-sh"># Metal
-cargo run -r --features metal --bin metal_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
+cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
 
 # CUDA
-cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
+cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
 </code></pre>
 <p>Use slash separators (<code>/</code>) for hierarchical paths, not dots. See <a href="troubleshooting-vcd.html">troubleshooting-vcd.md</a> for details.</p>
 <p>The simulated output ports value will be stored in <code>output.vcd</code>.</p>
@@ -508,7 +505,7 @@ cargo run -r --features cuda --bin cuda_test -- path/to/gatelevel.gv path/to/res
 </ul>
 <p><strong>Process</strong>:</p>
 <ul>
-<li>Interactive partitioning (<code>cut_map_interactive</code>)</li>
+<li>Interactive partitioning (<code>loom map</code>)</li>
 <li>Tries 1 partition first, then increases if needed</li>
 <li>Merges partitions to minimize inter-partition communication</li>
 </ul>
@@ -614,10 +611,10 @@ $upscope $end
 <h2 id="debug-information"><a class="header" href="#debug-information">Debug Information</a></h2>
 <h3 id="enabling-debug-output"><a class="header" href="#enabling-debug-output">Enabling Debug Output</a></h3>
 <pre><code class="language-bash"># Metal simulation with debug logging
-RUST_LOG=debug cargo run -r --features metal --bin metal_test -- &lt;args&gt;
+RUST_LOG=debug cargo run -r --features metal --bin loom -- sim &lt;args&gt;
 
 # CPU verification (slower but validates GPU results)
-cargo run -r --features metal --bin metal_test -- &lt;args&gt; --check-with-cpu
+cargo run -r --features metal --bin loom -- sim &lt;args&gt; --check-with-cpu
 </code></pre>
 <h3 id="key-debug-messages"><a class="header" href="#key-debug-messages">Key Debug Messages</a></h3>
 <p><strong>AIG Construction</strong>:</p>
@@ -1114,7 +1111,7 @@ Band 3: 30+ps    → Threads 192-255
 <ol>
 <li><strong>SDF file</strong> with back-annotated delays from your place-and-route tool</li>
 <li><strong>Gate-level netlist</strong> synthesized to <code>aigpdk.lib</code> cells</li>
-<li><strong>Compiled <code>.gemparts</code></strong> file from <code>cut_map_interactive</code></li>
+<li><strong>Compiled <code>.gemparts</code></strong> file from <code>loom map</code></li>
 </ol>
 <h3 id="step-by-step"><a class="header" href="#step-by-step">Step-by-step</a></h3>
 <ol>
@@ -1127,13 +1124,13 @@ ls my_build/6_final.sdf
 <li>
 <p><strong>Run the simulator</strong> with <code>--sdf</code> and a clock period:</p>
 <p><strong>Metal (macOS)</strong>:</p>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv design.gemparts input.vcd output.vcd 1 \
     --sdf design.sdf \
     --sdf-corner typ
 </code></pre>
 <p><strong>CUDA (NVIDIA)</strong>:</p>
-<pre><code class="language-bash">cargo run -r --features cuda --bin cuda_test -- \
+<pre><code class="language-bash">cargo run -r --features cuda --bin loom -- sim \
     design.gv design.gemparts input.vcd output.vcd 8 \
     --sdf design.sdf \
     --sdf-corner typ \
@@ -1154,20 +1151,20 @@ ls my_build/6_final.sdf
 <tr><td><code>--sdf &lt;path&gt;</code></td><td>all</td><td>Path to SDF file with back-annotated delays</td></tr>
 <tr><td><code>--sdf-corner &lt;min|typ|max&gt;</code></td><td>all</td><td>Which SDF corner to use (default: <code>typ</code>)</td></tr>
 <tr><td><code>--sdf-debug</code></td><td>all</td><td>Print unmatched SDF instances for debugging</td></tr>
-<tr><td><code>--enable-timing</code></td><td><code>cuda_test</code></td><td>Enable timing analysis (arrival + violation checks)</td></tr>
-<tr><td><code>--timing-clock-period &lt;ps&gt;</code></td><td><code>cuda_test</code></td><td>Clock period in picoseconds (default: 1000)</td></tr>
-<tr><td><code>--timing-report-violations</code></td><td><code>cuda_test</code></td><td>Report all violations, not just summary</td></tr>
-<tr><td><code>--liberty &lt;path&gt;</code></td><td><code>cuda_test</code></td><td>Liberty library for timing data (optional, falls back to AIGPDK defaults)</td></tr>
+<tr><td><code>--enable-timing</code></td><td><code>loom sim</code></td><td>Enable timing analysis (arrival + violation checks)</td></tr>
+<tr><td><code>--timing-clock-period &lt;ps&gt;</code></td><td><code>loom sim</code></td><td>Clock period in picoseconds (default: 1000)</td></tr>
+<tr><td><code>--timing-report-violations</code></td><td><code>loom sim</code></td><td>Report all violations, not just summary</td></tr>
+<tr><td><code>--liberty &lt;path&gt;</code></td><td><code>loom sim</code></td><td>Liberty library for timing data (optional, falls back to AIGPDK defaults)</td></tr>
 </tbody></table>
 </div>
 <h3 id="example-inv_chain_pnr-test-case"><a class="header" href="#example-inv_chain_pnr-test-case">Example: inv_chain_pnr Test Case</a></h3>
 <pre><code class="language-bash"># Map the design
-cargo run -r --features metal --bin cut_map_interactive -- \
+cargo run -r --features metal --bin loom -- map \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts
 
 # Run with SDF timing
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts \
     tests/timing_test/inv_chain_pnr/input.vcd \
@@ -1262,7 +1259,7 @@ cargo run -r --bin timing_sim_cpu -- design.v input.vcd \
 <h2 id="vcd-scope-auto-detection-recommended"><a class="header" href="#vcd-scope-auto-detection-recommended">VCD Scope Auto-Detection (Recommended)</a></h2>
 <p><strong>NEW</strong>: GEM now automatically detects the correct VCD scope containing your design's ports. In most cases, you don't need to specify <code>--input-vcd-scope</code> manually.</p>
 <h3 id="how-auto-detection-works"><a class="header" href="#how-auto-detection-works">How Auto-Detection Works</a></h3>
-<p>When you run <code>metal_test</code> or <code>cuda_test</code> without specifying <code>--input-vcd-scope</code>, GEM:</p>
+<p>When you run <code>loom sim</code> without specifying <code>--input-vcd-scope</code>, GEM:</p>
 <ol>
 <li>Extracts the list of required input ports from your synthesized design</li>
 <li>Searches the VCD file for scopes containing all required ports</li>
@@ -1279,11 +1276,11 @@ INFO Auto-detected VCD scope: safe_tb/uut (matched common pattern 'uut')
 <h3 id="manual-override"><a class="header" href="#manual-override">Manual Override</a></h3>
 <p>If auto-detection fails or selects the wrong scope, use <code>--input-vcd-scope</code> to specify manually:</p>
 <pre><code class="language-bash"># Slash-separated path to the DUT scope
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "testbench/dut"
 
 # For nested hierarchies
-metal_test design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv design.gemparts input.vcd output.vcd 8 \
     --input-vcd-scope "top_tb/subsystem/my_module"
 </code></pre>
 <p><strong>Note</strong>: Use slash separators (<code>/</code>), not dots (<code>.</code>).</p>
@@ -1430,7 +1427,7 @@ if __name__ == '__main__':
 </code></pre>
 <h2 id="solution-3-vcd-scope-option-experimental"><a class="header" href="#solution-3-vcd-scope-option-experimental">Solution 3: VCD Scope Option (Experimental)</a></h2>
 <p>GEM provides <code>--input-vcd-scope</code> to specify which module hierarchy to read:</p>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --input-vcd-scope module_name
 </code></pre>
@@ -1482,7 +1479,7 @@ if __name__ == '__main__':
 <h2 id="validation-steps"><a class="header" href="#validation-steps">Validation Steps</a></h2>
 <p>After fixing VCD issues, validate GEM is reading inputs correctly:</p>
 <h3 id="1-run-with-cpu-verification"><a class="header" href="#1-run-with-cpu-verification">1. Run with CPU Verification</a></h3>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     --check-with-cpu
 </code></pre>
@@ -1500,7 +1497,7 @@ grep '^[01]!' gem_output.vcd
 grep '^[01]!' reference.vcd
 </code></pre>
 <h3 id="3-check-cycle-count"><a class="header" href="#3-check-cycle-count">3. Check Cycle Count</a></h3>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv parts.gemparts input.vcd output.vcd 48 \
     2&gt;&amp;1 | grep "total number of cycles"
 </code></pre>
@@ -1622,7 +1619,7 @@ grep '\$var' safe_flat.vcd
 <ol>
 <li>
 <p><strong>Enable debug logging</strong>:</p>
-<pre><code class="language-bash">RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin metal_test -- &lt;args&gt; 2&gt;&amp;1 | tee debug.log
+<pre><code class="language-bash">RUST_LOG=debug,vcd_ng=trace cargo run -r --features metal --bin loom -- sim &lt;args&gt; 2&gt;&amp;1 | tee debug.log
 </code></pre>
 </li>
 <li>

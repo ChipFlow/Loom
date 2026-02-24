@@ -165,7 +165,7 @@
 <ol>
 <li><strong>SDF file</strong> with back-annotated delays from your place-and-route tool</li>
 <li><strong>Gate-level netlist</strong> synthesized to <code>aigpdk.lib</code> cells</li>
-<li><strong>Compiled <code>.gemparts</code></strong> file from <code>cut_map_interactive</code></li>
+<li><strong>Compiled <code>.gemparts</code></strong> file from <code>loom map</code></li>
 </ol>
 <h3 id="step-by-step"><a class="header" href="#step-by-step">Step-by-step</a></h3>
 <ol>
@@ -178,13 +178,13 @@ ls my_build/6_final.sdf
 <li>
 <p><strong>Run the simulator</strong> with <code>--sdf</code> and a clock period:</p>
 <p><strong>Metal (macOS)</strong>:</p>
-<pre><code class="language-bash">cargo run -r --features metal --bin metal_test -- \
+<pre><code class="language-bash">cargo run -r --features metal --bin loom -- sim \
     design.gv design.gemparts input.vcd output.vcd 1 \
     --sdf design.sdf \
     --sdf-corner typ
 </code></pre>
 <p><strong>CUDA (NVIDIA)</strong>:</p>
-<pre><code class="language-bash">cargo run -r --features cuda --bin cuda_test -- \
+<pre><code class="language-bash">cargo run -r --features cuda --bin loom -- sim \
     design.gv design.gemparts input.vcd output.vcd 8 \
     --sdf design.sdf \
     --sdf-corner typ \
@@ -205,20 +205,20 @@ ls my_build/6_final.sdf
 <tr><td><code>--sdf &lt;path&gt;</code></td><td>all</td><td>Path to SDF file with back-annotated delays</td></tr>
 <tr><td><code>--sdf-corner &lt;min|typ|max&gt;</code></td><td>all</td><td>Which SDF corner to use (default: <code>typ</code>)</td></tr>
 <tr><td><code>--sdf-debug</code></td><td>all</td><td>Print unmatched SDF instances for debugging</td></tr>
-<tr><td><code>--enable-timing</code></td><td><code>cuda_test</code></td><td>Enable timing analysis (arrival + violation checks)</td></tr>
-<tr><td><code>--timing-clock-period &lt;ps&gt;</code></td><td><code>cuda_test</code></td><td>Clock period in picoseconds (default: 1000)</td></tr>
-<tr><td><code>--timing-report-violations</code></td><td><code>cuda_test</code></td><td>Report all violations, not just summary</td></tr>
-<tr><td><code>--liberty &lt;path&gt;</code></td><td><code>cuda_test</code></td><td>Liberty library for timing data (optional, falls back to AIGPDK defaults)</td></tr>
+<tr><td><code>--enable-timing</code></td><td><code>loom sim</code></td><td>Enable timing analysis (arrival + violation checks)</td></tr>
+<tr><td><code>--timing-clock-period &lt;ps&gt;</code></td><td><code>loom sim</code></td><td>Clock period in picoseconds (default: 1000)</td></tr>
+<tr><td><code>--timing-report-violations</code></td><td><code>loom sim</code></td><td>Report all violations, not just summary</td></tr>
+<tr><td><code>--liberty &lt;path&gt;</code></td><td><code>loom sim</code></td><td>Liberty library for timing data (optional, falls back to AIGPDK defaults)</td></tr>
 </tbody></table>
 </div>
 <h3 id="example-inv_chain_pnr-test-case"><a class="header" href="#example-inv_chain_pnr-test-case">Example: inv_chain_pnr Test Case</a></h3>
 <pre><code class="language-bash"># Map the design
-cargo run -r --features metal --bin cut_map_interactive -- \
+cargo run -r --features metal --bin loom -- map \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts
 
 # Run with SDF timing
-cargo run -r --features metal --bin metal_test -- \
+cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/inv_chain_pnr/6_final.v \
     tests/timing_test/inv_chain_pnr/inv_chain.gemparts \
     tests/timing_test/inv_chain_pnr/input.vcd \
