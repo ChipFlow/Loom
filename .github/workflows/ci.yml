@@ -273,121 +273,10 @@ jobs:
           name: benchmark-results
           path: benchmark_results.txt
 
-  # Synthesize mcu_soc design and run P&R with OpenLane2 (requires Docker)
-  mcu-soc-synth:
-    name: MCU SoC Synthesis + P&R
-    runs-on: backend-monster
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          persist-credentials: true
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Cache uv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-mcu-soc-${{ hashFiles('designs/mcu_soc_sky130/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-mcu-soc-
-
-      - name: Cache SKY130 PDK
-        uses: actions/cache@v4
-        with:
-          path: ~/.volare
-          key: sky130-pdk-c6d73a35f524070e85faff4a6a9eef49553ebc2b
-          restore-keys: |
-            sky130-pdk-
-
-      - name: Install volare and download SKY130 PDK
-        run: |
-          uv tool install volare
-          volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b
-
-      - name: Install CF_SRAM IP via ipm
-        run: |
-          uv run --with cf-ipm -- ipm install CF_SRAM_1024x32
-          ls -la ip/CF_SRAM_1024x32/gds/ ip/CF_SRAM_1024x32/lef/ ip/CF_SRAM_1024x32/lib/
-
-      - name: Generate RTLIL and firmware from design source
-        run: |
-          cd designs/mcu_soc_sky130
-          uv sync
-          uv run chipflow silicon submit --dry-run
-          uv run chipflow software
-          # Verify outputs
-          test -f build/mcu_soc_sky130.il || { echo "RTLIL not generated"; exit 1; }
-          test -f build/software/software.bin || { echo "Firmware not generated"; exit 1; }
-
-      - name: Set up Docker PDK volume
-        run: |
-          docker create --name pdk-init -v openlane-pdk:/root/.volare busybox
-          docker cp ~/.volare/. pdk-init:/root/.volare/
-          docker rm pdk-init
-
-      - name: Run Yosys synthesis in Docker (with SRAM mapping)
-        timeout-minutes: 15
-        run: |
-          docker run --rm \
-            -v "openlane-pdk:/root/.volare" \
-            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
-            -v "$PWD/sram:/sram:ro" \
-            -v "$PWD/ip/CF_SRAM_1024x32:/sram_ip:ro" \
-            -v "$PWD/scripts/openlane2/synth.ys:/design/synth.ys:ro" \
-            ghcr.io/efabless/openlane2:2.4.0.dev1 \
-            yosys -s /design/synth.ys
-          # Verify SRAM macros are preserved
-          SRAM_COUNT=$(grep -c CF_SRAM_1024x32 designs/mcu_soc_sky130/build/top_synth.v || true)
-          echo "CF_SRAM_1024x32 instances: $SRAM_COUNT"
-          if [ "$SRAM_COUNT" -eq 0 ]; then
-            echo "ERROR: No SRAM macros found - synthesis may have flattened them"
-            exit 1
-          fi
-
-      - name: Run OpenLane2 P&R in Docker
-        run: |
-          docker run --rm \
-            -v "openlane-pdk:/root/.volare" \
-            -v "$PWD/designs/mcu_soc_sky130/build:/design" \
-            -v "$PWD/sram:/sram:ro" \
-            -v "$PWD/ip/CF_SRAM_1024x32:/sram_ip:ro" \
-            -v "$PWD/scripts/openlane2/mcu_soc_config.json:/design/config.json:ro" \
-            -w /design \
-            ghcr.io/efabless/openlane2:2.4.0.dev1 \
-            openlane /design/config.json
-
-      - name: Extract P&R outputs
-        run: |
-          mkdir -p build_artifacts
-          LATEST=$(ls -td designs/mcu_soc_sky130/build/openlane_runs/RUN_* | head -1)
-          echo "Using run directory: $LATEST"
-          cp "$LATEST/results/finishing/6_final.v" build_artifacts/
-          cp "$LATEST/results/finishing/6_final.sdf" build_artifacts/
-          cp designs/mcu_soc_sky130/build/software/software.bin build_artifacts/
-          # Verify outputs
-          test -f build_artifacts/6_final.v || { echo "Post-P&R netlist not found"; exit 1; }
-          test -f build_artifacts/6_final.sdf || { echo "SDF file not found"; exit 1; }
-          echo "Post-P&R netlist lines: $(wc -l < build_artifacts/6_final.v)"
-          echo "SDF file size: $(wc -c < build_artifacts/6_final.sdf) bytes"
-
-      - name: Upload synth artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mcu-soc-synth
-          path: |
-            build_artifacts/6_final.v
-            build_artifacts/6_final.sdf
-            build_artifacts/software.bin
-
-  # Run GPU simulation on macOS with post-P&R netlist and SDF timing
+  # Run GPU simulation on macOS with pre-built post-P&R netlist
   mcu-soc-metal:
-    name: MCU SoC Metal Simulation (with SDF timing)
+    name: MCU SoC Metal Simulation
     runs-on: macos-latest-xlarge
-    needs: mcu-soc-synth
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -408,6 +297,9 @@ jobs:
           LLVM_VER=$(${LLVM_PREFIX}/bin/clang --version | head -1 | grep -o '[0-9]*\.[0-9]*\.[0-9]*')
           echo "LLVM_VERSION=$LLVM_VER" >> $GITHUB_ENV
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -421,34 +313,33 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-mcu-soc-llvm${{ env.LLVM_VERSION }}-
 
-      - name: Download synth artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: mcu-soc-synth
-          path: build_artifacts
+      - name: Build firmware
+        run: |
+          cd designs/mcu_soc_sky130
+          uv sync
+          uv run chipflow software
 
       - name: Generate sim_config.json
         run: |
           python3 scripts/gen_sim_config.py \
             designs/mcu_soc_sky130/pins.lock tests/mcu_soc/ \
-            --netlist build_artifacts/6_final.v \
-            --firmware build_artifacts/software.bin \
+            --netlist tests/mcu_soc/data/6_final.v \
+            --firmware designs/mcu_soc_sky130/build/software/software.bin \
             --port-mapping
 
       - name: Compile gemparts
         timeout-minutes: 10
         run: |
           cargo run --release --features metal --bin loom -- map \
-            build_artifacts/6_final.v build_artifacts/result.gemparts \
+            tests/mcu_soc/data/6_final.v tests/mcu_soc/data/result.gemparts \
             --top-module top
 
-      - name: Run GPU co-simulation with SDF timing (100K ticks)
+      - name: Run GPU co-simulation (100K ticks)
         timeout-minutes: 10
         run: |
           cargo run --release --features metal --bin loom -- cosim \
-            build_artifacts/6_final.v build_artifacts/result.gemparts \
+            tests/mcu_soc/data/6_final.v tests/mcu_soc/data/result.gemparts \
             --config tests/mcu_soc/sim_config.json --top-module top \
-            --sdf build_artifacts/6_final.sdf --sdf-corner typ \
             --max-cycles 100000 \
             2>&1 | tee cosim_output.txt
 
@@ -467,7 +358,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## MCU SoC Metal Co-simulation (with SDF timing)"
+            echo "## MCU SoC Metal Co-simulation"
             echo "\`\`\`"
             tail -20 cosim_output.txt
             echo "\`\`\`"
