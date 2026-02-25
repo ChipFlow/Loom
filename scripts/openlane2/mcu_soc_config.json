@@ -39,6 +39,9 @@
         }
     },
     "meta": {
-        "version": 2
+        "version": 2,
+        "substituting_steps": {
+            "Odb.CheckDesignAntennaProperties": null
+        }
     }
 }
