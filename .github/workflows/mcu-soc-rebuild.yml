@@ -39,7 +39,7 @@ jobs:
         run: uv run --with cf-ipm -- ipm install CF_SRAM_1024x32
 
       - name: Pull librelane image
-        run: docker pull ghcr.io/robtaylor/librelane:latest
+        run: docker pull ghcr.io/robtaylor/librelane:dev-x86_64
 
       - name: Synthesis (Yosys)
         run: |
@@ -47,7 +47,7 @@ jobs:
             -v "$PWD/designs/mcu_soc_sky130/build:/design" \
             -v "$PWD/sram:/sram:ro" \
             -v "$PWD/scripts/openlane2/synth.ys:/design/synth.ys:ro" \
-            ghcr.io/robtaylor/librelane:latest \
+            ghcr.io/robtaylor/librelane:dev-x86_64 \
             yosys /design/synth.ys
 
       - name: Place and Route (librelane)
@@ -58,7 +58,7 @@ jobs:
             -v "$PWD/ip/CF_SRAM_1024x32:/sram_ip:ro" \
             -v "$PWD/scripts/openlane2/mcu_soc_config.json:/design/config.json:ro" \
             -w /design \
-            ghcr.io/robtaylor/librelane:latest \
+            ghcr.io/robtaylor/librelane:dev-x86_64 \
             librelane /design/config.json
 
       - name: Extract artifacts
