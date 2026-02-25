@@ -13,6 +13,12 @@
     "PL_RESIZER_HOLD_SLACK_MARGIN": -0.5,
     "RUN_LINTER": false,
     "SYNTH_ELABORATE_ONLY": true,
+    "PDN_MACRO_CONNECTIONS": [
+        "soc\\.sram\\.mem\\.0\\.0 VPWR VGND vpwrp vgnd",
+        "soc\\.sram\\.mem\\.0\\.0 VPWR VGND vpwra vgnd",
+        "soc\\.sram\\.mem\\.0\\.0 VPWR VGND vpwrm vgnd",
+        "soc\\.sram\\.mem\\.0\\.0 VPWR VGND vpb vnb"
+    ],
     "MACROS": {
         "CF_SRAM_1024x32": {
             "instances": {
