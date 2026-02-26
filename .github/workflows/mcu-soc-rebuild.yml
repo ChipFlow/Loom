@@ -89,17 +89,32 @@ jobs:
           RUN_DIR=$(find designs/mcu_soc_sky130/build/runs -maxdepth 1 -name 'RUN_*' -type d | sort -r | head -1)
           echo "Using run directory: $RUN_DIR"
 
-          # Verify P&R produced a netlist (may exist even if sign-off checks failed)
-          if ! ls "$RUN_DIR"/final/nl/*.nl.v 1>/dev/null 2>&1; then
-            echo "::error::No post-P&R netlist found. P&R failed before generating output."
-            exit 1
+          # Try final netlist first, fall back to last intermediate step netlist.
+          # Librelane only populates final/ after all sign-off checks pass;
+          # the antenna check crashes on SRAM LEF missing gate info, but the
+          # post-fill-insertion netlist is functionally identical for simulation.
+          if ls "$RUN_DIR"/final/nl/*.nl.v 1>/dev/null 2>&1; then
+            echo "Using final netlist"
+            cp "$RUN_DIR"/final/nl/*.nl.v tests/mcu_soc/data/6_final_raw.v
+          else
+            echo "::warning::final/nl/ not found, using last intermediate netlist"
+            LAST_NL=$(find "$RUN_DIR" -path '*/final/*' -prune -o -name 'top.nl.v' -print | sort -r | head -1)
+            if [ -z "$LAST_NL" ]; then
+              echo "::error::No netlist found in any P&R step. P&R failed before generating output."
+              exit 1
+            fi
+            echo "Using intermediate netlist: $LAST_NL"
+            cp "$LAST_NL" tests/mcu_soc/data/6_final_raw.v
           fi
 
-          # Post-P&R netlist (unpowered)
-          cp "$RUN_DIR"/final/nl/*.nl.v tests/mcu_soc/data/6_final_raw.v
-
           # SDF timing (nom corner)
-          cp "$RUN_DIR"/final/sdf/*.sdf tests/mcu_soc/data/6_final.sdf 2>/dev/null || true
+          if ls "$RUN_DIR"/final/sdf/*.sdf 1>/dev/null 2>&1; then
+            cp "$RUN_DIR"/final/sdf/*.sdf tests/mcu_soc/data/6_final.sdf
+          else
+            # Fall back to intermediate SDF from parasitic extraction step
+            LAST_SDF=$(find "$RUN_DIR" -path '*/final/*' -prune -o -name '*.sdf' -print | sort -r | head -1)
+            [ -n "$LAST_SDF" ] && cp "$LAST_SDF" tests/mcu_soc/data/6_final.sdf || true
+          fi
 
           # SDC constraints
           cp "$RUN_DIR"/final/sdc/*.sdc tests/mcu_soc/data/6_final.sdc 2>/dev/null || true
