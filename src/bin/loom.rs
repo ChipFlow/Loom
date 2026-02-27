@@ -569,6 +569,10 @@ fn cmd_sim(args: SimArgs) {
         // Timed VCD: extract arrivals and use timed writer
         let rio = design.script.reg_io_state_size as usize;
         let arrival_states = vcd_io::split_arrival_states(&gpu_states[..], &design.script);
+        // Debug: show arrival statistics
+        let nonzero_count = arrival_states.iter().filter(|&&v| v != 0).count();
+        clilog::info!("Arrival states: {} total, {} non-zero",
+            arrival_states.len(), nonzero_count);
         let xmask_states = if design.script.xprop_enabled {
             let eff = design.script.effective_state_size() as usize;
             let num_snapshots = gpu_states.len() / eff;
