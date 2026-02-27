@@ -1274,7 +1274,7 @@ fn build_flattened_script_v1(
         // We iterate over all parts in stage/block order.
         let mut part_x_flags: Vec<Vec<bool>> = Vec::new();
 
-        for (stage_parts, &staged) in parts_in_stages.iter().copied().zip(stageds.iter()) {
+        for (stage_parts, &_staged) in parts_in_stages.iter().copied().zip(stageds.iter()) {
             let mut stage_flags = vec![false; stage_parts.len()];
             for (part_id, part) in stage_parts.iter().enumerate() {
                 // Check all hier levels in all stages of this partition
@@ -1364,13 +1364,12 @@ fn build_flattened_script_v1(
                     // if num_stages == 0, it's just 256 words (dummy).
                     let num_stages = blocks_data[offset] as usize;
                     if num_stages == 0 {
-                        offset += NUM_THREADS_V1;
                         break; // dummy partition means no more in this block
                     }
                     let num_gr_rounds = blocks_data[offset + 6] as usize;
-                    let num_srams = blocks_data[offset + 4] as usize;
-                    let num_ios = blocks_data[offset + 2] as usize;
-                    let num_dup = blocks_data[offset + 7] as usize;
+                    let _num_srams = blocks_data[offset + 4] as usize;
+                    let _num_ios = blocks_data[offset + 2] as usize;
+                    let _num_dup = blocks_data[offset + 7] as usize;
                     // Script size = metadata(256) + global_read(2*rounds*256) +
                     //   boomerang(num_stages * 5*256*4) + sram_dup(5*256*4) + clken(5*256*4)
                     offset += NUM_THREADS_V1; // metadata
@@ -1737,14 +1736,16 @@ impl FlattenedScriptV1 {
 
         for aigpin in 1..=aig.num_aigpins {
             let origin = &aig.aigpin_cell_origins[aigpin];
-            let delay = if let Some((cellid, _cell_type, output_pin_name)) = origin.first() {
-                // This AIG pin has a cell origin — look up its delay.
+            let delay = if !origin.is_empty() {
+                // This AIG pin has cell origin(s) — sum delays across all origins.
+                // When multiple cells share an AIG pin (e.g., inverter chain collapsed
+                // to a single wire), their delays form a serial chain and must be summed.
                 let mut total_rise: u64 = 0;
                 let mut total_fall: u64 = 0;
                 let mut any_matched = false;
                 let mut any_unmatched = false;
 
-                {
+                for (cellid, _cell_type, output_pin_name) in origin {
                     if let Some(sdf_path) = cellid_to_sdf_path.get(cellid) {
                         if let Some(sdf_cell) = sdf.get_cell(sdf_path) {
                             let iopath = sdf_cell
@@ -2056,7 +2057,6 @@ mod sdf_delay_tests {
     // accumulation doesn't apply. Disabled until the type is reconciled.
 
     #[test]
-    #[ignore = "requires multi-origin aigpin_cell_originss (Vec<Vec<...>>) not yet available"]
     fn test_accumulated_delay_analytical() {
         // Verify accumulated delay matches hand-computed SDF sum.
         // SDF typ corner values (middle of min:typ:max triples):
