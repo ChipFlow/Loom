@@ -45,10 +45,17 @@ fn main() {
             .file("csrc/kernel_v1.hip.cpp");
         cl_hip.compile("gemhip");
         println!("cargo:rustc-link-lib=static=gemhip");
-        println!("cargo:rustc-link-lib=dylib=amdhip64");
-        // Add ROCm library search path (default /opt/rocm/lib).
-        let rocm_path = std::env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".to_string());
-        println!("cargo:rustc-link-search=native={}/lib", rocm_path);
+        // On AMD backend, link amdhip64; on NVIDIA backend, link cudart.
+        // The kernel_v1.hip.cpp wrapper handles both via hipcc compilation.
+        if std::env::var("HIP_PLATFORM").as_deref() == Ok("nvidia") {
+            println!("cargo:rustc-link-lib=dylib=cudart");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=amdhip64");
+            let rocm_path = std::env::var("ROCM_PATH")
+                .unwrap_or_else(|_| "/opt/rocm".to_string());
+            println!("cargo:rustc-link-search=native={}/lib", rocm_path);
+        }
+        println!("cargo:rerun-if-env-changed=HIP_PLATFORM");
         ucc::bindgen(["csrc/kernel_v1.hip.cpp"], "kernel_v1_hip.rs");
         ucc::export_csrc();
         ucc::make_compile_commands(&[&cl_hip]);
