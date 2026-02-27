@@ -270,15 +270,15 @@ jobs:
 
       - name: Install ROCm/HIP (NVIDIA backend)
         run: |
-          # Add ROCm APT repository
-          sudo mkdir -p --mode=0755 /etc/apt/keyrings
-          wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | \
-            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
-          # Detect Ubuntu codename for the ROCm repo
+          # Import ROCm GPG signing key (use apt-key for broadest compatibility)
+          wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | sudo apt-key add -
+          # Also try fetching the specific key from keyserver as fallback
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 9386B48A1A693C5C 2>/dev/null || true
+          # Detect Ubuntu codename; ROCm 6.2 supports jammy (22.04) and noble (24.04)
           CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.2.4 ${CODENAME} main" | \
+          echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/6.2.4 ${CODENAME} main" | \
             sudo tee /etc/apt/sources.list.d/rocm.list
-          # Pin ROCm packages to avoid conflicts
+          # Pin ROCm packages to avoid conflicts with NVIDIA packages
           printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' | \
             sudo tee /etc/apt/preferences.d/rocm-pin-600
           sudo apt-get update
