@@ -102,24 +102,34 @@ jobs:
           # Librelane only populates final/ after all sign-off checks pass;
           # the antenna check crashes on SRAM LEF missing gate info, but the
           # post-route netlist is functionally identical for simulation.
+          #
+          # IMPORTANT: Avoid the post-fill-insertion netlist (step 48) which
+          # includes ~4M filler/decap instances (200+ MB). Use the detailed
+          # routing netlist (step 40) which is functionally identical for
+          # simulation at ~5 MB.
           if ls "$RUN_DIR"/final/nl/*.nl.v 1>/dev/null 2>&1; then
             echo "Using final netlist"
             cp "$RUN_DIR"/final/nl/*.nl.v tests/mcu_soc/data/6_final_raw.v
           else
             echo "::warning::final/nl/ not found, searching for intermediate netlist"
-            # Search broadly: .nl.v files, then top.v, then any .v in step dirs
-            LAST_NL=$(find "$RUN_DIR" -name '*.nl.v' 2>/dev/null | sort -r | head -1)
+            # Prefer post-routing netlist (before fill insertion adds millions of filler cells)
+            LAST_NL=$(find "$RUN_DIR" -path '*detailedrouting*' -name '*.nl.v' 2>/dev/null | sort -r | head -1)
+            # Fall back to any .nl.v except fill insertion
             if [ -z "$LAST_NL" ]; then
-              LAST_NL=$(find "$RUN_DIR" -name 'top.v' 2>/dev/null | sort -r | head -1)
+              LAST_NL=$(find "$RUN_DIR" -name '*.nl.v' -not -path '*fillinsertion*' 2>/dev/null | sort -r | head -1)
+            fi
+            # Last resort: any .nl.v
+            if [ -z "$LAST_NL" ]; then
+              LAST_NL=$(find "$RUN_DIR" -name '*.nl.v' 2>/dev/null | sort -r | head -1)
             fi
             if [ -z "$LAST_NL" ]; then
               echo "::error::No netlist found in any P&R step."
               echo "::error::P&R may have failed before generating output."
-              echo "All files in run dir:"
               find "$RUN_DIR" -type f | head -50
               exit 1
             fi
-            echo "Using intermediate netlist: $LAST_NL"
+            NL_SIZE=$(du -h "$LAST_NL" | cut -f1)
+            echo "Using intermediate netlist: $LAST_NL ($NL_SIZE)"
             cp "$LAST_NL" tests/mcu_soc/data/6_final_raw.v
           fi
 
