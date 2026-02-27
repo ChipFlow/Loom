@@ -280,19 +280,21 @@ jobs:
           sudo apt-get update
           # hip-runtime-nvidia pulls nvidia driver packages that conflict with the
           # server-variant drivers pre-installed on the GPU runner. Download the HIP
-          # packages and force-install them, skipping unresolvable driver deps.
-          cd /tmp
-          apt-get download hip-runtime-nvidia hip-dev hipcc-nvidia hip-runtime-nvidia-dev 2>&1 | tee /tmp/apt-download.log || true
-          # Also grab any dependencies that can be downloaded
-          apt-get download rocm-core hip-base 2>&1 >> /tmp/apt-download.log || true
-          ls -la /tmp/*.deb || true
-          sudo dpkg --force-depends --force-conflicts -i /tmp/*.deb || true
+          # .deb files and force-install them, bypassing the driver dep conflicts.
+          DLDIR=$(mktemp -d)
+          pushd "$DLDIR"
+          sudo apt-get download \
+            hip-runtime-nvidia hip-dev hipcc-nvidia hip-runtime-nvidia-dev \
+            rocm-core hip-base 2>&1 || true
+          ls -la *.deb 2>/dev/null
+          sudo dpkg --force-depends --force-conflicts -i *.deb
+          popd
           # Verify hipcc is available
+          /opt/rocm/bin/hipcc --version
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
           echo "HIP_PLATFORM=nvidia" >> $GITHUB_ENV
           echo "HIP_COMPILER=nvcc" >> $GITHUB_ENV
           echo "HIP_RUNTIME=cuda" >> $GITHUB_ENV
-          /opt/rocm/bin/hipcc --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
