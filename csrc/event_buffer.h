@@ -15,7 +15,7 @@ typedef atomic_uint atomic_u32;
 #else
 #include <stdint.h>
 typedef uint32_t u32;
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP_PLATFORM_AMD__)
 typedef unsigned int atomic_u32;
 #endif
 #endif
@@ -85,7 +85,7 @@ inline void write_sim_control_event(
 }
 #endif
 
-#ifdef __CUDACC__
+#if defined(__CUDACC__) || defined(__HIP_PLATFORM_AMD__)
 __device__ inline void write_event(
     EventBuffer* buffer,
     u32 event_type,

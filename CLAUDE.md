@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GEM (GPU-accelerated Emulator-inspired RTL simulation) is a GPU-accelerated RTL logic simulator originally developed by NVIDIA Research. It works like an FPGA-based RTL emulator: it synthesizes designs into an and-inverter graph (AIG), maps them to a virtual manycore Boolean processor, then emulates on GPUs for 5-40X speedup over CPU-based simulators.
 
-Supports two GPU backends: **CUDA** (NVIDIA GPUs) and **Metal** (Apple Silicon Macs).
+Supports three GPU backends: **CUDA** (NVIDIA GPUs), **HIP** (AMD GPUs via ROCm), and **Metal** (Apple Silicon Macs).
 
 **Key limitation**: Only supports non-interactive testbenches with static input waveforms (VCD). Synchronous logic only - no latches or async sequential logic.
 
 ## Build Commands
 
-Requires Rust toolchain (via rustup.rs) and either CUDA or Metal support.
+Requires Rust toolchain (via rustup.rs) and either CUDA, HIP (ROCm), or Metal support.
 
 ```bash
 # Initialize submodules (required first time)
@@ -26,6 +26,9 @@ cargo run -r --features metal --bin loom -- sim --help
 
 # CUDA simulation (Linux/NVIDIA)
 cargo run -r --features cuda --bin loom -- sim --help
+
+# HIP simulation (Linux/AMD)
+cargo run -r --features hip --bin loom -- sim --help
 ```
 
 ## Typical Workflow
@@ -35,7 +38,7 @@ cargo run -r --features cuda --bin loom -- sim --help
 3. **Loom mapping**: `loom map gatelevel.gv result.gemparts`
 4. **Simulation**: `loom sim` with `gatelevel.gv result.gemparts input.vcd output.vcd NUM_BLOCKS`
 
-Set `NUM_BLOCKS` to 2× the number of GPU streaming multiprocessors (SMs) for CUDA, or 1 for Metal.
+Set `NUM_BLOCKS` to 2× the number of GPU streaming multiprocessors (SMs) for CUDA, 2× the number of Compute Units (CUs) for HIP/AMD, or 1 for Metal.
 
 ## Architecture
 
@@ -57,6 +60,7 @@ NetlistDB (Verilog) → AIG → StagedAIG → Partitions → FlattenedScript →
 ### GPU Kernels (`csrc/`)
 
 - **`kernel_v1.cu`/`kernel_v1_impl.cuh`**: CUDA simulation kernel implementing the Boolean processor
+- **`kernel_v1.hip.cpp`**: HIP simulation kernel (AMD GPUs via ROCm) — shares `kernel_v1_impl.cuh` with CUDA
 - **`kernel_v1.metal`**: Metal simulation kernel (macOS Apple Silicon)
 
 ### Binary Tools (`src/bin/`)
@@ -101,6 +105,9 @@ cargo run -r --features cuda --bin loom -- sim ... --check-with-cpu
 
 # Limit simulation cycles (CUDA)
 cargo run -r --features cuda --bin loom -- sim ... --max-cycles 1000
+
+# HIP equivalent (AMD)
+cargo run -r --features hip --bin loom -- sim ... --max-cycles 1000
 
 # Metal equivalent
 cargo run -r --features metal --bin loom -- sim ... --max-cycles 1000

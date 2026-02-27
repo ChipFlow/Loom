@@ -33,6 +33,24 @@ fn main() {
         ucc::make_compile_commands(&[&cl_cuda]);
     }
 
+    #[cfg(feature = "hip")]
+    {
+        println!("Building HIP source files for GEM...");
+        let csrc_headers = ucc::import_csrc();
+        let mut cl_hip = ucc::cl_hip();
+        cl_hip
+            .debug(false)
+            .opt_level(3)
+            .include(&csrc_headers)
+            .file("csrc/kernel_v1.hip.cpp");
+        cl_hip.compile("gemhip");
+        println!("cargo:rustc-link-lib=static=gemhip");
+        println!("cargo:rustc-link-lib=dylib=amdhip64");
+        ucc::bindgen(["csrc/kernel_v1.hip.cpp"], "kernel_v1_hip.rs");
+        ucc::export_csrc();
+        ucc::make_compile_commands(&[&cl_hip]);
+    }
+
     #[cfg(feature = "metal")]
     {
         println!("Building Metal shader for GEM...");

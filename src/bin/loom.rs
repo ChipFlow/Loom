@@ -34,7 +34,8 @@ enum Commands {
     ///
     /// Reads a gate-level netlist and partition file, processes a VCD input
     /// waveform through the GPU simulator, and writes the output VCD.
-    /// Requires building with `--features metal` (macOS) or `--features cuda` (Linux).
+    /// Requires building with `--features metal` (macOS), `--features cuda` (Linux/NVIDIA),
+    /// or `--features hip` (Linux/AMD).
     Sim(SimArgs),
 
     /// Run a GPU co-simulation with SPI flash and UART models (Metal only).
@@ -449,12 +450,13 @@ fn cmd_sim(args: SimArgs) {
     let offsets_timestamps = parsed.offsets_timestamps;
     let num_cycles = offsets_timestamps.len();
 
-    #[cfg(not(any(feature = "metal", feature = "cuda")))]
+    #[cfg(not(any(feature = "metal", feature = "cuda", feature = "hip")))]
     {
         eprintln!(
             "loom sim requires GPU support. Build with:\n\
              \n  cargo build -r --features metal --bin loom   (macOS)\n\
-             \n  cargo build -r --features cuda --bin loom    (Linux/NVIDIA)\n"
+             \n  cargo build -r --features cuda --bin loom    (Linux/NVIDIA)\n\
+             \n  cargo build -r --features hip --bin loom     (Linux/AMD)\n"
         );
         std::process::exit(1);
     }
@@ -479,8 +481,18 @@ fn cmd_sim(args: SimArgs) {
         )
     };
 
+    #[cfg(all(feature = "hip", not(feature = "metal"), not(feature = "cuda")))]
+    let gpu_states = {
+        sim_hip(
+            &design,
+            &input_states,
+            &offsets_timestamps,
+            &timing_constraints,
+        )
+    };
+
     // CPU sanity check
-    #[cfg(any(feature = "metal", feature = "cuda"))]
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
     if args.check_with_cpu {
         if design.script.xprop_enabled {
             let rio = design.script.reg_io_state_size as usize;
@@ -514,13 +526,13 @@ fn cmd_sim(args: SimArgs) {
     }
 
     // Post-simulation timing analysis
-    #[cfg(any(feature = "metal", feature = "cuda"))]
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
     if args.enable_timing {
         run_timing_analysis(&mut design.aig, &args);
     }
 
     // Write output VCD
-    #[cfg(any(feature = "metal", feature = "cuda"))]
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
     if design.script.xprop_enabled {
         let rio = design.script.reg_io_state_size as usize;
         let (values, xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
@@ -1086,7 +1098,181 @@ fn sim_cuda(
     input_states_uvec[..].to_vec()
 }
 
-#[cfg(any(feature = "metal", feature = "cuda"))]
+#[cfg(feature = "hip")]
+fn sim_hip(
+    design: &gem::sim::setup::LoadedDesign,
+    input_states: &[u32],
+    offsets_timestamps: &[(usize, u64)],
+    timing_constraints: &Option<Vec<u32>>,
+) -> Vec<u32> {
+    use gem::aig::SimControlType;
+    use gem::display::format_display_message;
+    use gem::event_buffer::{AssertAction, AssertConfig, EventType, SimStats};
+    use ulib::{AsUPtrMut, Device, UVec};
+
+    mod ucci_hip {
+        include!(concat!(env!("OUT_DIR"), "/uccbind/kernel_v1_hip.rs"));
+    }
+
+    let script = &design.script;
+    let device = Device::HIP(0);
+    let num_cycles = offsets_timestamps.len();
+
+    // When xprop is enabled, expand the value-only state buffer to include X-mask
+    let expanded_states = if script.xprop_enabled {
+        gem::sim::vcd_io::expand_states_for_xprop(input_states, script)
+    } else {
+        input_states.to_vec()
+    };
+    let mut input_states_uvec: UVec<_> = expanded_states.into();
+    input_states_uvec.as_mut_uptr(device);
+    let mut sram_storage = UVec::new_zeroed(script.sram_storage_size as usize, device);
+    // SRAM X-mask shadow: all 0xFFFFFFFF (unknown) initially when xprop enabled
+    let sram_xmask_size = if script.xprop_enabled {
+        script.sram_storage_size as usize
+    } else {
+        1 // Kernel checks is_x_capable before reading
+    };
+    let mut sram_xmask: UVec<u32> = if script.xprop_enabled {
+        let v: UVec<u32> = vec![0xFFFF_FFFFu32; sram_xmask_size].into();
+        v
+    } else {
+        UVec::new_zeroed(sram_xmask_size, device)
+    };
+
+    // Launch GPU simulation
+    device.synchronize();
+    let timer_sim = clilog::stimer!("simulation");
+
+    if timing_constraints.is_some() {
+        clilog::warn!(
+            "Timing constraints requested but HIP timed kernel not yet wired; \
+             running without GPU-side timing checks"
+        );
+    }
+    ucci_hip::simulate_v1_noninteractive_simple_scan(
+        script.num_blocks,
+        script.num_major_stages,
+        &script.blocks_start,
+        &script.blocks_data,
+        &mut sram_storage,
+        &mut sram_xmask,
+        num_cycles,
+        script.effective_state_size() as usize,
+        &mut input_states_uvec,
+        device,
+    );
+
+    device.synchronize();
+    clilog::finish!(timer_sim);
+
+    // Process display outputs (post-sim scan)
+    if !script.display_positions.is_empty() {
+        clilog::info!(
+            "Processing {} display nodes",
+            script.display_positions.len()
+        );
+
+        let eff_size = script.effective_state_size() as usize;
+        let states_slice = &input_states_uvec[eff_size..];
+        for cycle_i in 0..num_cycles {
+            let cycle_offset = cycle_i * eff_size;
+            for (_cell_id, enable_pos, format, arg_positions, arg_widths) in
+                &script.display_positions
+            {
+                let word_idx = (*enable_pos >> 5) as usize;
+                let bit_idx = *enable_pos & 31;
+                let abs_word_idx = cycle_offset + word_idx;
+                if abs_word_idx < states_slice.len() {
+                    let enable = (states_slice[abs_word_idx] >> bit_idx) & 1;
+                    if enable == 1 {
+                        let mut args: Vec<u64> = Vec::new();
+                        for &arg_pos in arg_positions {
+                            let arg_word_idx = (arg_pos >> 5) as usize;
+                            let arg_bit_idx = arg_pos & 31;
+                            let abs_arg_idx = cycle_offset + arg_word_idx;
+                            if abs_arg_idx < states_slice.len() {
+                                let val = ((states_slice[abs_arg_idx] >> arg_bit_idx) & 1) as u64;
+                                args.push(val);
+                            }
+                        }
+                        let message = format_display_message(format, &args, arg_widths);
+                        print!("{}", message);
+                    }
+                }
+            }
+        }
+    }
+
+    // Process assertion conditions (post-sim scan)
+    if !script.assertion_positions.is_empty() {
+        clilog::info!(
+            "Processing {} assertion nodes",
+            script.assertion_positions.len()
+        );
+
+        let assert_config = AssertConfig::default();
+        let mut sim_stats = SimStats::default();
+
+        let eff_size = script.effective_state_size() as usize;
+        let states_slice = &input_states_uvec[eff_size..];
+        for cycle_i in 0..num_cycles {
+            let cycle_offset = cycle_i * eff_size;
+            for &(_cell_id, pos, _message_id, control_type) in &script.assertion_positions {
+                let word_idx = (pos >> 5) as usize;
+                let bit_idx = pos & 31;
+                let abs_word_idx = cycle_offset + word_idx;
+                if abs_word_idx < states_slice.len() {
+                    let condition = (states_slice[abs_word_idx] >> bit_idx) & 1;
+                    if condition == 1 {
+                        let event_type = match control_type {
+                            None => EventType::AssertFail,
+                            Some(SimControlType::Stop) => EventType::Stop,
+                            Some(SimControlType::Finish) => EventType::Finish,
+                        };
+                        clilog::warn!(
+                            "[cycle {}] Assertion condition fired: pos={}, type={:?}",
+                            cycle_i,
+                            pos,
+                            control_type
+                        );
+                        match (event_type, assert_config.on_failure) {
+                            (EventType::AssertFail, AssertAction::Log) => {
+                                sim_stats.assertion_failures += 1;
+                            }
+                            (EventType::AssertFail, AssertAction::Terminate) => {
+                                clilog::error!("Assertion failed - terminating simulation");
+                                sim_stats.assertion_failures += 1;
+                                std::process::exit(1);
+                            }
+                            (EventType::Stop, _) => {
+                                clilog::info!("$stop encountered at cycle {}", cycle_i);
+                                sim_stats.stop_count += 1;
+                                break;
+                            }
+                            (EventType::Finish, _) => {
+                                clilog::info!("$finish encountered at cycle {}", cycle_i);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if sim_stats.assertion_failures > 0 {
+            clilog::warn!(
+                "Simulation completed with {} assertion failures",
+                sim_stats.assertion_failures
+            );
+        }
+    }
+
+    input_states_uvec[..].to_vec()
+}
+
+#[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
 fn run_timing_analysis(aig: &mut AIG, args: &SimArgs) {
     use gem::liberty_parser::TimingLibrary;
 
