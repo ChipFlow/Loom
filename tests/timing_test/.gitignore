@@ -28,3 +28,6 @@ gpu_events.json
 !sky130_timing/*.v
 !sky130_timing/*.vcd
 !inv_chain_pnr/inv_chain_stimulus.vcd
+!inv_chain_pnr/inv_chain.gemparts
+!multi_depth/multi_depth_stimulus.vcd
+!multi_depth/multi_depth.gemparts
