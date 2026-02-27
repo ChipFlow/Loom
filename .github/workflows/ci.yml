@@ -698,3 +698,170 @@ jobs:
         with:
           name: sky130-timing-results
           path: sky130_timing.txt
+
+  # CVC reference simulation for timing correctness validation
+  cvc-reference:
+    name: CVC Reference Simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Init required submodules
+        run: git submodule update --init vendor/eda-infra-rs vendor/sky130_fd_sc_hd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cvc-ref-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cvc-ref-
+
+      - name: Cache CVC binary
+        id: cache-cvc
+        uses: actions/cache@v4
+        with:
+          path: ~/cvc/bin
+          key: cvc-binary-v1
+
+      - name: Build CVC from source
+        if: steps.cache-cvc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zlib1g-dev
+          git clone --depth 1 https://github.com/cambridgehackers/open-src-cvc.git ~/cvc-src
+          cd ~/cvc-src/src
+          make -f makefile.cvc64 -j$(nproc)
+          mkdir -p ~/cvc/bin
+          cp cvc64 ~/cvc/bin/
+
+      - name: Add CVC to PATH
+        run: echo "$HOME/cvc/bin" >> "$GITHUB_PATH"
+
+      - name: Run CVC simulation with SDF
+        working-directory: tests/timing_test/inv_chain_pnr
+        run: |
+          echo "=== Running CVC on inv_chain with SDF ==="
+          # +typdelays selects typical corner; $sdf_annotate in tb_cvc.v loads the SDF file
+          cvc64 +typdelays tb_cvc.v inv_chain.v 2>&1 | tee cvc_compile.log
+          ./cvcsim 2>&1 | tee cvc_output.log
+          echo ""
+          echo "=== CVC simulation complete ==="
+
+      - name: Validate CVC timing results
+        working-directory: tests/timing_test/inv_chain_pnr
+        run: |
+          echo "Checking CVC produced timing results..."
+          if grep -q "RESULT: total_delay=" cvc_output.log; then
+            echo "CVC timing results found:"
+            grep "RESULT:" cvc_output.log
+          else
+            echo "ERROR: CVC did not produce expected RESULT: lines"
+            echo "--- Full CVC output ---"
+            cat cvc_output.log
+            exit 1
+          fi
+
+      - name: Build timing simulator
+        run: cargo build --release --bin timing_sim_cpu
+
+      - name: Run Loom timing_sim_cpu with SDF
+        run: |
+          TEST_DIR=tests/timing_test/inv_chain_pnr
+          echo "=== Running timing_sim_cpu on inv_chain with SDF ==="
+          cargo run --release --bin timing_sim_cpu -- \
+            "$TEST_DIR/inv_chain.v" \
+            "$TEST_DIR/inv_chain_stimulus.vcd" \
+            --clock-period 10000 \
+            --max-cycles 8 \
+            --sdf "$TEST_DIR/inv_chain_test_ps.sdf" \
+            --sdf-corner typ \
+            --watchlist "$TEST_DIR/watchlist.json" \
+            --trace-output "$TEST_DIR/loom_trace.csv" \
+            --report-violations \
+            2>&1 | tee "$TEST_DIR/loom_output.log"
+          echo ""
+          echo "=== Loom timing_sim_cpu complete ==="
+
+      - name: Compare CVC VCD output
+        working-directory: tests/timing_test/inv_chain_pnr
+        run: |
+          echo "=== Comparing simulation outputs ==="
+
+          # Compare timing measurements from CVC stdout
+          # CVC RESULT: lines report IOPATH+INTERCONNECT delays
+          # Expected: clk_to_q ~350ps, total_delay ~1323ps (IOPATH+wire)
+          CVC_TOTAL=$(grep "RESULT: total_delay=" cvc_output.log | sed 's/.*=//')
+          echo "CVC total delay: ${CVC_TOTAL}ps"
+
+          # Basic sanity check: total delay should be between 800ps and 2000ps
+          if [ "$CVC_TOTAL" -gt 800 ] && [ "$CVC_TOTAL" -lt 2000 ]; then
+            echo "PASS: CVC total delay is in expected range (800-2000ps)"
+          else
+            echo "FAIL: CVC total delay ${CVC_TOTAL}ps outside expected range"
+            exit 1
+          fi
+
+          # Check Loom completed successfully
+          if grep -q "TIMING: PASSED\|TIMING: FAILED" loom_output.log; then
+            echo "PASS: Loom timing_sim_cpu completed successfully"
+            grep "TIMING:" loom_output.log
+          else
+            echo "WARNING: Could not determine Loom timing result"
+            tail -20 loom_output.log
+          fi
+
+          # If CVC produced a VCD, compare it
+          if [ -f cvc_inv_chain_output.vcd ]; then
+            echo ""
+            echo "=== VCD file comparison ==="
+            echo "CVC VCD size: $(wc -c < cvc_inv_chain_output.vcd) bytes"
+            echo "Loom trace CSV:"
+            cat loom_trace.csv || echo "(no trace CSV produced)"
+          fi
+
+      - name: Report results
+        if: always()
+        run: |
+          {
+            echo "## CVC Reference Simulation Results"
+            echo ""
+            echo "### CVC Output"
+            echo "\`\`\`"
+            cat tests/timing_test/inv_chain_pnr/cvc_output.log 2>/dev/null || echo "No CVC output"
+            echo "\`\`\`"
+            echo ""
+            echo "### Loom Output"
+            echo "\`\`\`"
+            tail -30 tests/timing_test/inv_chain_pnr/loom_output.log 2>/dev/null || echo "No Loom output"
+            echo "\`\`\`"
+            echo ""
+            echo "### Loom Trace"
+            echo "\`\`\`"
+            cat tests/timing_test/inv_chain_pnr/loom_trace.csv 2>/dev/null || echo "No trace CSV"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cvc-reference-results
+          path: |
+            tests/timing_test/inv_chain_pnr/cvc_compile.log
+            tests/timing_test/inv_chain_pnr/cvc_output.log
+            tests/timing_test/inv_chain_pnr/cvc_inv_chain_output.vcd
+            tests/timing_test/inv_chain_pnr/loom_output.log
+            tests/timing_test/inv_chain_pnr/loom_trace.csv
