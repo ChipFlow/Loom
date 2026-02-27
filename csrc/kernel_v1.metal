@@ -30,6 +30,7 @@ struct SimParams {
     usize state_size;
     usize current_cycle;
     usize current_stage;
+    usize arrival_state_offset;  // offset in state buffer for arrival data (0 = disabled)
 };
 
 // Helper function to read VectorRead2 from device memory
@@ -69,7 +70,8 @@ inline void simulate_block_v1(
     device const u32* timing_constraints,
     u32 clock_period_ps,
     device struct EventBuffer* event_buffer,
-    u32 cycle_i
+    u32 cycle_i,
+    int arrival_state_offset  // offset in output_state for arrival data (0 = disabled)
 ) {
     int script_pi = 0;
 
@@ -538,6 +540,12 @@ inline void simulate_block_v1(
                          | clken_perm_x;
                 output_state[xmask_state_offset + io_offset + tid] = wo_x;
             }
+
+            // Write arrival time to global memory for timed VCD output
+            if (arrival_state_offset != 0) {
+                output_state[arrival_state_offset + io_offset + tid] =
+                    (u32)shared_writeout_arrival[tid];
+            }
         }
 
         // DFF timing violation check (per writeout word)
@@ -635,7 +643,8 @@ kernel void simulate_v1_stage(
         constraints_data,
         clock_period_ps,
         event_buffer,
-        (u32)cycle_i
+        (u32)cycle_i,
+        (int)params.arrival_state_offset
     );
 }
 

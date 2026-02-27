@@ -51,7 +51,8 @@ __device__ void simulate_block_v1(
   const u32 *__restrict__ timing_constraints,
   u32 clock_period_ps,
   EventBuffer *__restrict__ event_buffer,
-  u32 cycle_i
+  u32 cycle_i,
+  int arrival_state_offset  // offset in output_state for arrival data (0 = disabled)
   )
 {
   int script_pi = 0;
@@ -520,6 +521,12 @@ __device__ void simulate_block_v1(
                  | clken_perm_x;
         output_state[xmask_state_offset + io_offset + threadIdx.x] = wo_x;
       }
+
+      // Write arrival time to global memory for timed VCD output
+      if(arrival_state_offset != 0) {
+        output_state[arrival_state_offset + io_offset + threadIdx.x] =
+            (u32)shared_writeout_arrival[threadIdx.x];
+      }
     }
 
     // DFF timing violation check (per writeout word)
@@ -605,7 +612,8 @@ __global__ void simulate_v1_noninteractive_simple_scan(
         constraints_data,
         clock_period_ps,
         event_buffer,
-        (u32)cycle_i
+        (u32)cycle_i,
+        0  // arrival_state_offset: CUDA timing VCD not yet supported
         );
       cooperative_groups::this_grid().sync();
     }

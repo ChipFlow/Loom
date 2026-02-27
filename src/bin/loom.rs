@@ -168,6 +168,14 @@ struct SimArgs {
     /// Path to Liberty library file for timing data.
     #[clap(long)]
     liberty: Option<PathBuf>,
+
+    /// Enable timing-accurate VCD output with per-signal arrival times.
+    ///
+    /// Requires --sdf. Signal transitions in the output VCD are offset from
+    /// clock edges by their computed arrival times rather than placed at the
+    /// clock edge.
+    #[clap(long)]
+    timing_vcd: bool,
 }
 
 #[derive(Parser)]
@@ -398,6 +406,16 @@ fn cmd_sim(args: SimArgs) {
 
     #[allow(unused_mut)]
     let mut design = setup::load_design(&design_args);
+
+    // Enable timing arrival readback if --timing-vcd is set
+    if args.timing_vcd {
+        if args.sdf.is_none() {
+            eprintln!("Error: --timing-vcd requires --sdf");
+            std::process::exit(1);
+        }
+        design.script.enable_timing_arrivals();
+    }
+
     let timing_constraints = setup::build_timing_constraints(&design.script);
 
     // Parse input VCD
@@ -496,7 +514,18 @@ fn cmd_sim(args: SimArgs) {
     if args.check_with_cpu {
         if design.script.xprop_enabled {
             let rio = design.script.reg_io_state_size as usize;
-            let (gpu_values, gpu_xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
+            // When timing arrivals are enabled, effective size is 3*rio instead of 2*rio.
+            // Extract values and xmasks manually using the actual effective size.
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut gpu_values_vec = Vec::with_capacity(num_snapshots * rio);
+            let mut gpu_xmasks_vec = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                let base = snap_i * eff;
+                gpu_values_vec.extend_from_slice(&gpu_states[base..base + rio]);
+                gpu_xmasks_vec.extend_from_slice(&gpu_states[base + rio..base + 2 * rio]);
+            }
+            let (gpu_values, gpu_xmasks) = (gpu_values_vec, gpu_xmasks_vec);
             // Build input X-masks: same initial template as expand_states_for_xprop
             let num_input_snaps = input_states.len() / rio;
             let mut xmask_template = vec![0xFFFF_FFFFu32; rio];
@@ -513,6 +542,21 @@ fn cmd_sim(args: SimArgs) {
                 &gpu_values,
                 &input_xmasks,
                 &gpu_xmasks,
+                num_cycles,
+            );
+        } else if design.script.timing_arrivals_enabled {
+            // Extract value-only states for CPU comparison
+            let rio = design.script.reg_io_state_size as usize;
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut values = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                values.extend_from_slice(&gpu_states[snap_i * eff..snap_i * eff + rio]);
+            }
+            gem::sim::cpu_reference::sanity_check_cpu(
+                &design.script,
+                &input_states,
+                &values,
                 num_cycles,
             );
         } else {
@@ -533,7 +577,44 @@ fn cmd_sim(args: SimArgs) {
 
     // Write output VCD
     #[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
-    if design.script.xprop_enabled {
+    if args.timing_vcd && design.script.timing_arrivals_enabled {
+        // Timed VCD: extract arrivals and use timed writer
+        let rio = design.script.reg_io_state_size as usize;
+        let arrival_states = vcd_io::split_arrival_states(&gpu_states[..], &design.script);
+        // Debug: show arrival statistics
+        let nonzero_count = arrival_states.iter().filter(|&&v| v != 0).count();
+        clilog::info!("Arrival states: {} total, {} non-zero",
+            arrival_states.len(), nonzero_count);
+        let xmask_states = if design.script.xprop_enabled {
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut xmasks = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                let base = snap_i * eff + rio;
+                xmasks.extend_from_slice(&gpu_states[base..base + rio]);
+            }
+            Some(xmasks)
+        } else {
+            None
+        };
+        // Extract value-only states (same as split_xprop but works for any layout)
+        let eff = design.script.effective_state_size() as usize;
+        let num_snapshots = gpu_states.len() / eff;
+        let mut values = Vec::with_capacity(num_snapshots * rio);
+        for snap_i in 0..num_snapshots {
+            let base = snap_i * eff;
+            values.extend_from_slice(&gpu_states[base..base + rio]);
+        }
+        vcd_io::write_output_vcd_timed(
+            &mut writer,
+            &output_mapping,
+            &offsets_timestamps,
+            &values,
+            xmask_states.as_deref(),
+            &arrival_states,
+            header.timescale,
+        );
+    } else if design.script.xprop_enabled {
         let rio = design.script.reg_io_state_size as usize;
         let (values, xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
         vcd_io::write_output_vcd_xprop(
@@ -620,11 +701,15 @@ fn sim_metal(
     let num_cycles = offsets_timestamps.len();
 
     // When xprop is enabled, expand the value-only state buffer to include X-mask
-    let expanded_states = if script.xprop_enabled {
+    let mut expanded_states = if script.xprop_enabled {
         gem::sim::vcd_io::expand_states_for_xprop(input_states, script)
     } else {
         input_states.to_vec()
     };
+    // When timing arrivals are enabled, expand further to include arrival section
+    if script.timing_arrivals_enabled {
+        expanded_states = gem::sim::vcd_io::expand_states_for_arrivals(&expanded_states, script);
+    }
     let mut input_states_uvec: UVec<_> = expanded_states.into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage: UVec<u32> = UVec::new_zeroed(script.sram_storage_size as usize, device);
@@ -707,6 +792,7 @@ fn sim_metal(
         state_size: u64,
         current_cycle: u64,
         current_stage: u64,
+        arrival_state_offset: u64,
     }
 
     let assert_config = AssertConfig::default();
@@ -729,6 +815,7 @@ fn sim_metal(
                 state_size: script.effective_state_size() as u64,
                 current_cycle: cycle_i as u64,
                 current_stage: stage_i as u64,
+                arrival_state_offset: script.arrival_state_offset as u64,
             };
 
             let params_buffer = mtl_device.new_buffer_with_data(

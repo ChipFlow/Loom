@@ -229,6 +229,18 @@ pub struct FlattenedScriptV1 {
     /// Equal to `reg_io_state_size` (the X-mask mirrors the value section).
     /// Only meaningful when `xprop_enabled == true`.
     pub xprop_state_offset: u32,
+
+    // === Timing Arrival Readback Fields ===
+
+    /// Whether timing arrival readback is enabled for timed VCD output.
+    /// When true, the state buffer includes an arrival section and the GPU
+    /// kernel writes per-output arrival times to global memory.
+    pub timing_arrivals_enabled: bool,
+
+    /// Offset into the per-cycle state buffer where arrival data begins.
+    /// Equal to `reg_io_state_size * (1 + xprop_enabled as u32)`.
+    /// Only meaningful when `timing_arrivals_enabled == true`.
+    pub arrival_state_offset: u32,
 }
 
 fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
@@ -1401,6 +1413,9 @@ fn build_flattened_script_v1(
         xprop_enabled,
         partition_x_capable,
         xprop_state_offset,
+        // Timing arrival readback fields - enabled later via --timing-vcd
+        timing_arrivals_enabled: false,
+        arrival_state_offset: 0,
     }
 }
 
@@ -1411,11 +1426,28 @@ impl FlattenedScriptV1 {
     /// `[values (reg_io_state_size) | xmask (reg_io_state_size)]`.
     /// The kernel indexes into the X-mask section at offset `xprop_state_offset`.
     pub fn effective_state_size(&self) -> u32 {
+        let mut size = self.reg_io_state_size;
         if self.xprop_enabled {
-            self.reg_io_state_size * 2
-        } else {
-            self.reg_io_state_size
+            size += self.reg_io_state_size;
         }
+        if self.timing_arrivals_enabled {
+            size += self.reg_io_state_size;
+        }
+        size
+    }
+
+    /// Enable timing arrival readback for timed VCD output.
+    ///
+    /// Must be called after loading SDF timing data. Sets the arrival state
+    /// offset based on current state layout (values + optional xmask).
+    pub fn enable_timing_arrivals(&mut self) {
+        assert!(
+            self.timing_enabled,
+            "Cannot enable timing arrivals without SDF timing data"
+        );
+        self.timing_arrivals_enabled = true;
+        self.arrival_state_offset =
+            self.reg_io_state_size * (1 + self.xprop_enabled as u32);
     }
 
     /// build a flattened script.
@@ -1900,6 +1932,8 @@ mod sdf_delay_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2153,6 +2187,8 @@ mod sdf_delay_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2411,6 +2447,8 @@ mod constraint_buffer_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2755,6 +2793,8 @@ mod xprop_tests {
             xprop_enabled,
             partition_x_capable: Vec::new(),
             xprop_state_offset: if xprop_enabled { rio } else { 0 },
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2833,5 +2873,42 @@ mod xprop_tests {
             blocks_data[9], rio,
             "word 9 should still be xprop_state_offset"
         );
+    }
+
+    #[test]
+    fn test_effective_state_size_with_timing_arrivals() {
+        let mut script = make_xprop_script(42, false);
+        // Simulate loading SDF timing
+        script.timing_enabled = true;
+        script.enable_timing_arrivals();
+        assert_eq!(
+            script.effective_state_size(),
+            84,
+            "timing arrivals (no xprop): effective == 2 * rio"
+        );
+        assert_eq!(script.arrival_state_offset, 42);
+    }
+
+    #[test]
+    fn test_effective_state_size_xprop_and_timing_arrivals() {
+        let mut script = make_xprop_script(42, true);
+        script.timing_enabled = true;
+        script.enable_timing_arrivals();
+        assert_eq!(
+            script.effective_state_size(),
+            126,
+            "xprop + timing arrivals: effective == 3 * rio"
+        );
+        assert_eq!(
+            script.arrival_state_offset, 84,
+            "arrival offset should be 2*rio when xprop enabled"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot enable timing arrivals without SDF timing data")]
+    fn test_enable_timing_arrivals_requires_timing() {
+        let mut script = make_xprop_script(42, false);
+        script.enable_timing_arrivals(); // Should panic - timing_enabled is false
     }
 }
