@@ -26,6 +26,8 @@ pub struct CosimOpts {
     pub check_with_cpu: bool,
     pub gpu_profile: bool,
     pub clock_period: Option<u64>,
+    /// Path to write stimulus VCD (all primary inputs driven by cosim).
+    pub stimulus_vcd: Option<std::path::PathBuf>,
 }
 
 /// Result of a co-simulation run.
@@ -3061,6 +3063,38 @@ pub fn run_cosim(
         };
     }
 
+    // ── Stimulus VCD setup (optional) ─────────────────────────────────────
+    //
+    // When --stimulus-vcd is specified, we write all primary input signals
+    // to a VCD file for CVC reference simulation.
+
+    let mut stimulus_vcd_state: Option<(
+        vcd_ng::Writer<std::io::BufWriter<std::fs::File>>,
+        crate::sim::vcd_io::StimulusVCDMapping,
+        Vec<u8>, // prev_values for change detection
+    )> = if let Some(ref stim_path) = opts.stimulus_vcd {
+        let file = std::fs::File::create(stim_path)
+            .unwrap_or_else(|e| panic!("Failed to create stimulus VCD {}: {}", stim_path.display(), e));
+        let bufwriter = std::io::BufWriter::new(file);
+        let mut writer = vcd_ng::Writer::new(bufwriter);
+        let mapping = crate::sim::vcd_io::setup_stimulus_vcd(
+            &mut writer,
+            netlistdb,
+            aig,
+            script,
+            clock_period_ps,
+        );
+        let prev_values = vec![0xFFu8; mapping.signals.len()]; // sentinel: force initial write
+        clilog::info!(
+            "Stimulus VCD enabled: {} signals → {}",
+            mapping.signals.len(),
+            stim_path.display()
+        );
+        Some((writer, mapping, prev_values))
+    } else {
+        None
+    };
+
     // ── GPU-only simulation loop ─────────────────────────────────────────
     //
     // All IO models (flash + UART) run on GPU. No per-tick CPU interaction.
@@ -3154,6 +3188,8 @@ pub fn run_cosim(
     while tick < max_ticks {
         let batch = if opts.check_with_cpu && tick < cpu_check_max_ticks {
             1 // single tick for CPU comparison
+        } else if stimulus_vcd_state.is_some() {
+            1 // single tick for stimulus VCD capture
         } else if trace_ticks > 0 && tick < reset_cycles + trace_ticks {
             1 // single tick for tracing
         } else if deep_diag {
@@ -3267,6 +3303,65 @@ pub fn run_cosim(
         let t_wait = std::time::Instant::now();
         simulator.spin_wait(batch_done);
         prof_gpu_wait += t_wait.elapsed().as_nanos() as u64;
+
+        // ── Write stimulus VCD entries (falling + rising edge per tick) ──
+        if let Some((ref mut writer, ref mapping, ref mut prev_values)) = stimulus_vcd_state {
+            let input_state: &[u32] = unsafe {
+                std::slice::from_raw_parts(
+                    states_buffer.contents() as *const u32,
+                    state_size,
+                )
+            };
+            let half_period = mapping.clock_period_ps / 2;
+            let t_fall = tick as u64 * mapping.clock_period_ps;
+            let t_rise = t_fall + half_period;
+
+            // Falling edge: clock=0, all other signals as currently driven
+            writer.timestamp(t_fall).unwrap();
+            for (sig_idx, &(pos, vid, is_clock)) in mapping.signals.iter().enumerate() {
+                let val = if is_clock {
+                    0u8
+                } else {
+                    ((input_state[(pos >> 5) as usize] >> (pos & 31)) & 1) as u8
+                };
+                if val != prev_values[sig_idx] {
+                    writer
+                        .change_scalar(
+                            vid,
+                            if val != 0 {
+                                vcd_ng::Value::V1
+                            } else {
+                                vcd_ng::Value::V0
+                            },
+                        )
+                        .unwrap();
+                    prev_values[sig_idx] = val;
+                }
+            }
+
+            // Rising edge: clock=1, all signals same (only clock changes)
+            writer.timestamp(t_rise).unwrap();
+            for (sig_idx, &(pos, vid, is_clock)) in mapping.signals.iter().enumerate() {
+                let val = if is_clock {
+                    1u8
+                } else {
+                    ((input_state[(pos >> 5) as usize] >> (pos & 31)) & 1) as u8
+                };
+                if val != prev_values[sig_idx] {
+                    writer
+                        .change_scalar(
+                            vid,
+                            if val != 0 {
+                                vcd_ng::Value::V1
+                            } else {
+                                vcd_ng::Value::V0
+                            },
+                        )
+                        .unwrap();
+                    prev_values[sig_idx] = val;
+                }
+            }
+        }
 
         // Per-tick flash signal diagnostic
         if trace_ticks > 0 && tick + batch <= reset_cycles + trace_ticks as usize {

@@ -835,6 +835,75 @@ pub fn write_output_vcd_timed<W: std::io::Write>(
     }
 }
 
+// ── Stimulus VCD (for cosim primary input capture) ──────────────────────────
+
+/// Mapping of primary input signals to VCD variable IDs for stimulus VCD output.
+pub struct StimulusVCDMapping {
+    /// (state_bit_pos, vcd_variable_id, is_clock_pin)
+    pub signals: Vec<(u32, vcd_ng::IdCode, bool)>,
+    /// Clock period in picoseconds (for timestamp generation).
+    pub clock_period_ps: u64,
+}
+
+/// Set up a stimulus VCD writer: register all primary input signals and build mapping.
+///
+/// Iterates all `DriverType::InputPort` entries in the AIG to find every primary
+/// input signal. Clock pins are identified via `aig.clock_pin2aigpins`.
+/// Internal clock flag signals (`DriverType::InputClockFlag`) are excluded since
+/// they are AIG-internal and not real ports.
+pub fn setup_stimulus_vcd(
+    writer: &mut vcd_ng::Writer<std::io::BufWriter<std::fs::File>>,
+    netlistdb: &NetlistDB,
+    aig: &AIG,
+    script: &FlattenedScriptV1,
+    clock_period_ps: u64,
+) -> StimulusVCDMapping {
+    use vcd_ng::SimulationCommand;
+
+    writer.timescale(1, vcd_ng::TimescaleUnit::PS).unwrap();
+    writer.add_module("top").unwrap();
+
+    let mut signals = Vec::new();
+
+    for (aigpin_idx, driv) in aig.drivers.iter().enumerate() {
+        if let DriverType::InputPort(pinid) = driv {
+            if let Some(&pos) = script.input_map.get(&aigpin_idx) {
+                let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
+                let is_clock = aig.clock_pin2aigpins.contains_key(pinid);
+                let vid = writer.add_wire(1, &pin_name).unwrap();
+                signals.push((pos, vid, is_clock));
+                clilog::debug!(
+                    "stimulus VCD: pin '{}' pos={} clock={}",
+                    pin_name,
+                    pos,
+                    is_clock
+                );
+            }
+        }
+    }
+
+    writer.upscope().unwrap();
+    writer.enddefinitions().unwrap();
+    writer.begin(SimulationCommand::Dumpvars).unwrap();
+
+    // Write initial values (all 0)
+    for &(_, vid, _) in &signals {
+        writer.change_scalar(vid, vcd_ng::Value::V0).unwrap();
+    }
+    writer.end().unwrap();
+
+    clilog::info!(
+        "Stimulus VCD: {} primary input signals registered (clock_period={}ps)",
+        signals.len(),
+        clock_period_ps
+    );
+
+    StimulusVCDMapping {
+        signals,
+        clock_period_ps,
+    }
+}
+
 #[cfg(test)]
 mod xprop_tests {
     use super::*;

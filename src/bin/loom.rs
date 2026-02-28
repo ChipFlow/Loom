@@ -233,6 +233,11 @@ struct CosimArgs {
     /// Enable SDF debug output.
     #[clap(long)]
     sdf_debug: bool,
+
+    /// Path to write stimulus VCD (all primary inputs driven by cosim).
+    /// Forces single-tick mode for accurate per-cycle capture.
+    #[clap(long)]
+    stimulus_vcd: Option<PathBuf>,
 }
 
 /// Invoke the mt-kahypar partitioner.
@@ -1516,6 +1521,7 @@ fn cmd_cosim(args: CosimArgs) {
             check_with_cpu: args.check_with_cpu,
             gpu_profile: args.gpu_profile,
             clock_period: args.clock_period,
+            stimulus_vcd: args.stimulus_vcd.clone(),
         };
 
         let result =
