@@ -868,13 +868,19 @@ pub fn setup_stimulus_vcd(
     for (aigpin_idx, driv) in aig.drivers.iter().enumerate() {
         if let DriverType::InputPort(pinid) = driv {
             if let Some(&pos) = script.input_map.get(&aigpin_idx) {
-                let pin_name = netlistdb.pinnames[*pinid].dbg_fmt_pin();
+                let pn = &netlistdb.pinnames[*pinid];
+                let base_name = pn.pin_type();
+                let index = pn
+                    .bus_id()
+                    .map(|i| vcd_ng::ReferenceIndex::BitSelect(i as i32));
                 let is_clock = aig.clock_pin2aigpins.contains_key(pinid);
-                let vid = writer.add_wire(1, &pin_name).unwrap();
+                let vid = writer
+                    .add_var(vcd_ng::VarType::Wire, 1, base_name, index)
+                    .unwrap();
                 signals.push((pos, vid, is_clock));
                 clilog::debug!(
                     "stimulus VCD: pin '{}' pos={} clock={}",
-                    pin_name,
+                    pn.dbg_fmt_pin(),
                     pos,
                     is_clock
                 );

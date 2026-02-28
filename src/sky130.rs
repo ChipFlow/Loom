@@ -26,6 +26,13 @@ impl LeafPinProvider for SKY130LeafPins {
         let pin = pin_name.as_str();
 
         match cell_type {
+            // AIGPDK INV cell (synthesized from assign ~expr): A -> Y
+            "INV" => match pin {
+                "A" => Direction::I,
+                "Y" => Direction::O,
+                _ => unknown_pin(macro_name, pin_name),
+            },
+
             // Inverters: A -> Y
             t if t.starts_with("inv") => match pin {
                 "A" => Direction::I,
