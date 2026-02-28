@@ -7,13 +7,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use gem::aig::AIG;
 use gem::aigpdk::AIGPDKLeafPins;
-use gem::pe::{process_partitions, Partition};
-use gem::repcut::RCHyperGraph;
-use gem::sim::setup::DesignArgs;
+use gem::sim::setup::{self, DesignArgs};
 use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
 use gem::staging::build_staged_aigs;
 use netlistdb::NetlistDB;
-use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "loom", about = "Loom — GPU-accelerated RTL logic simulator")]
@@ -91,7 +88,8 @@ struct SimArgs {
     netlist_verilog: PathBuf,
 
     /// Pre-compiled partition mapping (.gemparts file).
-    gemparts: PathBuf,
+    /// If omitted, partitions are generated inline (adds ~20s).
+    gemparts: Option<PathBuf>,
 
     /// VCD input signal path.
     input_vcd: String,
@@ -184,7 +182,8 @@ struct CosimArgs {
     netlist_verilog: PathBuf,
 
     /// Pre-compiled partition mapping (.gemparts file).
-    gemparts: PathBuf,
+    /// If omitted, partitions are generated inline (adds ~20s).
+    gemparts: Option<PathBuf>,
 
     /// Testbench configuration JSON file.
     #[clap(long)]
@@ -240,22 +239,6 @@ struct CosimArgs {
     stimulus_vcd: Option<PathBuf>,
 }
 
-/// Invoke the mt-kahypar partitioner.
-fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
-    clilog::debug!("invoking partitioner (#parts {})", num_parts);
-    // mt-kahypar requires k >= 2, handle k=1 manually
-    if num_parts == 1 {
-        return vec![(0..hg.num_vertices()).collect()];
-    }
-
-    let parts_ids = hg.partition(num_parts);
-    let mut parts = vec![vec![]; num_parts];
-    for (i, part_id) in parts_ids.into_iter().enumerate() {
-        parts[part_id].push(i);
-    }
-    parts
-}
-
 fn cmd_map(args: MapArgs) {
     clilog::info!("Loom map args:\n{:#?}", args.netlist_verilog);
 
@@ -308,82 +291,8 @@ fn cmd_map(args: MapArgs) {
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
-    let stages_effective_parts = stageds
-        .iter()
-        .map(|&(l, r, ref staged)| {
-            clilog::info!(
-                "interactive partitioning stage {}-{}",
-                l,
-                match r {
-                    usize::MAX => "max".to_string(),
-                    r => format!("{}", r),
-                }
-            );
-
-            let mut parts_good: Vec<(Vec<usize>, Partition)> = Vec::new();
-            let mut unrealized_endpoints =
-                (0..staged.num_endpoint_groups()).collect::<Vec<_>>();
-            let mut division = 600;
-
-            while !unrealized_endpoints.is_empty() {
-                division = (division / 2).max(1);
-                let num_parts = (unrealized_endpoints.len() + division - 1) / division;
-                clilog::info!(
-                    "current: {} endpoints, try {} parts",
-                    unrealized_endpoints.len(),
-                    num_parts
-                );
-                let staged_ur = staged.to_endpoint_subset(&unrealized_endpoints);
-                let hg_ur = RCHyperGraph::from_staged_aig(&aig, &staged_ur);
-                let mut parts_indices = run_par(&hg_ur, num_parts);
-                for idcs in &mut parts_indices {
-                    for i in idcs {
-                        *i = unrealized_endpoints[*i];
-                    }
-                }
-                let parts_try = parts_indices
-                    .par_iter()
-                    .map(|endpts| Partition::build_one(&aig, staged, endpts))
-                    .collect::<Vec<_>>();
-                let mut new_unrealized_endpoints = Vec::new();
-                for (idx, part_opt) in parts_indices.into_iter().zip(parts_try.into_iter()) {
-                    match part_opt {
-                        Some(part) => {
-                            parts_good.push((idx, part));
-                        }
-                        None => {
-                            if idx.len() == 1 {
-                                panic!("A single endpoint still cannot map, you need to increase level cut granularity.");
-                            }
-                            for endpt_i in idx {
-                                new_unrealized_endpoints.push(endpt_i);
-                            }
-                        }
-                    }
-                }
-                new_unrealized_endpoints.sort_unstable();
-                unrealized_endpoints = new_unrealized_endpoints;
-            }
-
-            clilog::info!(
-                "interactive partition completed: {} in total. merging started.",
-                parts_good.len()
-            );
-
-            let (parts_indices_good, prebuilt): (Vec<_>, Vec<_>) =
-                parts_good.into_iter().unzip();
-            let effective_parts = process_partitions(
-                &aig,
-                staged,
-                parts_indices_good,
-                Some(prebuilt),
-                args.max_stage_degrad,
-            )
-            .unwrap();
-            clilog::info!("after merging: {} parts.", effective_parts.len());
-            effective_parts
-        })
-        .collect::<Vec<_>>();
+    let stages_effective_parts =
+        setup::generate_partitions(&aig, &stageds, args.max_stage_degrad);
 
     let f = std::fs::File::create(&args.parts_out).unwrap();
     let mut buf = std::io::BufWriter::new(f);
