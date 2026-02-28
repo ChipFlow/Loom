@@ -6,11 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use gem::aig::AIG;
-use gem::aigpdk::AIGPDKLeafPins;
-use gem::sim::setup::{self, DesignArgs};
-use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
-use gem::staging::build_staged_aigs;
-use netlistdb::NetlistDB;
+use gem::sim::setup::DesignArgs;
 
 #[derive(Parser)]
 #[command(name = "loom", about = "Loom — GPU-accelerated RTL logic simulator")]
@@ -21,16 +17,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Map a synthesized gate-level netlist to a .gemparts partition file.
-    ///
-    /// This is the first step in the Loom workflow. The resulting .gemparts file
-    /// is then used by `loom sim` to run the design on a GPU.
-    Map(MapArgs),
-
     /// Run a GPU simulation with VCD input/output.
     ///
-    /// Reads a gate-level netlist and partition file, processes a VCD input
-    /// waveform through the GPU simulator, and writes the output VCD.
+    /// Reads a gate-level netlist, partitions it automatically, processes a VCD
+    /// input waveform through the GPU simulator, and writes the output VCD.
     /// Requires building with `--features metal` (macOS), `--features cuda` (Linux/NVIDIA),
     /// or `--features hip` (Linux/AMD).
     Sim(SimArgs),
@@ -44,52 +34,9 @@ enum Commands {
 }
 
 #[derive(Parser)]
-struct MapArgs {
-    /// Gate-level Verilog path synthesized with the AIGPDK or SKY130 library.
-    ///
-    /// If your design is still at RTL level, you must synthesize it first.
-    /// See usage.md for synthesis instructions.
-    netlist_verilog: PathBuf,
-
-    /// Output path for the serialized partition file (.gemparts).
-    parts_out: PathBuf,
-
-    /// Top module name in the netlist.
-    ///
-    /// If not specified, Loom guesses the top module from the hierarchy.
-    #[clap(long)]
-    top_module: Option<String>,
-
-    /// Level split thresholds for deep circuits.
-    ///
-    /// If mapping fails because a single endpoint cannot be partitioned,
-    /// add level-split thresholds (e.g. --level-split 30 or --level-split 20,40).
-    /// Remember to pass the same thresholds when simulating.
-    #[clap(long, value_delimiter = ',')]
-    level_split: Vec<usize>,
-
-    /// Maximum stage degradation layers allowed during partition merging.
-    ///
-    /// Default is 0, meaning no degradation is allowed.
-    #[clap(long, default_value_t = 0)]
-    max_stage_degrad: usize,
-
-    /// Enable selective X-propagation analysis (informational only at map time).
-    ///
-    /// Reports how many pins and partitions would be X-capable. The actual
-    /// X-propagation is enabled at simulation time with `loom sim --xprop`.
-    #[clap(long)]
-    xprop: bool,
-}
-
-#[derive(Parser)]
 struct SimArgs {
     /// Gate-level Verilog path synthesized with AIGPDK or SKY130 library.
     netlist_verilog: PathBuf,
-
-    /// Pre-compiled partition mapping (.gemparts file).
-    /// If omitted, partitions are generated inline (adds ~20s).
-    gemparts: Option<PathBuf>,
 
     /// VCD input signal path.
     input_vcd: String,
@@ -181,10 +128,6 @@ struct CosimArgs {
     /// Gate-level Verilog path synthesized with AIGPDK or SKY130 library.
     netlist_verilog: PathBuf,
 
-    /// Pre-compiled partition mapping (.gemparts file).
-    /// If omitted, partitions are generated inline (adds ~20s).
-    gemparts: Option<PathBuf>,
-
     /// Testbench configuration JSON file.
     #[clap(long)]
     config: PathBuf,
@@ -239,66 +182,6 @@ struct CosimArgs {
     stimulus_vcd: Option<PathBuf>,
 }
 
-fn cmd_map(args: MapArgs) {
-    clilog::info!("Loom map args:\n{:#?}", args.netlist_verilog);
-
-    // Detect cell library
-    let lib = detect_library_from_file(&args.netlist_verilog).expect("Failed to read netlist file");
-    clilog::info!("Detected cell library: {}", lib);
-
-    if lib == CellLibrary::Mixed {
-        panic!("Mixed AIGPDK and SKY130 cells in netlist not supported");
-    }
-
-    let netlistdb = match lib {
-        CellLibrary::SKY130 => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &SKY130LeafPins,
-        )
-        .expect("cannot build netlist"),
-        CellLibrary::AIGPDK | CellLibrary::Mixed => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &AIGPDKLeafPins(),
-        )
-        .expect("cannot build netlist"),
-    };
-
-    let aig = AIG::from_netlistdb(&netlistdb);
-    println!(
-        "netlist has {} pins, {} aig pins, {} and gates",
-        netlistdb.num_pins,
-        aig.num_aigpins,
-        aig.and_gate_cache.len()
-    );
-
-    if args.xprop {
-        let (_x_capable, stats) = aig.compute_x_capable_pins();
-        println!(
-            "X-propagation analysis: {}/{} pins ({:.1}%) X-capable, {} X-sources, {} fixpoint iterations",
-            stats.num_x_capable_pins,
-            stats.total_pins,
-            if stats.total_pins > 0 {
-                stats.num_x_capable_pins as f64 / stats.total_pins as f64 * 100.0
-            } else {
-                0.0
-            },
-            stats.num_x_sources,
-            stats.fixpoint_iterations,
-        );
-    }
-
-    let stageds = build_staged_aigs(&aig, &args.level_split);
-
-    let stages_effective_parts =
-        setup::generate_partitions(&aig, &stageds, args.max_stage_degrad);
-
-    let f = std::fs::File::create(&args.parts_out).unwrap();
-    let mut buf = std::io::BufWriter::new(f);
-    serde_bare::to_writer(&mut buf, &stages_effective_parts).unwrap();
-}
-
 #[allow(unused_variables)]
 fn cmd_sim(args: SimArgs) {
     use gem::sim::setup;
@@ -308,7 +191,6 @@ fn cmd_sim(args: SimArgs) {
         netlist_verilog: args.netlist_verilog.clone(),
         top_module: args.top_module.clone(),
         level_split: args.level_split.clone(),
-        gemparts: args.gemparts.clone(),
         num_blocks: args.num_blocks,
         json_path: args.json_path.clone(),
         sdf: args.sdf.clone(),
@@ -1354,7 +1236,6 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Map(args) => cmd_map(args),
         Commands::Sim(args) => cmd_sim(args),
         Commands::Cosim(args) => cmd_cosim(args),
     }
@@ -1410,7 +1291,6 @@ fn cmd_cosim(args: CosimArgs) {
             netlist_verilog: args.netlist_verilog.clone(),
             top_module: args.top_module.clone(),
             level_split: args.level_split.clone(),
-            gemparts: args.gemparts.clone(),
             num_blocks: args.num_blocks,
             json_path: None,
             sdf,

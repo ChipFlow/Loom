@@ -22,7 +22,6 @@ pub struct DesignArgs {
     pub netlist_verilog: PathBuf,
     pub top_module: Option<String>,
     pub level_split: Vec<usize>,
-    pub gemparts: Option<PathBuf>,
     pub num_blocks: usize,
     pub json_path: Option<PathBuf>,
     pub sdf: Option<PathBuf>,
@@ -98,18 +97,7 @@ pub fn load_design(args: &DesignArgs) -> LoadedDesign {
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
-    let parts_in_stages: Vec<Vec<Partition>> = match &args.gemparts {
-        Some(path) => {
-            clilog::info!("Loading partitions from {:?}", path);
-            let f = std::fs::File::open(path).unwrap();
-            let mut buf = std::io::BufReader::new(f);
-            serde_bare::from_reader(&mut buf).unwrap()
-        }
-        None => {
-            clilog::info!("No gemparts file provided, generating partitions inline...");
-            generate_partitions(&aig, &stageds, 0)
-        }
-    };
+    let parts_in_stages: Vec<Vec<Partition>> = generate_partitions(&aig, &stageds, 0);
     clilog::info!(
         "# of effective partitions in each stage: {:?}",
         parts_in_stages
@@ -255,7 +243,7 @@ pub fn build_timing_constraints(script: &FlattenedScriptV1) -> Option<Vec<u32>> 
 }
 
 /// Invoke the mt-kahypar partitioner.
-pub fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
+fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
     clilog::debug!("invoking partitioner (#parts {})", num_parts);
     // mt-kahypar requires k >= 2, handle k=1 manually
     if num_parts == 1 {
@@ -270,12 +258,12 @@ pub fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
     parts
 }
 
-/// Generate partitions inline from the AIG and staged AIGs.
+/// Generate partitions from the AIG and staged AIGs.
 ///
-/// This runs the same iterative partitioning loop as `loom map`.
+/// Iteratively partitions endpoints using mt-kahypar hypergraph partitioning.
 /// `max_stage_degrad` controls how many degradation layers are allowed
 /// during partition merging (0 = no degradation).
-pub fn generate_partitions(
+fn generate_partitions(
     aig: &AIG,
     stageds: &[(usize, usize, StagedAIG)],
     max_stage_degrad: usize,

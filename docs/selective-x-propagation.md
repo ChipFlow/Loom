@@ -320,7 +320,7 @@ initialisation bugs that would otherwise escape to silicon.
 
 ## Implementation Status
 
-All stages are implemented. Enable with `--xprop` on both `loom map` and `loom sim`.
+All stages are implemented. Enable with `--xprop` on `loom sim`.
 
 ### Stage 1: Static X-Source Analysis (`src/aig.rs`)
 
@@ -332,7 +332,7 @@ All stages are implemented. Enable with `--xprop` on both `loom map` and `loom s
 - `FlattenedScriptV1` fields: `xprop_enabled`, `partition_x_capable`, `xprop_state_offset`
 - `effective_state_size()` returns `2 * reg_io_state_size` when xprop enabled
 - Metadata words 8 (is_x_capable) and 9 (xmask_state_offset) encode per-partition xprop info
-- Backward compatible: old `.gemparts` files deserialize with `xprop_enabled = false`
+- X-propagation is configured at simulation startup, no separate mapping step needed
 
 ### Stage 3: X-Aware CPU Reference Kernel (`src/sim/cpu_reference.rs`)
 
@@ -342,8 +342,7 @@ All stages are implemented. Enable with `--xprop` on both `loom map` and `loom s
 
 ### Stage 4: CLI and VCD Integration (`src/bin/loom.rs`, `src/sim/vcd_io.rs`)
 
-- `loom map --xprop` runs static analysis and logs X-capable pin/partition stats
-- `loom sim --xprop` enables X-aware simulation with doubled state buffer
+- `loom sim --xprop` runs static analysis, logs X-capable pin/partition stats, and enables X-aware simulation with doubled state buffer
 - `write_output_vcd_xprop()` emits `Value::X` for X-masked primary outputs
 - `expand_states_for_xprop()` / `split_xprop_states()` for state buffer management
 
@@ -428,11 +427,8 @@ All stages are implemented. Enable with `--xprop` on both `loom map` and `loom s
    partitions are X-free (~95% typical), at the cost of slightly more
    pessimism at partition boundaries.
 
-5. **Runtime CLI flag**: X-propagation is controlled by `--xprop` on both
-   `loom map` and sim binaries, rather than a compile-time feature flag.
-   No new Cargo dependencies are needed. The `.gemparts` file carries the
-   `xprop_enabled` metadata, with `#[serde(default)]` ensuring backward
-   compatibility with old files (they deserialize with `xprop_enabled = false`).
+5. **Runtime CLI flag**: X-propagation is controlled by `--xprop` on `loom sim`,
+   rather than a compile-time feature flag. No new Cargo dependencies are needed.
 
 6. **State buffer layout**: When xprop is enabled, the state buffer doubles.
    Value words occupy `[0 .. reg_io_state_size)` and X-mask words occupy

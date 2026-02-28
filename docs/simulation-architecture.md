@@ -84,11 +84,9 @@ pub enum DriverType {
 - Max 64 SRAM output groups
 
 **Process**:
-- Interactive partitioning (`loom map`)
+- Interactive partitioning (runs automatically at simulation start)
 - Tries 1 partition first, then increases if needed
 - Merges partitions to minimize inter-partition communication
-
-**Output**: `.gemparts` file with partition assignments
 
 ### 5. FlattenedScript (GPU Instruction Generation)
 

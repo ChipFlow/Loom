@@ -547,7 +547,7 @@ impl FlatteningPart {
         let origpos = match self.after_writeout_pin2pos.get(&(pin_iv >> 1)) {
             Some(origpos) => *origpos,
             None => {
-                panic!("position of pin_iv {} (clken_iv {}) not found.. buggy boomerang, check if netlist and gemparts mismatch.", pin_iv, clken_iv)
+                panic!("position of pin_iv {} (clken_iv {}) not found.. buggy boomerang in partitioning.", pin_iv, clken_iv)
             }
         } as usize;
         let r_pos = if activ_idx == 0 {

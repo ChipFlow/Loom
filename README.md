@@ -59,27 +59,21 @@ cargo build -r --features cuda --bin loom
 
 ## Usage
 
-Loom operates in two phases:
-
-1. **Map** your synthesized gate-level netlist to a `.gemparts` file (one-time cost):
-
-```sh
-cargo run -r --bin loom -- map design.gv design.gemparts
-```
-
-2. **Simulate** with a VCD input waveform:
+Simulate a gate-level netlist with a VCD input waveform:
 
 ```sh
 # Metal (macOS) - use NUM_BLOCKS=1
-cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1
+cargo run -r --features metal --bin loom -- sim design.gv input.vcd output.vcd 1
 
 # CUDA (Linux) - set NUM_BLOCKS to 2x your GPU's SM count
-cargo run -r --features cuda --bin loom -- sim design.gv design.gemparts input.vcd output.vcd NUM_BLOCKS
+cargo run -r --features cuda --bin loom -- sim design.gv input.vcd output.vcd NUM_BLOCKS
 
 # With SDF timing back-annotation:
-cargo run -r --features metal --bin loom -- sim design.gv design.gemparts input.vcd output.vcd 1 \
+cargo run -r --features metal --bin loom -- sim design.gv input.vcd output.vcd 1 \
   --sdf design.sdf --sdf-corner typ
 ```
+
+Partitioning (mapping the design to GPU blocks) happens automatically at startup.
 
 **See [docs/usage.md](./docs/usage.md) for full documentation** including synthesis preparation, VCD scope handling, and troubleshooting.
 

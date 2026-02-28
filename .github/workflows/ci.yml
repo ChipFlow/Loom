@@ -90,7 +90,6 @@ jobs:
           # Capture timing output
           time (cargo run --release --features metal --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_output.vcd \
             1) 2>&1 | tee metal_timing.txt
@@ -124,13 +123,8 @@ jobs:
 
       - name: Run Metal simulation with X-propagation
         run: |
-          cargo run --release --features metal --bin loom -- map \
-            tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
-            --xprop
           cargo run --release --features metal --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_xprop_output.vcd \
             1 --xprop 2>&1 | tee metal_xprop.txt
@@ -199,7 +193,6 @@ jobs:
         run: |
           time (cargo run --release --features cuda --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_cuda_output.vcd \
             1) 2>&1 | tee cuda_timing.txt
@@ -215,13 +208,8 @@ jobs:
 
       - name: Run CUDA simulation with X-propagation
         run: |
-          cargo run --release --features cuda --bin loom -- map \
-            tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
-            --xprop
           cargo run --release --features cuda --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_cuda_xprop_output.vcd \
             1 --xprop 2>&1 | tee cuda_xprop.txt
@@ -323,7 +311,6 @@ jobs:
         run: |
           time (cargo run --release --features hip --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_hip_output.vcd \
             1) 2>&1 | tee hip_timing.txt
@@ -339,13 +326,8 @@ jobs:
 
       - name: Run HIP simulation with X-propagation
         run: |
-          cargo run --release --features hip --bin loom -- map \
-            tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
-            --xprop
           cargo run --release --features hip --bin loom -- sim \
             tests/timing_test/dff_test_synth.gv \
-            tests/timing_test/dff_test_xprop.gemparts \
             tests/timing_test/dff_test.vcd \
             tests/timing_test/ci_hip_xprop_output.vcd \
             1 --xprop 2>&1 | tee hip_xprop.txt
@@ -502,18 +484,11 @@ jobs:
             --firmware designs/mcu_soc_sky130/build/software/software.bin \
             --port-mapping
 
-      - name: Compile gemparts
-        timeout-minutes: 10
-        run: |
-          cargo run --release --features metal --bin loom -- map \
-            tests/mcu_soc/data/6_final.v tests/mcu_soc/data/result.gemparts \
-            --top-module top
-
       - name: Run GPU co-simulation (100K ticks)
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           cargo run --release --features metal --bin loom -- cosim \
-            tests/mcu_soc/data/6_final.v tests/mcu_soc/data/result.gemparts \
+            tests/mcu_soc/data/6_final.v \
             --config tests/mcu_soc/sim_config.json --top-module top \
             --max-cycles 100000 \
             2>&1 | tee cosim_output.txt
