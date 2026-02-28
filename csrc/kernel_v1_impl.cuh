@@ -51,7 +51,8 @@ __device__ void simulate_block_v1(
   const u32 *__restrict__ timing_constraints,
   u32 clock_period_ps,
   EventBuffer *__restrict__ event_buffer,
-  u32 cycle_i
+  u32 cycle_i,
+  int arrival_state_offset  // offset in output_state for arrival data (0 = disabled)
   )
 {
   int script_pi = 0;
@@ -219,10 +220,12 @@ __device__ void simulate_block_v1(
         }
 
         // Arrival tracking: max(input_a, input_b) + gate_delay
+        // Delay added even for pass-throughs (physical cells with accumulated delays)
         u16 arr_a = (u16)shared_arrival[threadIdx.x - 128];
         u16 arr_b = (u16)shared_arrival[threadIdx.x];
         bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-        u16 new_arr = is_pass ? arr_a : (u16)(max(arr_a, arr_b) + (u16)gate_delay);
+        u16 base_arr = is_pass ? arr_a : (u16)max(arr_a, arr_b);
+        u16 new_arr = (u16)(base_arr + (u16)gate_delay);
         shared_arrival[threadIdx.x] = new_arr;
       }
       __syncthreads();
@@ -250,11 +253,12 @@ __device__ void simulate_block_v1(
             shared_state_x[threadIdx.x] = ret_x;
           }
 
-          // Arrival tracking
+          // Arrival tracking (delay added even for pass-throughs)
           u16 arr_a = (u16)shared_arrival[threadIdx.x + hier_width];
           u16 arr_b = (u16)shared_arrival[threadIdx.x + hier_width * 2];
           bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-          u16 new_arr = is_pass ? arr_a : (u16)(max(arr_a, arr_b) + (u16)gate_delay);
+          u16 base_arr = is_pass ? arr_a : (u16)max(arr_a, arr_b);
+          u16 new_arr = (u16)(base_arr + (u16)gate_delay);
           tmp_cur_arr = new_arr;
           shared_arrival[threadIdx.x] = tmp_cur_arr;
         }
@@ -280,9 +284,10 @@ __device__ void simulate_block_v1(
               u32 b_eff_x = hier_b_x & ~hier_flag_orb;
               tmp_cur_hi_x = (hier_a_x | b_eff_x) & (a_eff | hier_a_x) & (b_eff | b_eff_x);
             }
-            // Arrival tracking
+            // Arrival tracking (delay added even for pass-throughs)
             bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-            u16 new_arr = is_pass ? (u16)arr_a_u32 : (u16)(max((u16)arr_a_u32, (u16)arr_b_u32) + (u16)gate_delay);
+            u16 base_arr = is_pass ? (u16)arr_a_u32 : (u16)max((u16)arr_a_u32, (u16)arr_b_u32);
+            u16 new_arr = (u16)(base_arr + (u16)gate_delay);
             tmp_cur_arr_u32 = (u32)new_arr;
           }
         }
@@ -520,6 +525,12 @@ __device__ void simulate_block_v1(
                  | clken_perm_x;
         output_state[xmask_state_offset + io_offset + threadIdx.x] = wo_x;
       }
+
+      // Write arrival time to global memory for timed VCD output
+      if(arrival_state_offset != 0) {
+        output_state[arrival_state_offset + io_offset + threadIdx.x] =
+            (u32)shared_writeout_arrival[threadIdx.x];
+      }
     }
 
     // DFF timing violation check (per writeout word)
@@ -605,7 +616,8 @@ __global__ void simulate_v1_noninteractive_simple_scan(
         constraints_data,
         clock_period_ps,
         event_buffer,
-        (u32)cycle_i
+        (u32)cycle_i,
+        0  // arrival_state_offset: CUDA timing VCD not yet supported
         );
       cooperative_groups::this_grid().sync();
     }

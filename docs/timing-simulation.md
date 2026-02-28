@@ -272,18 +272,120 @@ This is feasible but significantly increases memory pressure and computation.
 - CPU performs timing analysis on results
 - Validates infrastructure without kernel changes
 
-### Phase 3: GPU Arrival Tracking (Future)
+### Phase 3: GPU Arrival Tracking (Completed)
 
-- Add `shared_arrival[256]` to kernel
-- Track arrivals during boomerang reduction
-- Report max arrival at cycle boundaries
-- Check violations at DFF endpoints
+- Added `shared_arrival[256]` (u16) to Metal and CUDA kernels
+- Arrivals tracked during boomerang reduction at all hierarchy levels
+- Per-gate delays injected via script padding slots from SDF data
+- DFF timing constraint checking at cycle boundaries (setup/hold)
+- Timing-aware VCD output (`--timing-vcd` flag)
+- Validated against CVC reference simulator (88ps / 7.1% conservative overestimate)
 
-### Phase 4: Full Integration (Future)
+### Phase 4: Full Integration (Partial)
 
-- Timing violation events via event buffer
-- Per-cycle timing reports
-- Integration with output VCD
+- Timing violation events via event buffer (completed)
+- Per-cycle timing reports (completed)
+- Integration with output VCD (completed via `--timing-vcd`)
+- Timing-aware bit packing for reduced approximation error (future)
+
+## Conservative Timing Model: Sources of Overestimation
+
+Loom's GPU timing is intentionally conservative — it may over-estimate arrival times
+but will never under-estimate them. This is important for setup violation detection:
+false positives are safe, false negatives would miss real bugs.
+
+There are three independent sources of conservatism, each adding to the overestimate:
+
+### Source 1: max(rise, fall) per cell
+
+The GPU kernel tracks a single u16 arrival per thread position. It cannot distinguish
+between rising and falling signal transitions because each thread processes 32 packed
+Boolean signals simultaneously — there's no per-bit transition direction available.
+
+**How it works**: For each cell, `inject_timing_to_script()` computes:
+```rust
+delay = max(gate_delays[pin].rise_ps, gate_delays[pin].fall_ps)
+```
+
+**Impact**: For the SKY130 inv_chain test (16 inverters), rise delays average ~10ps
+larger than fall delays. In a real inverter chain, transitions alternate (rise→fall→rise),
+so half the cells use the smaller fall delay. Loom uses the larger rise delay for all.
+
+**Measured**: 80ps overestimate on 1235ps (6.5%) for 16 inverters with ~10ps rise/fall
+asymmetry per cell.
+
+### Source 2: max wire delay across all input pins
+
+For multi-input cells (AND gates, MUXes), INTERCONNECT delays to different input pins
+may differ significantly. Loom takes the maximum across all input pins:
+
+```rust
+// wire_delays_per_cell: dest_cellid → max(all input wire delays)
+entry.rise_ps = entry.rise_ps.max(ic.delay.rise_ps);
+entry.fall_ps = entry.fall_ps.max(ic.delay.fall_ps);
+```
+
+**Impact**: If an AND gate has input A arriving via a 10ps wire and input B via a
+200ps wire, Loom assigns 200ps to the cell regardless of which input is on the
+critical path. An event-driven simulator would correctly propagate the 10ps arrival
+on input A independently.
+
+**When this matters**: Designs with highly asymmetric routing (e.g., one input is
+local, another crosses the chip). Well-routed designs typically have balanced wire
+delays to multi-input cells.
+
+### Source 3: max arrival across 32 packed signals per thread
+
+Each thread position holds 32 independent Boolean signals. Loom tracks one arrival
+per thread position (the maximum across all 32 signals):
+
+```
+Thread 50: [signal_A: 5ps, signal_B: 23ps, signal_C: 8ps, ...]
+Tracked:   arrival[50] = 23ps (max of all 32)
+```
+
+**Impact**: If signals with very different timing are packed into the same thread,
+the fastest signals inherit the slowest signal's arrival time.
+
+**Mitigation**: The bit-packing algorithm can sort signals by estimated timing before
+assignment (see "Timing-Aware Bit Packing" section). This keeps similar-timing signals
+together, reducing the max approximation error.
+
+### Combined Effect
+
+These sources are multiplicative in the worst case. For the inv_chain test:
+
+| Source | Contribution | Notes |
+|--------|-------------|-------|
+| max(rise, fall) | +80ps | 8 inverters × 10ps asymmetry |
+| max wire delay | +8ps | 8 wires × 1ps asymmetry |
+| max per thread | 0ps | Only 1 signal per thread in this test |
+| **Total overestimate** | **88ps / 7.1%** | vs CVC transition-accurate result |
+
+For larger designs with more routing asymmetry and denser bit packing, the combined
+overestimate could be larger. The bit-packing sort (Source 3) is the most actionable
+mitigation.
+
+### CVC Reference Validation
+
+The inv_chain design (2 DFFs + 16 SKY130 inverters) was validated against CVC
+(open-src-cvc), an event-driven Verilog simulator with native SDF back-annotation:
+
+```
+CVC:  clk_to_q=350ps  chain=885ps  total=1235ps  (transition-accurate)
+Loom: clk_to_q=350ps  chain=973ps  total=1323ps  (conservative max)
+Difference: 88ps (7.1% overestimate)
+```
+
+Both simulators agree on CLK→Q delay (350ps) because the DFF has a single output
+transition direction per clock edge. The chain delay differs because CVC tracks
+actual rise/fall polarity through each inverter.
+
+**To run the CVC comparison locally**:
+```bash
+bash tests/timing_test/cvc/run_cvc.sh
+```
+Requires Docker (builds CVC from source on first run).
 
 ## Delay Data Encoding
 

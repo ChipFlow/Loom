@@ -31,7 +31,6 @@ In Verilog, when a VCD is generated, values at each timestamp represent the fina
 - `dff_test_tb.v` - Testbench with simultaneous input/clock changes
 - `dff_test.vcd` - Golden VCD from iverilog
 - `dff_test_synth.gv` - Synthesized netlist for GEM
-- `dff_test.gemparts` - GEM partition file
 - `gem_output.vcd` - GEM simulation output (contains bug)
 
 ## Expected vs Actual Results
@@ -63,15 +62,9 @@ vvp dff_test.vvp
 # Synthesize for GEM
 yosys -s synth.tcl
 
-# Create GEM partitions
-cargo run -r --bin loom -- map \
-    tests/timing_test/dff_test_synth.gv \
-    tests/timing_test/dff_test.gemparts
-
-# Run GEM simulation
+# Run GEM simulation (partitioning happens automatically)
 cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/dff_test_synth.gv \
-    tests/timing_test/dff_test.gemparts \
     tests/timing_test/dff_test.vcd \
     tests/timing_test/gem_output.vcd 1
 

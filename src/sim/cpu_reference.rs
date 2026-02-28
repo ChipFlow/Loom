@@ -323,7 +323,6 @@ pub fn simulate_block_v1_xprop(
             writeout_hooks[i * 2 + 1] = (t >> 16) as u16;
         }
         if num_stages == 0 {
-            script_pi += 256;
             break;
         }
         script_pi += 256;
@@ -332,7 +331,7 @@ pub fn simulate_block_v1_xprop(
         // We still need to advance script_pi correctly, so we run the full
         // function on the same script slice.
         if !is_x_capable {
-            let part_end = script.len(); // conservative; real end found by simulate_block_v1
+            let _part_end = script.len(); // conservative; real end found by simulate_block_v1
             simulate_block_v1(
                 &script[script_pi - 256..],
                 input_state,

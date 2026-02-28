@@ -1,0 +1,8 @@
+{
+  "signals": [
+    {"name": "Q", "net": "Q", "type": "comb"},
+    {"name": "q1", "net": "q1", "type": "comb"},
+    {"name": "c0", "net": "c[0]", "type": "comb"},
+    {"name": "c15", "net": "c[15]", "type": "comb"}
+  ]
+}

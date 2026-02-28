@@ -14,7 +14,6 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 
 1. **SDF file** with back-annotated delays from your place-and-route tool
 2. **Gate-level netlist** synthesized to `aigpdk.lib` cells
-3. **Compiled `.gemparts`** file from `loom map`
 
 ### Step-by-step
 
@@ -30,7 +29,7 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
    **Metal (macOS)**:
    ```bash
    cargo run -r --features metal --bin loom -- sim \
-       design.gv design.gemparts input.vcd output.vcd 1 \
+       design.gv input.vcd output.vcd 1 \
        --sdf design.sdf \
        --sdf-corner typ
    ```
@@ -38,17 +37,17 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
    **CUDA (NVIDIA)**:
    ```bash
    cargo run -r --features cuda --bin loom -- sim \
-       design.gv design.gemparts input.vcd output.vcd 8 \
+       design.gv input.vcd output.vcd 8 \
        --sdf design.sdf \
        --sdf-corner typ \
        --enable-timing \
        --timing-clock-period 1200
    ```
 
-   **gpu_sim (co-simulation)**:
+   **cosim (co-simulation)**:
    ```bash
-   cargo run -r --features metal --bin gpu_sim -- \
-       design.gv design.gemparts \
+   cargo run -r --features metal --bin loom -- cosim \
+       design.gv \
        --config testbench.json \
        --sdf design.sdf \
        --sdf-corner typ
@@ -69,15 +68,9 @@ Setup and hold violations occur when data arrives too late (setup) or too early 
 ### Example: inv_chain_pnr Test Case
 
 ```bash
-# Map the design
-cargo run -r --features metal --bin loom -- map \
-    tests/timing_test/inv_chain_pnr/6_final.v \
-    tests/timing_test/inv_chain_pnr/inv_chain.gemparts
-
 # Run with SDF timing
 cargo run -r --features metal --bin loom -- sim \
     tests/timing_test/inv_chain_pnr/6_final.v \
-    tests/timing_test/inv_chain_pnr/inv_chain.gemparts \
     tests/timing_test/inv_chain_pnr/input.vcd \
     tests/timing_test/inv_chain_pnr/output.vcd 1 \
     --sdf tests/timing_test/inv_chain_pnr/6_final.sdf

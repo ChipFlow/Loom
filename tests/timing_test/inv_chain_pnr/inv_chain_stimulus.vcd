@@ -1,0 +1,61 @@
+$date
+	Fri Feb 28 00:00:00 2026
+$end
+$version
+	Loom test stimulus
+$end
+$timescale
+	1ps
+$end
+$scope module inv_chain $end
+$var wire 1 ! CLK $end
+$var wire 1 " D $end
+$var wire 1 # Q $end
+$upscope $end
+$enddefinitions $end
+#0
+$dumpvars
+0!
+0"
+x#
+$end
+#5000
+1!
+#10000
+0!
+#10100
+1"
+#15000
+1!
+#20000
+0!
+#20100
+0"
+#25000
+1!
+#30000
+0!
+#30100
+1"
+#35000
+1!
+#40000
+0!
+#40100
+0"
+#45000
+1!
+#50000
+0!
+#55000
+1!
+#60000
+0!
+#65000
+1!
+#70000
+0!
+#75000
+1!
+#80000
+0!

@@ -229,6 +229,18 @@ pub struct FlattenedScriptV1 {
     /// Equal to `reg_io_state_size` (the X-mask mirrors the value section).
     /// Only meaningful when `xprop_enabled == true`.
     pub xprop_state_offset: u32,
+
+    // === Timing Arrival Readback Fields ===
+
+    /// Whether timing arrival readback is enabled for timed VCD output.
+    /// When true, the state buffer includes an arrival section and the GPU
+    /// kernel writes per-output arrival times to global memory.
+    pub timing_arrivals_enabled: bool,
+
+    /// Offset into the per-cycle state buffer where arrival data begins.
+    /// Equal to `reg_io_state_size * (1 + xprop_enabled as u32)`.
+    /// Only meaningful when `timing_arrivals_enabled == true`.
+    pub arrival_state_offset: u32,
 }
 
 fn map_global_read_to_rounds(inputs_taken: &BTreeMap<u32, u32>) -> Vec<Vec<(u32, u32)>> {
@@ -535,7 +547,7 @@ impl FlatteningPart {
         let origpos = match self.after_writeout_pin2pos.get(&(pin_iv >> 1)) {
             Some(origpos) => *origpos,
             None => {
-                panic!("position of pin_iv {} (clken_iv {}) not found.. buggy boomerang, check if netlist and gemparts mismatch.", pin_iv, clken_iv)
+                panic!("position of pin_iv {} (clken_iv {}) not found.. buggy boomerang in partitioning.", pin_iv, clken_iv)
             }
         } as usize;
         let r_pos = if activ_idx == 0 {
@@ -1262,7 +1274,7 @@ fn build_flattened_script_v1(
         // We iterate over all parts in stage/block order.
         let mut part_x_flags: Vec<Vec<bool>> = Vec::new();
 
-        for (stage_parts, &staged) in parts_in_stages.iter().copied().zip(stageds.iter()) {
+        for (stage_parts, &_staged) in parts_in_stages.iter().copied().zip(stageds.iter()) {
             let mut stage_flags = vec![false; stage_parts.len()];
             for (part_id, part) in stage_parts.iter().enumerate() {
                 // Check all hier levels in all stages of this partition
@@ -1352,13 +1364,12 @@ fn build_flattened_script_v1(
                     // if num_stages == 0, it's just 256 words (dummy).
                     let num_stages = blocks_data[offset] as usize;
                     if num_stages == 0 {
-                        offset += NUM_THREADS_V1;
                         break; // dummy partition means no more in this block
                     }
                     let num_gr_rounds = blocks_data[offset + 6] as usize;
-                    let num_srams = blocks_data[offset + 4] as usize;
-                    let num_ios = blocks_data[offset + 2] as usize;
-                    let num_dup = blocks_data[offset + 7] as usize;
+                    let _num_srams = blocks_data[offset + 4] as usize;
+                    let _num_ios = blocks_data[offset + 2] as usize;
+                    let _num_dup = blocks_data[offset + 7] as usize;
                     // Script size = metadata(256) + global_read(2*rounds*256) +
                     //   boomerang(num_stages * 5*256*4) + sram_dup(5*256*4) + clken(5*256*4)
                     offset += NUM_THREADS_V1; // metadata
@@ -1401,6 +1412,9 @@ fn build_flattened_script_v1(
         xprop_enabled,
         partition_x_capable,
         xprop_state_offset,
+        // Timing arrival readback fields - enabled later via --timing-vcd
+        timing_arrivals_enabled: false,
+        arrival_state_offset: 0,
     }
 }
 
@@ -1411,11 +1425,28 @@ impl FlattenedScriptV1 {
     /// `[values (reg_io_state_size) | xmask (reg_io_state_size)]`.
     /// The kernel indexes into the X-mask section at offset `xprop_state_offset`.
     pub fn effective_state_size(&self) -> u32 {
+        let mut size = self.reg_io_state_size;
         if self.xprop_enabled {
-            self.reg_io_state_size * 2
-        } else {
-            self.reg_io_state_size
+            size += self.reg_io_state_size;
         }
+        if self.timing_arrivals_enabled {
+            size += self.reg_io_state_size;
+        }
+        size
+    }
+
+    /// Enable timing arrival readback for timed VCD output.
+    ///
+    /// Must be called after loading SDF timing data. Sets the arrival state
+    /// offset based on current state layout (values + optional xmask).
+    pub fn enable_timing_arrivals(&mut self) {
+        assert!(
+            self.timing_enabled,
+            "Cannot enable timing arrivals without SDF timing data"
+        );
+        self.timing_arrivals_enabled = true;
+        self.arrival_state_offset =
+            self.reg_io_state_size * (1 + self.xprop_enabled as u32);
     }
 
     /// build a flattened script.
@@ -1705,14 +1736,16 @@ impl FlattenedScriptV1 {
 
         for aigpin in 1..=aig.num_aigpins {
             let origin = &aig.aigpin_cell_origins[aigpin];
-            let delay = if let Some((cellid, _cell_type, output_pin_name)) = origin.first() {
-                // This AIG pin has a cell origin — look up its delay.
+            let delay = if !origin.is_empty() {
+                // This AIG pin has cell origin(s) — sum delays across all origins.
+                // When multiple cells share an AIG pin (e.g., inverter chain collapsed
+                // to a single wire), their delays form a serial chain and must be summed.
                 let mut total_rise: u64 = 0;
                 let mut total_fall: u64 = 0;
                 let mut any_matched = false;
                 let mut any_unmatched = false;
 
-                {
+                for (cellid, _cell_type, output_pin_name) in origin {
                     if let Some(sdf_path) = cellid_to_sdf_path.get(cellid) {
                         if let Some(sdf_cell) = sdf.get_cell(sdf_path) {
                             let iopath = sdf_cell
@@ -1900,6 +1933,8 @@ mod sdf_delay_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2022,7 +2057,6 @@ mod sdf_delay_tests {
     // accumulation doesn't apply. Disabled until the type is reconciled.
 
     #[test]
-    #[ignore = "requires multi-origin aigpin_cell_originss (Vec<Vec<...>>) not yet available"]
     fn test_accumulated_delay_analytical() {
         // Verify accumulated delay matches hand-computed SDF sum.
         // SDF typ corner values (middle of min:typ:max triples):
@@ -2153,6 +2187,8 @@ mod sdf_delay_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2411,6 +2447,8 @@ mod constraint_buffer_tests {
             xprop_enabled: false,
             partition_x_capable: Vec::new(),
             xprop_state_offset: 0,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2755,6 +2793,8 @@ mod xprop_tests {
             xprop_enabled,
             partition_x_capable: Vec::new(),
             xprop_state_offset: if xprop_enabled { rio } else { 0 },
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -2833,5 +2873,42 @@ mod xprop_tests {
             blocks_data[9], rio,
             "word 9 should still be xprop_state_offset"
         );
+    }
+
+    #[test]
+    fn test_effective_state_size_with_timing_arrivals() {
+        let mut script = make_xprop_script(42, false);
+        // Simulate loading SDF timing
+        script.timing_enabled = true;
+        script.enable_timing_arrivals();
+        assert_eq!(
+            script.effective_state_size(),
+            84,
+            "timing arrivals (no xprop): effective == 2 * rio"
+        );
+        assert_eq!(script.arrival_state_offset, 42);
+    }
+
+    #[test]
+    fn test_effective_state_size_xprop_and_timing_arrivals() {
+        let mut script = make_xprop_script(42, true);
+        script.timing_enabled = true;
+        script.enable_timing_arrivals();
+        assert_eq!(
+            script.effective_state_size(),
+            126,
+            "xprop + timing arrivals: effective == 3 * rio"
+        );
+        assert_eq!(
+            script.arrival_state_offset, 84,
+            "arrival offset should be 2*rio when xprop enabled"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot enable timing arrivals without SDF timing data")]
+    fn test_enable_timing_arrivals_requires_timing() {
+        let mut script = make_xprop_script(42, false);
+        script.enable_timing_arrivals(); // Should panic - timing_enabled is false
     }
 }

@@ -84,11 +84,9 @@ pub enum DriverType {
 - Max 64 SRAM output groups
 
 **Process**:
-- Interactive partitioning (`loom map`)
+- Interactive partitioning (runs automatically at simulation start)
 - Tries 1 partition first, then increases if needed
 - Merges partitions to minimize inter-partition communication
-
-**Output**: `.gemparts` file with partition assignments
 
 ### 5. FlattenedScript (GPU Instruction Generation)
 
@@ -283,7 +281,32 @@ WARN (GATESIM_VCDI_MISSING_PI) Primary input port (HierName(), "reset", None) no
 - Reset timing issues
 **Status**: Identified through third-party test suite
 
-### 3. Format String Preservation
+### 3. No Latch or Asynchronous Sequential Logic Support
+
+**Issue**: Loom only supports edge-triggered D flip-flops (DFFs) as sequential elements. Latch-based designs (SR latches, transparent latches, master-slave latch pairs) and asynchronous sequential logic are not supported.
+
+**Impact**: Designs using latches will either:
+- Fail during AIG conversion (unrecognized cell type)
+- Be silently treated as combinational logic (incorrect simulation)
+
+**What this means in practice**:
+- Gate-level netlists must be synthesized to a DFF-only cell library (AIGPDK or SKY130)
+- CVC's built-in test suite (`tests_and_examples/install.test/`) uses NAND-latch flip-flops (e.g., `dfpsetd.v`, `sdfia04.v`) and cannot be used as Loom reference tests
+- Self-timed designs with internal clock generation (e.g., CVC's `das_lfsr` benchmark) are also unsupported
+
+**What would be needed to support latches**:
+1. **New DriverType variant**: Add `Latch(enable, data)` to `DriverType` in `aig.rs`, representing a level-sensitive storage element
+2. **Two-phase evaluation**: Latches are transparent when enabled, requiring evaluation within a clock phase rather than only at clock edges. The current cycle-based simulation model (evaluate all combinational logic, then capture DFF outputs) would need to iterate until latch outputs stabilize
+3. **AIG conversion**: Map latch library cells (e.g., SKY130 `dlxtp`) to the new `Latch` driver, identifying enable and data pins
+4. **GPU kernel changes**: The writeout stage currently uses `clken_perm` for DFF clock gating. Latches would need a different mechanism: while enable is high, output tracks input continuously rather than capturing on an edge
+5. **Timing**: Latch timing is more complex — setup/hold is relative to the enable edge, and time borrowing across latch boundaries is a key use case in high-performance designs
+6. **Convergence**: Combinational loops through transparent latches must be detected and iterated to a fixed point, or flagged as errors
+
+**Complexity estimate**: Moderate-to-high. The main challenge is the evaluation model change — DFF-only simulation is a clean "capture at edge" model, while latches require iterative evaluation within clock phases.
+
+**Status**: Not planned. Loom targets synthesis flows that produce DFF-only netlists.
+
+### 4. Format String Preservation
 **Issue**: Yosys synthesis may not preserve `gem_format` attributes
 **Impact**: Display messages show placeholders instead of actual format strings
 **Workaround**: Extract format strings from pre-synthesis JSON

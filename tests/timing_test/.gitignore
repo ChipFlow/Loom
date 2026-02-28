@@ -11,7 +11,8 @@ gem_output*.vcd
 
 # Compiled outputs
 *.vvp
-*.gemparts
+cvcsim
+verilog.log
 
 # Generated SDF (from gen_sdf.sh)
 minimal_build/6_final.sdf
@@ -21,7 +22,8 @@ gpu_events.json
 
 # Exception: keep tracked test files
 !dff_test.vcd
-!dff_test.gemparts
 !dff_test_synth.gv
 !sky130_timing/*.v
 !sky130_timing/*.vcd
+!inv_chain_pnr/inv_chain_stimulus.vcd
+!multi_depth/multi_depth_stimulus.vcd

@@ -133,12 +133,22 @@ jobs:
             cp "$LAST_NL" tests/mcu_soc/data/6_final_raw.v
           fi
 
-          # SDF timing (nom corner)
+          # SDF timing — prefer post-PnR (stapostpnr) over pre-PnR (staprepnr)
+          # Use nom_tt (typical) corner for simulation
           if ls "$RUN_DIR"/final/sdf/*.sdf 1>/dev/null 2>&1; then
             cp "$RUN_DIR"/final/sdf/*.sdf tests/mcu_soc/data/6_final.sdf
           else
-            LAST_SDF=$(find "$RUN_DIR" -name '*.sdf' 2>/dev/null | sort -r | head -1)
-            [ -n "$LAST_SDF" ] && cp "$LAST_SDF" tests/mcu_soc/data/6_final.sdf || true
+            POSTPNR_SDF=$(find "$RUN_DIR" -path '*stapostpnr*' -name '*nom_tt*.sdf' 2>/dev/null | head -1)
+            PREPNR_SDF=$(find "$RUN_DIR" -path '*staprepnr*' -name '*nom_tt*.sdf' 2>/dev/null | head -1)
+            if [ -n "$POSTPNR_SDF" ]; then
+              echo "Using post-PnR SDF: $POSTPNR_SDF"
+              cp "$POSTPNR_SDF" tests/mcu_soc/data/6_final.sdf
+            elif [ -n "$PREPNR_SDF" ]; then
+              echo "::warning::Post-PnR SDF not found, using pre-PnR SDF: $PREPNR_SDF"
+              cp "$PREPNR_SDF" tests/mcu_soc/data/6_final.sdf
+            else
+              echo "::warning::No SDF files found"
+            fi
           fi
 
           # SDC constraints

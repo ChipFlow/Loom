@@ -127,28 +127,18 @@ cargo run -r --features metal --bin loom -- sim --help
 cargo run -r --features cuda --bin loom -- sim --help
 ```
 
-## Map the Design with Loom
-
-Loom compiles and links to [mt-kahypar-sc](https://github.com/gzz2000/mt-kahypar-sc) for hypergraph partitioning automatically.
-
-Run the following command to start the Boolean processor mapping.
-
-``` sh
-cargo run -r --bin loom -- map path/to/gatelevel.gv path/to/result.gemparts
-```
-
-The mapped result will be stored in a binary file `result.gemparts`.
-
-If the mapping failed due to failure to partition deep circuits (which often shows as trying to partition a circuit with only 0 or 1 endpoints), try adding a `--level-split` option to force a stage split. For example `--level-split 30` or `--level-split 20,40`. If you used this, remember to add the same `--level-split` option when you simulate.
-
 ## Simulate the Design
+
+Loom automatically partitions the design at startup using [mt-kahypar-sc](https://github.com/gzz2000/mt-kahypar-sc) hypergraph partitioning.
+
+If partitioning fails due to deep circuits (which often shows as trying to partition a circuit with only 0 or 1 endpoints), try adding a `--level-split` option to force a stage split. For example `--level-split 30` or `--level-split 20,40`.
 
 ### Metal (macOS)
 
 Use `NUM_BLOCKS=1` for Metal.
 
 ``` sh
-cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1
+cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/input.vcd path/to/output.vcd 1
 ```
 
 ### CUDA (Linux)
@@ -156,7 +146,7 @@ cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/res
 Replace `NUM_BLOCKS` with twice the number of physical streaming multiprocessors (SMs) of your GPU.
 
 ``` sh
-cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS
+cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/input.vcd path/to/output.vcd NUM_BLOCKS
 ```
 
 ### VCD Scope Handling
@@ -165,10 +155,10 @@ Loom automatically detects the correct VCD scope containing your design's ports.
 
 ``` sh
 # Metal
-cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
+cargo run -r --features metal --bin loom -- sim path/to/gatelevel.gv path/to/input.vcd path/to/output.vcd 1 --input-vcd-scope "testbench/dut"
 
 # CUDA
-cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/result.gemparts path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
+cargo run -r --features cuda --bin loom -- sim path/to/gatelevel.gv path/to/input.vcd path/to/output.vcd NUM_BLOCKS --input-vcd-scope "testbench/dut"
 ```
 
 Use slash separators (`/`) for hierarchical paths, not dots. See [troubleshooting-vcd.md](troubleshooting-vcd.md) for details.

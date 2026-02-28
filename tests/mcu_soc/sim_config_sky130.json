@@ -5,12 +5,12 @@
     "reset_cycles": 10,
     "num_cycles": 500000,
     "clock_period_ps": 40000,
-    "netlist_path": "tests/mcu_soc/build/6_final.v",
+    "netlist_path": "tests/mcu_soc/data/6_final.v",
     "flash": {
         "clk_gpio": 0,
         "csn_gpio": 1,
         "d0_gpio": 2,
-        "firmware": "tests/mcu_soc/build/software.bin",
+        "firmware": "tests/mcu_soc/software.bin",
         "firmware_offset": 1048576
     },
     "uart": {
@@ -27,5 +27,10 @@
         "porb_l": 1,
         "resetb_h": 1,
         "resetb_l": 1
+    },
+    "timing": {
+        "sdf_file": "tests/mcu_soc/data/6_final.sdf",
+        "sdf_corner": "typ",
+        "clock_period_ps": 40000
     }
 }

@@ -475,6 +475,12 @@ fn build_one_boomerang_stage(
         }
     }
 
+    // sort level-1 endpoints by logic level so signals with similar timing
+    // land in the same 32-slot groups, tightening the conservative timing estimate.
+    let timer_sort = clilog::stimer!("timing-aware lvl1 sort");
+    endpoints_lvl1.sort_by_key(|&nd| level[id2order[nd]]);
+    clilog::finish!(timer_sort);
+
     // collect all 32-consecutive level 1 spaces.
     // (num occupied, i), will be sorted later.
     let mut spaces = Vec::new();
@@ -534,13 +540,16 @@ fn build_one_boomerang_stage(
         return None;
     }
 
-    // then place all remaining lvl1 nodes in any order.
-    // clilog::debug!("last_lvl1_necessary: {}, hier visited: {}, realized endpts: {}", last_lvl1_necessary_nodes.len(), hier_visited_nodes_count.len(), realized_endpoints.len());
+    // place all remaining lvl1 nodes, sorted by logic level for timing-aware packing.
+    let mut sorted_remaining_lvl1: Vec<usize> = last_lvl1_necessary_nodes
+        .iter()
+        .copied()
+        .filter(|&nd| hier_visited_nodes_count[nd] == 0 && !realized_endpoints.contains(&nd))
+        .collect();
+    sorted_remaining_lvl1.sort_by_key(|&nd| level[id2order[nd]]);
+
     let mut hier1_j = 0;
-    for &nd in &last_lvl1_necessary_nodes {
-        if hier_visited_nodes_count[nd] > 0 || realized_endpoints.contains(&nd) {
-            continue;
-        }
+    for &nd in &sorted_remaining_lvl1 {
         while hier[1][hier1_j] != usize::MAX {
             hier1_j += 1;
             if hier1_j >= hier[1].len() {
@@ -566,6 +575,39 @@ fn build_one_boomerang_stage(
         if hier1_j >= hier[1].len() {
             clilog::trace!("boomerang: overflow putting lvl1 (just a zero pin..)");
             return None;
+        }
+    }
+
+    // measure timing spread per 32-signal group at hier[1].
+    {
+        let mut max_spread: usize = 0;
+        let mut total_spread: usize = 0;
+        let mut num_groups: usize = 0;
+        for group in 0..hier[1].len() / 32 {
+            let levels: Vec<usize> = (group * 32..(group + 1) * 32)
+                .filter_map(|j| {
+                    let nd = hier[1][j];
+                    if nd != usize::MAX {
+                        Some(level[id2order[nd]])
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if levels.len() > 1 {
+                let spread = levels.iter().max().unwrap() - levels.iter().min().unwrap();
+                max_spread = max_spread.max(spread);
+                total_spread += spread;
+                num_groups += 1;
+            }
+        }
+        if num_groups > 0 {
+            clilog::info!(
+                "Timing packing: {} groups, avg level spread {:.1}, max spread {}",
+                num_groups,
+                total_spread as f64 / num_groups as f64,
+                max_spread
+            );
         }
     }
 

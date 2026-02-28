@@ -10,17 +10,18 @@ use crate::aig::{DriverType, AIG};
 use crate::aigpdk::AIGPDKLeafPins;
 use crate::display::extract_display_info_from_json;
 use crate::flatten::FlattenedScriptV1;
-use crate::pe::Partition;
+use crate::pe::{process_partitions, Partition};
+use crate::repcut::RCHyperGraph;
 use crate::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
-use crate::staging::build_staged_aigs;
+use crate::staging::{build_staged_aigs, StagedAIG};
 use netlistdb::NetlistDB;
+use rayon::prelude::*;
 
 /// Parameters for loading a design.
 pub struct DesignArgs {
     pub netlist_verilog: PathBuf,
     pub top_module: Option<String>,
     pub level_split: Vec<usize>,
-    pub gemparts: PathBuf,
     pub num_blocks: usize,
     pub json_path: Option<PathBuf>,
     pub sdf: Option<PathBuf>,
@@ -96,9 +97,7 @@ pub fn load_design(args: &DesignArgs) -> LoadedDesign {
 
     let stageds = build_staged_aigs(&aig, &args.level_split);
 
-    let f = std::fs::File::open(&args.gemparts).unwrap();
-    let mut buf = std::io::BufReader::new(f);
-    let parts_in_stages: Vec<Vec<Partition>> = serde_bare::from_reader(&mut buf).unwrap();
+    let parts_in_stages: Vec<Vec<Partition>> = generate_partitions(&aig, &stageds, 0);
     clilog::info!(
         "# of effective partitions in each stage: {:?}",
         parts_in_stages
@@ -241,4 +240,108 @@ pub fn build_timing_constraints(script: &FlattenedScriptV1) -> Option<Vec<u32>> 
     } else {
         None
     }
+}
+
+/// Invoke the mt-kahypar partitioner.
+fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
+    clilog::debug!("invoking partitioner (#parts {})", num_parts);
+    // mt-kahypar requires k >= 2, handle k=1 manually
+    if num_parts == 1 {
+        return vec![(0..hg.num_vertices()).collect()];
+    }
+
+    let parts_ids = hg.partition(num_parts);
+    let mut parts = vec![vec![]; num_parts];
+    for (i, part_id) in parts_ids.into_iter().enumerate() {
+        parts[part_id].push(i);
+    }
+    parts
+}
+
+/// Generate partitions from the AIG and staged AIGs.
+///
+/// Iteratively partitions endpoints using mt-kahypar hypergraph partitioning.
+/// `max_stage_degrad` controls how many degradation layers are allowed
+/// during partition merging (0 = no degradation).
+fn generate_partitions(
+    aig: &AIG,
+    stageds: &[(usize, usize, StagedAIG)],
+    max_stage_degrad: usize,
+) -> Vec<Vec<Partition>> {
+    stageds
+        .iter()
+        .map(|&(l, r, ref staged)| {
+            clilog::info!(
+                "interactive partitioning stage {}-{}",
+                l,
+                match r {
+                    usize::MAX => "max".to_string(),
+                    r => format!("{}", r),
+                }
+            );
+
+            let mut parts_good: Vec<(Vec<usize>, Partition)> = Vec::new();
+            let mut unrealized_endpoints =
+                (0..staged.num_endpoint_groups()).collect::<Vec<_>>();
+            let mut division = 600;
+
+            while !unrealized_endpoints.is_empty() {
+                division = (division / 2).max(1);
+                let num_parts = (unrealized_endpoints.len() + division - 1) / division;
+                clilog::info!(
+                    "current: {} endpoints, try {} parts",
+                    unrealized_endpoints.len(),
+                    num_parts
+                );
+                let staged_ur = staged.to_endpoint_subset(&unrealized_endpoints);
+                let hg_ur = RCHyperGraph::from_staged_aig(aig, &staged_ur);
+                let mut parts_indices = run_par(&hg_ur, num_parts);
+                for idcs in &mut parts_indices {
+                    for i in idcs {
+                        *i = unrealized_endpoints[*i];
+                    }
+                }
+                let parts_try = parts_indices
+                    .par_iter()
+                    .map(|endpts| Partition::build_one(aig, staged, endpts))
+                    .collect::<Vec<_>>();
+                let mut new_unrealized_endpoints = Vec::new();
+                for (idx, part_opt) in parts_indices.into_iter().zip(parts_try.into_iter()) {
+                    match part_opt {
+                        Some(part) => {
+                            parts_good.push((idx, part));
+                        }
+                        None => {
+                            if idx.len() == 1 {
+                                panic!("A single endpoint still cannot map, you need to increase level cut granularity.");
+                            }
+                            for endpt_i in idx {
+                                new_unrealized_endpoints.push(endpt_i);
+                            }
+                        }
+                    }
+                }
+                new_unrealized_endpoints.sort_unstable();
+                unrealized_endpoints = new_unrealized_endpoints;
+            }
+
+            clilog::info!(
+                "interactive partition completed: {} in total. merging started.",
+                parts_good.len()
+            );
+
+            let (parts_indices_good, prebuilt): (Vec<_>, Vec<_>) =
+                parts_good.into_iter().unzip();
+            let effective_parts = process_partitions(
+                aig,
+                staged,
+                parts_indices_good,
+                Some(prebuilt),
+                max_stage_degrad,
+            )
+            .unwrap();
+            clilog::info!("after merging: {} parts.", effective_parts.len());
+            effective_parts
+        })
+        .collect::<Vec<_>>()
 }

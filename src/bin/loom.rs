@@ -6,14 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use gem::aig::AIG;
-use gem::aigpdk::AIGPDKLeafPins;
-use gem::pe::{process_partitions, Partition};
-use gem::repcut::RCHyperGraph;
 use gem::sim::setup::DesignArgs;
-use gem::sky130::{detect_library_from_file, CellLibrary, SKY130LeafPins};
-use gem::staging::build_staged_aigs;
-use netlistdb::NetlistDB;
-use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "loom", about = "Loom — GPU-accelerated RTL logic simulator")]
@@ -24,16 +17,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Map a synthesized gate-level netlist to a .gemparts partition file.
-    ///
-    /// This is the first step in the Loom workflow. The resulting .gemparts file
-    /// is then used by `loom sim` to run the design on a GPU.
-    Map(MapArgs),
-
     /// Run a GPU simulation with VCD input/output.
     ///
-    /// Reads a gate-level netlist and partition file, processes a VCD input
-    /// waveform through the GPU simulator, and writes the output VCD.
+    /// Reads a gate-level netlist, partitions it automatically, processes a VCD
+    /// input waveform through the GPU simulator, and writes the output VCD.
     /// Requires building with `--features metal` (macOS), `--features cuda` (Linux/NVIDIA),
     /// or `--features hip` (Linux/AMD).
     Sim(SimArgs),
@@ -47,51 +34,9 @@ enum Commands {
 }
 
 #[derive(Parser)]
-struct MapArgs {
-    /// Gate-level Verilog path synthesized with the AIGPDK or SKY130 library.
-    ///
-    /// If your design is still at RTL level, you must synthesize it first.
-    /// See usage.md for synthesis instructions.
-    netlist_verilog: PathBuf,
-
-    /// Output path for the serialized partition file (.gemparts).
-    parts_out: PathBuf,
-
-    /// Top module name in the netlist.
-    ///
-    /// If not specified, Loom guesses the top module from the hierarchy.
-    #[clap(long)]
-    top_module: Option<String>,
-
-    /// Level split thresholds for deep circuits.
-    ///
-    /// If mapping fails because a single endpoint cannot be partitioned,
-    /// add level-split thresholds (e.g. --level-split 30 or --level-split 20,40).
-    /// Remember to pass the same thresholds when simulating.
-    #[clap(long, value_delimiter = ',')]
-    level_split: Vec<usize>,
-
-    /// Maximum stage degradation layers allowed during partition merging.
-    ///
-    /// Default is 0, meaning no degradation is allowed.
-    #[clap(long, default_value_t = 0)]
-    max_stage_degrad: usize,
-
-    /// Enable selective X-propagation analysis (informational only at map time).
-    ///
-    /// Reports how many pins and partitions would be X-capable. The actual
-    /// X-propagation is enabled at simulation time with `loom sim --xprop`.
-    #[clap(long)]
-    xprop: bool,
-}
-
-#[derive(Parser)]
 struct SimArgs {
     /// Gate-level Verilog path synthesized with AIGPDK or SKY130 library.
     netlist_verilog: PathBuf,
-
-    /// Pre-compiled partition mapping (.gemparts file).
-    gemparts: PathBuf,
 
     /// VCD input signal path.
     input_vcd: String,
@@ -168,15 +113,20 @@ struct SimArgs {
     /// Path to Liberty library file for timing data.
     #[clap(long)]
     liberty: Option<PathBuf>,
+
+    /// Enable timing-accurate VCD output with per-signal arrival times.
+    ///
+    /// Requires --sdf. Signal transitions in the output VCD are offset from
+    /// clock edges by their computed arrival times rather than placed at the
+    /// clock edge.
+    #[clap(long)]
+    timing_vcd: bool,
 }
 
 #[derive(Parser)]
 struct CosimArgs {
     /// Gate-level Verilog path synthesized with AIGPDK or SKY130 library.
     netlist_verilog: PathBuf,
-
-    /// Pre-compiled partition mapping (.gemparts file).
-    gemparts: PathBuf,
 
     /// Testbench configuration JSON file.
     #[clap(long)]
@@ -225,156 +175,11 @@ struct CosimArgs {
     /// Enable SDF debug output.
     #[clap(long)]
     sdf_debug: bool,
-}
 
-/// Invoke the mt-kahypar partitioner.
-fn run_par(hg: &RCHyperGraph, num_parts: usize) -> Vec<Vec<usize>> {
-    clilog::debug!("invoking partitioner (#parts {})", num_parts);
-    // mt-kahypar requires k >= 2, handle k=1 manually
-    if num_parts == 1 {
-        return vec![(0..hg.num_vertices()).collect()];
-    }
-
-    let parts_ids = hg.partition(num_parts);
-    let mut parts = vec![vec![]; num_parts];
-    for (i, part_id) in parts_ids.into_iter().enumerate() {
-        parts[part_id].push(i);
-    }
-    parts
-}
-
-fn cmd_map(args: MapArgs) {
-    clilog::info!("Loom map args:\n{:#?}", args.netlist_verilog);
-
-    // Detect cell library
-    let lib = detect_library_from_file(&args.netlist_verilog).expect("Failed to read netlist file");
-    clilog::info!("Detected cell library: {}", lib);
-
-    if lib == CellLibrary::Mixed {
-        panic!("Mixed AIGPDK and SKY130 cells in netlist not supported");
-    }
-
-    let netlistdb = match lib {
-        CellLibrary::SKY130 => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &SKY130LeafPins,
-        )
-        .expect("cannot build netlist"),
-        CellLibrary::AIGPDK | CellLibrary::Mixed => NetlistDB::from_sverilog_file(
-            &args.netlist_verilog,
-            args.top_module.as_deref(),
-            &AIGPDKLeafPins(),
-        )
-        .expect("cannot build netlist"),
-    };
-
-    let aig = AIG::from_netlistdb(&netlistdb);
-    println!(
-        "netlist has {} pins, {} aig pins, {} and gates",
-        netlistdb.num_pins,
-        aig.num_aigpins,
-        aig.and_gate_cache.len()
-    );
-
-    if args.xprop {
-        let (_x_capable, stats) = aig.compute_x_capable_pins();
-        println!(
-            "X-propagation analysis: {}/{} pins ({:.1}%) X-capable, {} X-sources, {} fixpoint iterations",
-            stats.num_x_capable_pins,
-            stats.total_pins,
-            if stats.total_pins > 0 {
-                stats.num_x_capable_pins as f64 / stats.total_pins as f64 * 100.0
-            } else {
-                0.0
-            },
-            stats.num_x_sources,
-            stats.fixpoint_iterations,
-        );
-    }
-
-    let stageds = build_staged_aigs(&aig, &args.level_split);
-
-    let stages_effective_parts = stageds
-        .iter()
-        .map(|&(l, r, ref staged)| {
-            clilog::info!(
-                "interactive partitioning stage {}-{}",
-                l,
-                match r {
-                    usize::MAX => "max".to_string(),
-                    r => format!("{}", r),
-                }
-            );
-
-            let mut parts_good: Vec<(Vec<usize>, Partition)> = Vec::new();
-            let mut unrealized_endpoints =
-                (0..staged.num_endpoint_groups()).collect::<Vec<_>>();
-            let mut division = 600;
-
-            while !unrealized_endpoints.is_empty() {
-                division = (division / 2).max(1);
-                let num_parts = (unrealized_endpoints.len() + division - 1) / division;
-                clilog::info!(
-                    "current: {} endpoints, try {} parts",
-                    unrealized_endpoints.len(),
-                    num_parts
-                );
-                let staged_ur = staged.to_endpoint_subset(&unrealized_endpoints);
-                let hg_ur = RCHyperGraph::from_staged_aig(&aig, &staged_ur);
-                let mut parts_indices = run_par(&hg_ur, num_parts);
-                for idcs in &mut parts_indices {
-                    for i in idcs {
-                        *i = unrealized_endpoints[*i];
-                    }
-                }
-                let parts_try = parts_indices
-                    .par_iter()
-                    .map(|endpts| Partition::build_one(&aig, staged, endpts))
-                    .collect::<Vec<_>>();
-                let mut new_unrealized_endpoints = Vec::new();
-                for (idx, part_opt) in parts_indices.into_iter().zip(parts_try.into_iter()) {
-                    match part_opt {
-                        Some(part) => {
-                            parts_good.push((idx, part));
-                        }
-                        None => {
-                            if idx.len() == 1 {
-                                panic!("A single endpoint still cannot map, you need to increase level cut granularity.");
-                            }
-                            for endpt_i in idx {
-                                new_unrealized_endpoints.push(endpt_i);
-                            }
-                        }
-                    }
-                }
-                new_unrealized_endpoints.sort_unstable();
-                unrealized_endpoints = new_unrealized_endpoints;
-            }
-
-            clilog::info!(
-                "interactive partition completed: {} in total. merging started.",
-                parts_good.len()
-            );
-
-            let (parts_indices_good, prebuilt): (Vec<_>, Vec<_>) =
-                parts_good.into_iter().unzip();
-            let effective_parts = process_partitions(
-                &aig,
-                staged,
-                parts_indices_good,
-                Some(prebuilt),
-                args.max_stage_degrad,
-            )
-            .unwrap();
-            clilog::info!("after merging: {} parts.", effective_parts.len());
-            effective_parts
-        })
-        .collect::<Vec<_>>();
-
-    let f = std::fs::File::create(&args.parts_out).unwrap();
-    let mut buf = std::io::BufWriter::new(f);
-    serde_bare::to_writer(&mut buf, &stages_effective_parts).unwrap();
+    /// Path to write stimulus VCD (all primary inputs driven by cosim).
+    /// Forces single-tick mode for accurate per-cycle capture.
+    #[clap(long)]
+    stimulus_vcd: Option<PathBuf>,
 }
 
 #[allow(unused_variables)]
@@ -386,7 +191,6 @@ fn cmd_sim(args: SimArgs) {
         netlist_verilog: args.netlist_verilog.clone(),
         top_module: args.top_module.clone(),
         level_split: args.level_split.clone(),
-        gemparts: args.gemparts.clone(),
         num_blocks: args.num_blocks,
         json_path: args.json_path.clone(),
         sdf: args.sdf.clone(),
@@ -398,6 +202,16 @@ fn cmd_sim(args: SimArgs) {
 
     #[allow(unused_mut)]
     let mut design = setup::load_design(&design_args);
+
+    // Enable timing arrival readback if --timing-vcd is set
+    if args.timing_vcd {
+        if args.sdf.is_none() {
+            eprintln!("Error: --timing-vcd requires --sdf");
+            std::process::exit(1);
+        }
+        design.script.enable_timing_arrivals();
+    }
+
     let timing_constraints = setup::build_timing_constraints(&design.script);
 
     // Parse input VCD
@@ -496,7 +310,18 @@ fn cmd_sim(args: SimArgs) {
     if args.check_with_cpu {
         if design.script.xprop_enabled {
             let rio = design.script.reg_io_state_size as usize;
-            let (gpu_values, gpu_xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
+            // When timing arrivals are enabled, effective size is 3*rio instead of 2*rio.
+            // Extract values and xmasks manually using the actual effective size.
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut gpu_values_vec = Vec::with_capacity(num_snapshots * rio);
+            let mut gpu_xmasks_vec = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                let base = snap_i * eff;
+                gpu_values_vec.extend_from_slice(&gpu_states[base..base + rio]);
+                gpu_xmasks_vec.extend_from_slice(&gpu_states[base + rio..base + 2 * rio]);
+            }
+            let (gpu_values, gpu_xmasks) = (gpu_values_vec, gpu_xmasks_vec);
             // Build input X-masks: same initial template as expand_states_for_xprop
             let num_input_snaps = input_states.len() / rio;
             let mut xmask_template = vec![0xFFFF_FFFFu32; rio];
@@ -513,6 +338,21 @@ fn cmd_sim(args: SimArgs) {
                 &gpu_values,
                 &input_xmasks,
                 &gpu_xmasks,
+                num_cycles,
+            );
+        } else if design.script.timing_arrivals_enabled {
+            // Extract value-only states for CPU comparison
+            let rio = design.script.reg_io_state_size as usize;
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut values = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                values.extend_from_slice(&gpu_states[snap_i * eff..snap_i * eff + rio]);
+            }
+            gem::sim::cpu_reference::sanity_check_cpu(
+                &design.script,
+                &input_states,
+                &values,
                 num_cycles,
             );
         } else {
@@ -533,7 +373,44 @@ fn cmd_sim(args: SimArgs) {
 
     // Write output VCD
     #[cfg(any(feature = "metal", feature = "cuda", feature = "hip"))]
-    if design.script.xprop_enabled {
+    if args.timing_vcd && design.script.timing_arrivals_enabled {
+        // Timed VCD: extract arrivals and use timed writer
+        let rio = design.script.reg_io_state_size as usize;
+        let arrival_states = vcd_io::split_arrival_states(&gpu_states[..], &design.script);
+        // Debug: show arrival statistics
+        let nonzero_count = arrival_states.iter().filter(|&&v| v != 0).count();
+        clilog::info!("Arrival states: {} total, {} non-zero",
+            arrival_states.len(), nonzero_count);
+        let xmask_states = if design.script.xprop_enabled {
+            let eff = design.script.effective_state_size() as usize;
+            let num_snapshots = gpu_states.len() / eff;
+            let mut xmasks = Vec::with_capacity(num_snapshots * rio);
+            for snap_i in 0..num_snapshots {
+                let base = snap_i * eff + rio;
+                xmasks.extend_from_slice(&gpu_states[base..base + rio]);
+            }
+            Some(xmasks)
+        } else {
+            None
+        };
+        // Extract value-only states (same as split_xprop but works for any layout)
+        let eff = design.script.effective_state_size() as usize;
+        let num_snapshots = gpu_states.len() / eff;
+        let mut values = Vec::with_capacity(num_snapshots * rio);
+        for snap_i in 0..num_snapshots {
+            let base = snap_i * eff;
+            values.extend_from_slice(&gpu_states[base..base + rio]);
+        }
+        vcd_io::write_output_vcd_timed(
+            &mut writer,
+            &output_mapping,
+            &offsets_timestamps,
+            &values,
+            xmask_states.as_deref(),
+            &arrival_states,
+            header.timescale,
+        );
+    } else if design.script.xprop_enabled {
         let rio = design.script.reg_io_state_size as usize;
         let (values, xmasks) = vcd_io::split_xprop_states(&gpu_states[..], rio);
         vcd_io::write_output_vcd_xprop(
@@ -620,11 +497,15 @@ fn sim_metal(
     let num_cycles = offsets_timestamps.len();
 
     // When xprop is enabled, expand the value-only state buffer to include X-mask
-    let expanded_states = if script.xprop_enabled {
+    let mut expanded_states = if script.xprop_enabled {
         gem::sim::vcd_io::expand_states_for_xprop(input_states, script)
     } else {
         input_states.to_vec()
     };
+    // When timing arrivals are enabled, expand further to include arrival section
+    if script.timing_arrivals_enabled {
+        expanded_states = gem::sim::vcd_io::expand_states_for_arrivals(&expanded_states, script);
+    }
     let mut input_states_uvec: UVec<_> = expanded_states.into();
     input_states_uvec.as_mut_uptr(device);
     let mut sram_storage: UVec<u32> = UVec::new_zeroed(script.sram_storage_size as usize, device);
@@ -707,6 +588,7 @@ fn sim_metal(
         state_size: u64,
         current_cycle: u64,
         current_stage: u64,
+        arrival_state_offset: u64,
     }
 
     let assert_config = AssertConfig::default();
@@ -729,6 +611,7 @@ fn sim_metal(
                 state_size: script.effective_state_size() as u64,
                 current_cycle: cycle_i as u64,
                 current_stage: stage_i as u64,
+                arrival_state_offset: script.arrival_state_offset as u64,
             };
 
             let params_buffer = mtl_device.new_buffer_with_data(
@@ -1353,7 +1236,6 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Map(args) => cmd_map(args),
         Commands::Sim(args) => cmd_sim(args),
         Commands::Cosim(args) => cmd_cosim(args),
     }
@@ -1409,7 +1291,6 @@ fn cmd_cosim(args: CosimArgs) {
             netlist_verilog: args.netlist_verilog.clone(),
             top_module: args.top_module.clone(),
             level_split: args.level_split.clone(),
-            gemparts: args.gemparts.clone(),
             num_blocks: args.num_blocks,
             json_path: None,
             sdf,
@@ -1429,6 +1310,7 @@ fn cmd_cosim(args: CosimArgs) {
             check_with_cpu: args.check_with_cpu,
             gpu_profile: args.gpu_profile,
             clock_period: args.clock_period,
+            stimulus_vcd: args.stimulus_vcd.clone(),
         };
 
         let result =

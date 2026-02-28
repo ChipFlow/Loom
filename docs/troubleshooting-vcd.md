@@ -31,11 +31,11 @@ If auto-detection fails or selects the wrong scope, use `--input-vcd-scope` to s
 
 ```bash
 # Slash-separated path to the DUT scope
-loom sim design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv input.vcd output.vcd 8 \
     --input-vcd-scope "testbench/dut"
 
 # For nested hierarchies
-loom sim design.gv design.gemparts input.vcd output.vcd 8 \
+loom sim design.gv input.vcd output.vcd 8 \
     --input-vcd-scope "top_tb/subsystem/my_module"
 ```
 
@@ -214,7 +214,7 @@ GEM provides `--input-vcd-scope` to specify which module hierarchy to read:
 
 ```bash
 cargo run -r --features metal --bin loom -- sim \
-    design.gv parts.gemparts input.vcd output.vcd 48 \
+    design.gv input.vcd output.vcd 48 \
     --input-vcd-scope module_name
 ```
 
@@ -301,7 +301,7 @@ After fixing VCD issues, validate GEM is reading inputs correctly:
 
 ```bash
 cargo run -r --features metal --bin loom -- sim \
-    design.gv parts.gemparts input.vcd output.vcd 48 \
+    design.gv input.vcd output.vcd 48 \
     --check-with-cpu
 ```
 
@@ -329,7 +329,7 @@ grep '^[01]!' reference.vcd
 
 ```bash
 cargo run -r --features metal --bin loom -- sim \
-    design.gv parts.gemparts input.vcd output.vcd 48 \
+    design.gv input.vcd output.vcd 48 \
     2>&1 | grep "total number of cycles"
 ```
 

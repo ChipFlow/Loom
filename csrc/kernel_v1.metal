@@ -30,6 +30,7 @@ struct SimParams {
     usize state_size;
     usize current_cycle;
     usize current_stage;
+    usize arrival_state_offset;  // offset in state buffer for arrival data (0 = disabled)
 };
 
 // Helper function to read VectorRead2 from device memory
@@ -69,7 +70,8 @@ inline void simulate_block_v1(
     device const u32* timing_constraints,
     u32 clock_period_ps,
     device struct EventBuffer* event_buffer,
-    u32 cycle_i
+    u32 cycle_i,
+    int arrival_state_offset  // offset in output_state for arrival data (0 = disabled)
 ) {
     int script_pi = 0;
 
@@ -214,11 +216,9 @@ inline void simulate_block_v1(
             hier_flag_xora = t4_5.c1;
             hier_flag_xorb = t4_5.c2;
             hier_flag_orb = t4_5.c3;
+            // Extract gate delay from CURRENT stage's t4_5 BEFORE overwriting with next stage
+            ushort gate_delay = (ushort)(t4_5.c4 & 0xFFFFu);
             t4_5 = read_vec4(script + script_pi + 256 * 4 * 4, tid);
-
-            // Extract per-thread-position gate delay from padding slot (u16 raw picoseconds)
-            u32 hier_flag_padding = t4_5.c4;
-            ushort gate_delay = (ushort)(hier_flag_padding & 0xFFFFu);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
             shared_state[tid] = hier_input;
@@ -244,11 +244,14 @@ inline void simulate_block_v1(
                 }
 
                 // Arrival tracking: max(input_a, input_b) + gate_delay
-                // Pass-through (orb == 0xFFFFFFFF) means no gate, just wire
+                // Pass-through (orb == 0xFFFFFFFF) means no AND gate, just wire/inversion.
+                // Gate delay is still added for pass-throughs because the thread position
+                // may represent physical cells (e.g., inverters) with accumulated delays.
                 ushort arr_a = (ushort)shared_arrival[tid - 128];
                 ushort arr_b = (ushort)shared_arrival[tid];
                 bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-                ushort new_arr = is_pass ? arr_a : (ushort)(max(arr_a, arr_b) + (ushort)gate_delay);
+                ushort base_arr = is_pass ? arr_a : (ushort)max(arr_a, arr_b);
+                ushort new_arr = (ushort)(base_arr + (ushort)gate_delay);
                 shared_arrival[tid] = new_arr;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -277,11 +280,12 @@ inline void simulate_block_v1(
                         shared_state_x[tid] = ret_x;
                     }
 
-                    // Arrival tracking
+                    // Arrival tracking (delay added even for pass-throughs)
                     ushort arr_a = (ushort)shared_arrival[tid + hier_width];
                     ushort arr_b = (ushort)shared_arrival[tid + hier_width * 2];
                     bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-                    ushort new_arr = is_pass ? arr_a : (ushort)(max(arr_a, arr_b) + (ushort)gate_delay);
+                    ushort base_arr = is_pass ? arr_a : (ushort)max(arr_a, arr_b);
+                    ushort new_arr = (ushort)(base_arr + (ushort)gate_delay);
                     tmp_cur_arr = new_arr;
                     shared_arrival[tid] = tmp_cur_arr;
                 }
@@ -308,9 +312,10 @@ inline void simulate_block_v1(
                             u32 b_eff_x = hier_b_x & ~hier_flag_orb;
                             tmp_cur_hi_x = (hier_a_x | b_eff_x) & (a_eff | hier_a_x) & (b_eff | b_eff_x);
                         }
-                        // Arrival tracking
+                        // Arrival tracking (delay added even for pass-throughs)
                         bool is_pass = (hier_flag_orb == 0xFFFFFFFF);
-                        ushort new_arr = is_pass ? (ushort)arr_a_u32 : (ushort)(max((ushort)arr_a_u32, (ushort)arr_b_u32) + (ushort)gate_delay);
+                        ushort base_arr = is_pass ? (ushort)arr_a_u32 : (ushort)max((ushort)arr_a_u32, (ushort)arr_b_u32);
+                        ushort new_arr = (ushort)(base_arr + (ushort)gate_delay);
                         tmp_cur_arr_u32 = (u32)new_arr;
                     }
                 }
@@ -538,6 +543,12 @@ inline void simulate_block_v1(
                          | clken_perm_x;
                 output_state[xmask_state_offset + io_offset + tid] = wo_x;
             }
+
+            // Write arrival time to global memory for timed VCD output
+            if (tid < (uint)num_ios && arrival_state_offset != 0) {
+                output_state[arrival_state_offset + io_offset + tid] =
+                    (u32)shared_writeout_arrival[tid];
+            }
         }
 
         // DFF timing violation check (per writeout word)
@@ -635,7 +646,8 @@ kernel void simulate_v1_stage(
         constraints_data,
         clock_period_ps,
         event_buffer,
-        (u32)cycle_i
+        (u32)cycle_i,
+        (int)params.arrival_state_offset
     );
 }
 

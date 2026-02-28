@@ -498,6 +498,58 @@ pub fn split_xprop_states(
     (values, xmasks)
 }
 
+/// Expand state buffer to include an arrival section for timing VCD output.
+///
+/// Appends `reg_io_state_size` words of zeros after each cycle's existing
+/// state data (values + optional xmask). This reserves space for the GPU
+/// kernel to write per-output arrival times.
+pub fn expand_states_for_arrivals(
+    states: &[u32],
+    script: &FlattenedScriptV1,
+) -> Vec<u32> {
+    let old_eff = if script.xprop_enabled {
+        script.reg_io_state_size as usize * 2
+    } else {
+        script.reg_io_state_size as usize
+    };
+    let rio = script.reg_io_state_size as usize;
+    let new_eff = old_eff + rio;
+    let num_snapshots = states.len() / old_eff;
+    assert_eq!(states.len(), num_snapshots * old_eff);
+
+    let mut expanded = Vec::with_capacity(num_snapshots * new_eff);
+    for snap_i in 0..num_snapshots {
+        // Copy existing data (values + optional xmask)
+        expanded.extend_from_slice(&states[snap_i * old_eff..(snap_i + 1) * old_eff]);
+        // Append zeroed arrival section
+        expanded.extend(std::iter::repeat(0u32).take(rio));
+    }
+    expanded
+}
+
+/// Extract arrival times from GPU output buffer with timing arrivals enabled.
+///
+/// Returns a vector of u32 arrival times with the same snapshot/offset
+/// structure as the value states. Each u32 contains a u16 arrival time
+/// in picoseconds (stored in the low 16 bits).
+pub fn split_arrival_states(
+    gpu_states: &[u32],
+    script: &FlattenedScriptV1,
+) -> Vec<u32> {
+    let eff = script.effective_state_size() as usize;
+    let rio = script.reg_io_state_size as usize;
+    let arrival_offset = script.arrival_state_offset as usize;
+    let num_snapshots = gpu_states.len() / eff;
+    assert_eq!(gpu_states.len(), num_snapshots * eff);
+
+    let mut arrivals = Vec::with_capacity(num_snapshots * rio);
+    for snap_i in 0..num_snapshots {
+        let base = snap_i * eff + arrival_offset;
+        arrivals.extend_from_slice(&gpu_states[base..base + rio]);
+    }
+    arrivals
+}
+
 // ── VCD output writing ──────────────────────────────────────────────────────
 
 /// Information needed to write output VCD.
@@ -656,6 +708,208 @@ fn write_output_vcd_impl(
     }
 }
 
+/// Write simulation results to output VCD with timing-accurate timestamps.
+///
+/// Instead of placing all output transitions at clock edges, each signal's
+/// transition is offset by its arrival time (in picoseconds) from the GPU
+/// kernel's arrival sideband.
+///
+/// `arrival_states` has the same snapshot/offset layout as `states`.
+/// Each u32 word contains a u16 arrival time in picoseconds (low 16 bits).
+/// `timescale` is the VCD timescale (ratio, unit) for converting ps to VCD time.
+pub fn write_output_vcd_timed<W: std::io::Write>(
+    writer: &mut vcd_ng::Writer<W>,
+    output_mapping: &OutputVCDMapping,
+    offsets_timestamps: &[(usize, u64)],
+    states: &[u32],
+    xmask_states: Option<&[u32]>,
+    arrival_states: &[u32],
+    timescale: Option<(u32, vcd_ng::TimescaleUnit)>,
+) {
+    use vcd_ng::Value;
+
+    clilog::info!("write out timed vcd");
+
+    // Compute how many picoseconds each VCD time unit represents.
+    // E.g., timescale=(1, PS) → 1 ps/unit, (1, NS) → 1000 ps/unit.
+    let ps_per_vcd_unit: f64 = match timescale {
+        Some((ratio, unit)) => {
+            // divisor: units-per-second. PS=1e12, NS=1e9.
+            // ps_per_vcd_unit = ratio * (PS_divisor / unit_divisor)
+            let ps_divisor = vcd_ng::TimescaleUnit::PS.divisor() as f64;
+            let unit_divisor = unit.divisor() as f64;
+            (ratio as f64) * (ps_divisor / unit_divisor)
+        }
+        None => 1.0, // Assume 1ps if no timescale
+    };
+
+    // Collect transitions: (actual_timestamp, output_index, value, is_x)
+    let mut last_val = vec![2u32; output_mapping.out2vcd.len()]; // 2 = initial
+    let mut timed_transitions: Vec<(u64, usize, u32, bool)> = Vec::new();
+    let mut x_output_count = 0u64;
+
+    for &(offset, timestamp) in offsets_timestamps {
+        if timestamp == u64::MAX {
+            continue;
+        }
+
+        for (i, &(output_aigpin, output_pos, _vid)) in output_mapping.out2vcd.iter().enumerate() {
+            let (value_new, is_x) = match output_pos {
+                u32::MAX => {
+                    assert!(output_aigpin <= 1);
+                    (output_aigpin as u32, false)
+                }
+                output_pos => {
+                    let v = states[offset + (output_pos >> 5) as usize] >> (output_pos & 31) & 1;
+                    let x = xmask_states
+                        .map(|xm| xm[offset + (output_pos >> 5) as usize] >> (output_pos & 31) & 1 != 0)
+                        .unwrap_or(false);
+                    (v, x)
+                }
+            };
+
+            let encoded = if is_x { 3 } else { value_new };
+            if encoded == last_val[i] {
+                continue;
+            }
+            last_val[i] = encoded;
+            if is_x {
+                x_output_count += 1;
+            }
+
+            // Get arrival time for this output position.
+            // Arrivals are stored one u32 per word position (same indexing as values).
+            // Each u32 word in the arrival section holds a u16 arrival in the low bits,
+            // shared by all 32 output bits packed in the corresponding value word.
+            let arrival_ps = if output_pos != u32::MAX {
+                let word_idx = (output_pos >> 5) as usize;
+                (arrival_states[offset + word_idx] & 0xFFFF) as u64
+            } else {
+                0u64
+            };
+
+            // Convert arrival_ps to VCD time units and add to base timestamp
+            let arrival_vcd_units = if ps_per_vcd_unit > 0.0 {
+                (arrival_ps as f64 / ps_per_vcd_unit).round() as u64
+            } else {
+                0
+            };
+            let actual_timestamp = timestamp + arrival_vcd_units;
+
+            timed_transitions.push((actual_timestamp, i, value_new, is_x));
+        }
+    }
+
+    // Sort by timestamp (stable sort preserves signal order within same timestamp)
+    timed_transitions.sort_by_key(|&(ts, _, _, _)| ts);
+
+    // Write sorted transitions
+    let mut current_timestamp = u64::MAX;
+    for &(ts, i, value_new, is_x) in &timed_transitions {
+        if ts != current_timestamp {
+            writer.timestamp(ts).unwrap();
+            current_timestamp = ts;
+        }
+        let (_, _, vid) = output_mapping.out2vcd[i];
+        writer
+            .change_scalar(
+                vid,
+                match (is_x, value_new) {
+                    (true, _) => Value::X,
+                    (false, 1) => Value::V1,
+                    _ => Value::V0,
+                },
+            )
+            .unwrap();
+    }
+
+    clilog::info!(
+        "Timed VCD: {} transitions written",
+        timed_transitions.len()
+    );
+    if x_output_count > 0 {
+        clilog::warn!(
+            "VCD output contains {} X-value transitions across all signals",
+            x_output_count
+        );
+    }
+}
+
+// ── Stimulus VCD (for cosim primary input capture) ──────────────────────────
+
+/// Mapping of primary input signals to VCD variable IDs for stimulus VCD output.
+pub struct StimulusVCDMapping {
+    /// (state_bit_pos, vcd_variable_id, is_clock_pin)
+    pub signals: Vec<(u32, vcd_ng::IdCode, bool)>,
+    /// Clock period in picoseconds (for timestamp generation).
+    pub clock_period_ps: u64,
+}
+
+/// Set up a stimulus VCD writer: register all primary input signals and build mapping.
+///
+/// Iterates all `DriverType::InputPort` entries in the AIG to find every primary
+/// input signal. Clock pins are identified via `aig.clock_pin2aigpins`.
+/// Internal clock flag signals (`DriverType::InputClockFlag`) are excluded since
+/// they are AIG-internal and not real ports.
+pub fn setup_stimulus_vcd(
+    writer: &mut vcd_ng::Writer<std::io::BufWriter<std::fs::File>>,
+    netlistdb: &NetlistDB,
+    aig: &AIG,
+    script: &FlattenedScriptV1,
+    clock_period_ps: u64,
+) -> StimulusVCDMapping {
+    use vcd_ng::SimulationCommand;
+
+    writer.timescale(1, vcd_ng::TimescaleUnit::PS).unwrap();
+    writer.add_module("top").unwrap();
+
+    let mut signals = Vec::new();
+
+    for (aigpin_idx, driv) in aig.drivers.iter().enumerate() {
+        if let DriverType::InputPort(pinid) = driv {
+            if let Some(&pos) = script.input_map.get(&aigpin_idx) {
+                let pn = &netlistdb.pinnames[*pinid];
+                let base_name = pn.pin_type();
+                let index = pn
+                    .bus_id()
+                    .map(|i| vcd_ng::ReferenceIndex::BitSelect(i as i32));
+                let is_clock = aig.clock_pin2aigpins.contains_key(pinid);
+                let vid = writer
+                    .add_var(vcd_ng::VarType::Wire, 1, base_name, index)
+                    .unwrap();
+                signals.push((pos, vid, is_clock));
+                clilog::debug!(
+                    "stimulus VCD: pin '{}' pos={} clock={}",
+                    pn.dbg_fmt_pin(),
+                    pos,
+                    is_clock
+                );
+            }
+        }
+    }
+
+    writer.upscope().unwrap();
+    writer.enddefinitions().unwrap();
+    writer.begin(SimulationCommand::Dumpvars).unwrap();
+
+    // Write initial values (all 0)
+    for &(_, vid, _) in &signals {
+        writer.change_scalar(vid, vcd_ng::Value::V0).unwrap();
+    }
+    writer.end().unwrap();
+
+    clilog::info!(
+        "Stimulus VCD: {} primary input signals registered (clock_period={}ps)",
+        signals.len(),
+        clock_period_ps
+    );
+
+    StimulusVCDMapping {
+        signals,
+        clock_period_ps,
+    }
+}
+
 #[cfg(test)]
 mod xprop_tests {
     use super::*;
@@ -701,6 +955,8 @@ mod xprop_tests {
             xprop_enabled: true,
             partition_x_capable: Vec::new(),
             xprop_state_offset: rio,
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
         }
     }
 
@@ -822,5 +1078,340 @@ mod xprop_tests {
 
         // Word 3: no inputs → all 0xFFFFFFFF
         assert_eq!(xmask[3], 0xFFFF_FFFF, "word 3: no inputs, all X");
+    }
+}
+
+#[cfg(test)]
+mod timing_arrival_tests {
+    use super::*;
+    use crate::flatten::FlattenedScriptV1;
+    use indexmap::IndexMap;
+
+    /// Build a minimal FlattenedScriptV1 for timing arrival tests.
+    fn make_timing_script(rio: u32, xprop: bool, arrivals: bool) -> FlattenedScriptV1 {
+        let mut script = FlattenedScriptV1 {
+            num_blocks: 0,
+            num_major_stages: 0,
+            blocks_start: Vec::<usize>::new().into(),
+            blocks_data: Vec::<u32>::new().into(),
+            reg_io_state_size: rio,
+            sram_storage_size: 0,
+            input_layout: Vec::new(),
+            output_map: IndexMap::new(),
+            input_map: IndexMap::new(),
+            stages_blocks_parts: Vec::new(),
+            assertion_positions: Vec::new(),
+            display_positions: Vec::new(),
+            gate_delays: Vec::new(),
+            dff_constraints: Vec::new(),
+            clock_period_ps: 10000,
+            timing_enabled: arrivals, // must be true to enable arrivals
+            delay_patch_map: Vec::new(),
+            xprop_enabled: xprop,
+            partition_x_capable: Vec::new(),
+            xprop_state_offset: if xprop { rio } else { 0 },
+            timing_arrivals_enabled: false,
+            arrival_state_offset: 0,
+        };
+        if arrivals {
+            script.enable_timing_arrivals();
+        }
+        script
+    }
+
+    #[test]
+    fn test_expand_arrivals_no_xprop() {
+        let script = make_timing_script(3, false, true);
+        // 2 snapshots, values only (rio=3 words each)
+        let states: Vec<u32> = vec![10, 20, 30, 40, 50, 60];
+        // Before arrival expansion, the states have rio-size snapshots
+        // But with arrivals enabled, effective_state_size is 2*rio.
+        // expand_states_for_arrivals takes the pre-arrival buffer.
+        // We need to pass the *pre-arrival* effective size.
+        // Actually — expand_states_for_arrivals computes old_eff from xprop_enabled.
+        // With xprop=false, old_eff = rio = 3.
+        let expanded = expand_states_for_arrivals(&states, &script);
+        // new_eff = old_eff + rio = 6. 2 snapshots * 6 = 12 words.
+        assert_eq!(expanded.len(), 12);
+        // Snap 0: [10, 20, 30, 0, 0, 0]
+        assert_eq!(&expanded[0..3], &[10, 20, 30]);
+        assert_eq!(&expanded[3..6], &[0, 0, 0]); // arrival section zeroed
+        // Snap 1: [40, 50, 60, 0, 0, 0]
+        assert_eq!(&expanded[6..9], &[40, 50, 60]);
+        assert_eq!(&expanded[9..12], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_expand_arrivals_with_xprop() {
+        let script = make_timing_script(2, true, true);
+        // 2 snapshots, xprop already expanded (eff = 2*rio = 4 words/snap)
+        let states: Vec<u32> = vec![
+            1, 2, 0xFF, 0xFF, // snap 0: values + xmask
+            3, 4, 0xAA, 0xBB, // snap 1: values + xmask
+        ];
+        let expanded = expand_states_for_arrivals(&states, &script);
+        // new_eff = 4 + 2 = 6. 2 snapshots * 6 = 12 words.
+        assert_eq!(expanded.len(), 12);
+        assert_eq!(&expanded[0..4], &[1, 2, 0xFF, 0xFF]); // values + xmask
+        assert_eq!(&expanded[4..6], &[0, 0]); // arrival section
+        assert_eq!(&expanded[6..10], &[3, 4, 0xAA, 0xBB]);
+        assert_eq!(&expanded[10..12], &[0, 0]);
+    }
+
+    #[test]
+    fn test_split_arrival_states_no_xprop() {
+        let script = make_timing_script(2, false, true);
+        assert_eq!(script.effective_state_size(), 4); // 2*rio
+        assert_eq!(script.arrival_state_offset, 2);
+        // 2 snapshots with arrival data
+        let gpu_states: Vec<u32> = vec![
+            10, 20, 350, 0, // snap 0: values=[10,20], arrivals=[350, 0]
+            30, 40, 500, 100, // snap 1: values=[30,40], arrivals=[500, 100]
+        ];
+        let arrivals = split_arrival_states(&gpu_states, &script);
+        assert_eq!(arrivals.len(), 4); // 2 snapshots * rio=2
+        assert_eq!(arrivals[0], 350);
+        assert_eq!(arrivals[1], 0);
+        assert_eq!(arrivals[2], 500);
+        assert_eq!(arrivals[3], 100);
+    }
+
+    #[test]
+    fn test_split_arrival_states_with_xprop() {
+        let script = make_timing_script(2, true, true);
+        assert_eq!(script.effective_state_size(), 6); // 3*rio
+        assert_eq!(script.arrival_state_offset, 4); // 2*rio
+        // 1 snapshot: [values, xmask, arrivals]
+        let gpu_states: Vec<u32> = vec![
+            10, 20, // values
+            0xFF, 0xFF, // xmask
+            350, 885, // arrivals
+        ];
+        let arrivals = split_arrival_states(&gpu_states, &script);
+        assert_eq!(arrivals.len(), 2);
+        assert_eq!(arrivals[0], 350);
+        assert_eq!(arrivals[1], 885);
+    }
+
+    #[test]
+    fn test_expand_split_arrivals_roundtrip() {
+        let script = make_timing_script(3, false, true);
+        // Start with simple value states
+        let value_states: Vec<u32> = vec![1, 2, 3, 4, 5, 6]; // 2 snapshots
+        let expanded = expand_states_for_arrivals(&value_states, &script);
+        // Arrivals are all zero after expansion
+        let arrivals = split_arrival_states(&expanded, &script);
+        assert!(arrivals.iter().all(|&a| a == 0), "fresh arrivals should be zero");
+        // Values are preserved
+        let eff = script.effective_state_size() as usize;
+        let rio = script.reg_io_state_size as usize;
+        for snap in 0..2 {
+            assert_eq!(
+                &expanded[snap * eff..snap * eff + rio],
+                &value_states[snap * rio..(snap + 1) * rio]
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_output_vcd_timed_basic() {
+        // Set up a minimal output VCD scenario with known arrivals.
+        // 2 output signals at word positions 0 and 1.
+        // Cycle 0 → cycle 1: both flip, with arrival 350ps and 885ps.
+        // VCD timescale = 1ps, so arrival directly maps to VCD units.
+        use std::io::BufWriter;
+
+        let rio = 2u32;
+        let script = make_timing_script(rio, false, true);
+
+        // Create output mapping: 2 signals, bit positions 0 and 32
+        let out2vcd = vec![
+            (2, 0u32, vcd_ng::IdCode(0)),  // signal A at bit 0 (word 0)
+            (4, 32u32, vcd_ng::IdCode(1)),  // signal B at bit 32 (word 1)
+        ];
+        let output_mapping = OutputVCDMapping { out2vcd };
+
+        // 2 snapshots: rio=2 words each (just values, no xprop)
+        // offsets are into value-only buffer
+        let offsets_timestamps: Vec<(usize, u64)> = vec![
+            (0, 0),      // cycle 0 at t=0
+            (2, 10000),   // cycle 1 at t=10000ps (clock edge)
+        ];
+        // State values: snap 0 all zeros, snap 1 both bits set
+        let states: Vec<u32> = vec![
+            0x0000_0000, 0x0000_0000, // snap 0: A=0, B=0
+            0x0000_0001, 0x0000_0001, // snap 1: A=1, B=1
+        ];
+        // Arrival times: snap 0 all zero, snap 1 has 350ps for word 0, 885ps for word 1
+        let arrival_states: Vec<u32> = vec![
+            0, 0,     // snap 0
+            350, 885, // snap 1: A arrives at 350ps, B arrives at 885ps
+        ];
+
+        // Write to in-memory buffer
+        let mut buf = Vec::new();
+        {
+            let bufwriter = BufWriter::new(&mut buf);
+            let mut writer = vcd_ng::Writer::new(bufwriter);
+
+            writer.timescale(1, vcd_ng::TimescaleUnit::PS).unwrap();
+            writer.add_module("test").unwrap();
+            writer.add_wire(1, "A").unwrap();
+            writer.add_wire(1, "B").unwrap();
+            writer.upscope().unwrap();
+            writer.enddefinitions().unwrap();
+            writer
+                .begin(vcd_ng::SimulationCommand::Dumpvars)
+                .unwrap();
+
+            write_output_vcd_timed(
+                &mut writer,
+                &output_mapping,
+                &offsets_timestamps,
+                &states,
+                None,
+                &arrival_states,
+                Some((1, vcd_ng::TimescaleUnit::PS)),
+            );
+            // drop writer+bufwriter to flush
+        }
+
+        let vcd_output = String::from_utf8(buf).unwrap();
+
+        // Verify the output contains transitions at the correct offset timestamps:
+        // A flips at 10000 + 350 = 10350ps
+        // B flips at 10000 + 885 = 10885ps
+        // A should come before B (sorted by timestamp)
+        assert!(
+            vcd_output.contains("#10350"),
+            "expected timestamp 10350 for signal A, got:\n{}",
+            vcd_output
+        );
+        assert!(
+            vcd_output.contains("#10885"),
+            "expected timestamp 10885 for signal B, got:\n{}",
+            vcd_output
+        );
+        // Initial values at t=0
+        assert!(vcd_output.contains("#0"), "expected initial timestamp 0");
+
+        // Verify ordering: 10350 before 10885 in the output
+        let pos_a = vcd_output.find("#10350").unwrap();
+        let pos_b = vcd_output.find("#10885").unwrap();
+        assert!(
+            pos_a < pos_b,
+            "signal A (350ps arrival) should appear before B (885ps arrival)"
+        );
+    }
+
+    #[test]
+    fn test_write_output_vcd_timed_ns_timescale() {
+        // With timescale=1ns, arrival of 500ps should add 1 VCD unit
+        // (500ps / 1000 ps_per_ns = 0.5, rounded to 1)
+        use std::io::BufWriter;
+
+        let rio = 1u32;
+        let script = make_timing_script(rio, false, true);
+
+        let out2vcd = vec![
+            (2, 0u32, vcd_ng::IdCode(0)),
+        ];
+        let output_mapping = OutputVCDMapping { out2vcd };
+
+        let offsets_timestamps: Vec<(usize, u64)> = vec![
+            (0, 0),
+            (1, 10), // 10ns clock edge
+        ];
+        let states: Vec<u32> = vec![0, 1]; // bit 0 flips
+        let arrival_states: Vec<u32> = vec![0, 500]; // 500ps arrival
+
+        let mut buf = Vec::new();
+        {
+            let bufwriter = BufWriter::new(&mut buf);
+            let mut writer = vcd_ng::Writer::new(bufwriter);
+            writer.timescale(1, vcd_ng::TimescaleUnit::NS).unwrap();
+            writer.add_module("test").unwrap();
+            writer.add_wire(1, "A").unwrap();
+            writer.upscope().unwrap();
+            writer.enddefinitions().unwrap();
+            writer
+                .begin(vcd_ng::SimulationCommand::Dumpvars)
+                .unwrap();
+
+            write_output_vcd_timed(
+                &mut writer,
+                &output_mapping,
+                &offsets_timestamps,
+                &states,
+                None,
+                &arrival_states,
+                Some((1, vcd_ng::TimescaleUnit::NS)),
+            );
+            // drop writer+bufwriter to flush
+        }
+
+        let vcd_output = String::from_utf8(buf).unwrap();
+
+        // 500ps / 1000 ps_per_ns = 0.5, rounds to 1 → timestamp = 10 + 1 = 11
+        assert!(
+            vcd_output.contains("#11"),
+            "500ps arrival at 1ns timescale should produce t=11, got:\n{}",
+            vcd_output
+        );
+    }
+
+    #[test]
+    fn test_write_output_vcd_timed_zero_arrival() {
+        // Arrival = 0 means transition at clock edge (no offset)
+        use std::io::BufWriter;
+
+        let rio = 1u32;
+        let script = make_timing_script(rio, false, true);
+
+        let out2vcd = vec![
+            (2, 0u32, vcd_ng::IdCode(0)),
+        ];
+        let output_mapping = OutputVCDMapping { out2vcd };
+
+        let offsets_timestamps: Vec<(usize, u64)> = vec![
+            (0, 0),
+            (1, 5000),
+        ];
+        let states: Vec<u32> = vec![0, 1];
+        let arrival_states: Vec<u32> = vec![0, 0]; // zero arrival
+
+        let mut buf = Vec::new();
+        {
+            let bufwriter = BufWriter::new(&mut buf);
+            let mut writer = vcd_ng::Writer::new(bufwriter);
+            writer.timescale(1, vcd_ng::TimescaleUnit::PS).unwrap();
+            writer.add_module("test").unwrap();
+            writer.add_wire(1, "A").unwrap();
+            writer.upscope().unwrap();
+            writer.enddefinitions().unwrap();
+            writer
+                .begin(vcd_ng::SimulationCommand::Dumpvars)
+                .unwrap();
+
+            write_output_vcd_timed(
+                &mut writer,
+                &output_mapping,
+                &offsets_timestamps,
+                &states,
+                None,
+                &arrival_states,
+                Some((1, vcd_ng::TimescaleUnit::PS)),
+            );
+            // drop writer+bufwriter to flush
+        }
+
+        let vcd_output = String::from_utf8(buf).unwrap();
+
+        // Zero arrival → transition at clock edge = 5000ps
+        assert!(
+            vcd_output.contains("#5000"),
+            "zero arrival should place transition at clock edge, got:\n{}",
+            vcd_output
+        );
     }
 }
