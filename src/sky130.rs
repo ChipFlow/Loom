@@ -56,8 +56,8 @@ impl LeafPinProvider for SKY130LeafPins {
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // Delay gate: A -> X
-            t if t.starts_with("dlygate") => match pin {
+            // Delay gate/metal delay: A -> X
+            t if t.starts_with("dlygate") || t.starts_with("dlymetal") => match pin {
                 "A" => Direction::I,
                 "X" => Direction::O,
                 _ => unknown_pin(macro_name, pin_name),
@@ -447,8 +447,8 @@ impl LeafPinProvider for SKY130LeafPins {
                 _ => unknown_pin(macro_name, pin_name),
             },
 
-            // Filler/tap/decap cells - no functional pins
-            t if t.starts_with("fill") || t.starts_with("tap") || t.starts_with("decap") => {
+            // Filler/tap/decap/diode cells - no functional pins
+            t if t.starts_with("fill") || t.starts_with("tap") || t.starts_with("decap") || t.starts_with("diode") => {
                 // These cells have no functional pins, but may have power pins
                 // which we treat as inputs (though they're typically not connected in logic)
                 Direction::I
